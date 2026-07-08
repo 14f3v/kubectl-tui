@@ -187,19 +187,36 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		return p, p.editAction()
 	case key.Matches(k, keyPortFwd):
 		return p, p.portForwardAction()
-	case isPendingAction(k):
-		// Handlers wired in later phases; acknowledge so the binding is discoverable.
-		if _, ok := p.table.Selected(); ok {
-			return p, func() tea.Msg {
-				return msg.Toast{Text: k.String() + ": coming soon", Level: msg.LevelInfo}
-			}
-		}
+	case key.Matches(k, keyEnter):
+		return p, p.enterAction()
 	}
 	return p, nil
 }
 
-func isPendingAction(k tea.KeyPressMsg) bool {
-	return key.Matches(k, keyEnter)
+// enterAction drills into a pod's containers. For other kinds enter is a no-op
+// for now (their detail views can be added later).
+func (p *resourcePage) enterAction() tea.Cmd {
+	if p.kind != "pods" {
+		return nil
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	vs := p.sess.Session.Engine.Get("pods")
+	if vs == nil {
+		return nil
+	}
+	obj, ok := vs.Get(row.Namespace, row.Name)
+	if !ok {
+		return toast(row.Name+" is no longer in the cache", msg.LevelWarn)
+	}
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+	page := newContainersPage(p.sess.Session, p.theme, pod)
+	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
 // portForwardAction forwards the selected pod's declared container ports to

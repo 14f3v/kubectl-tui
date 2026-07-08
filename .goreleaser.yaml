@@ -1,0 +1,50 @@
+# goreleaser configuration for kubetui.
+# Build locally with: goreleaser build --snapshot --clean
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: kubetui
+    main: ./cmd/kubetui
+    binary: kubetui
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: kubetui
+    formats: [tar.gz]
+    name_template: "kubetui_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+      - docs/*
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# Uncomment and set the tap repo to publish a Homebrew formula on release.
+# brews:
+#   - repository:
+#       owner: khemphetsouvannaphasy
+#       name: homebrew-tap
+#     homepage: "https://github.com/khemphetsouvannaphasy/kubectl-tui"
+#     description: "A terminal UI for managing and monitoring Kubernetes clusters"
+#     license: "TBD"

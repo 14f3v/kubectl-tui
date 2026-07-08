@@ -8,7 +8,10 @@ a `:`-command line, streams live watch updates, and runs the usual pod actions
 (describe, logs, exec shell, edit, delete, port-forward). It also renders a
 [Capsule](https://projectcapsule.dev/) multi-tenancy dashboard when the operator is installed.
 
-> Status: **early development.** See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and phase plan.
+> Status: **v1 feature-complete** — read/inspect/mutate across the core kinds, metrics, and
+> Capsule tenants are implemented and unit-tested. The cluster-dependent action paths
+> (exec, logs, port-forward, edit) are exercised by the `hack/` risk spikes and should be
+> validated against your own cluster. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Highlights
 
@@ -39,15 +42,22 @@ go build -o kubetui ./cmd/kubetui
 
 | Key | Action |
 |-----|--------|
-| `:` | command line (`:pods`, `:deploy`, `:svc`, `:nodes`, `:ns`, `:events`, `:tenants`, `:ctx`, `:pf`, `:q`) |
-| `/` | filter rows (`/regex…` for regex, `!term` to invert) |
-| `j`/`k`, `↑`/`↓` | move the cursor |
-| `enter` | drill in (pod → containers) |
-| `d` `l` `s` `y` `e` | describe · logs · shell · yaml · edit |
-| `ctrl-d` / `ctrl-k` | delete · kill (force) |
-| `p` | port-forward |
-| `0`–`9` | jump to a namespace |
+| `:` | command line — `:pods` `:deploy` `:svc` `:nodes` `:ns` `:events` `:tenants` `:pf`; `:ctx <name>` switch context; `:q` quit |
+| `/` | filter rows (`!term` to invert) |
+| `j`/`k`, `↑`/`↓`, `g`/`G` | move the cursor / top / bottom |
+| `enter` | drill in (pod → containers → logs/shell) |
+| `d` `y` | describe · yaml (scrollable, `/` to search) |
+| `l` `s` | logs (follow, `f` to pause) · shell (interactive) |
+| `e` | edit in `$EDITOR`, applied with server-side apply |
+| `ctrl-d` / `ctrl-k` | delete · kill (force); both confirm |
+| `p` | port-forward the pod's container ports (see `:pf`) |
+| `0`–`9` | jump to a namespace (`0` = all, `1`–`9` = favorites) |
 | `?` | help · `esc` back · `q` quit |
+
+The header shows cluster CPU/MEM gauges and per-pod CPU/MEM columns when
+`metrics-server` is present, and hides them otherwise. `:tenants` renders a
+[Capsule](https://projectcapsule.dev/) dashboard (tier, quota bars, owner, status)
+when the operator is installed.
 
 ## Configuration
 

@@ -241,8 +241,14 @@ func pad(s string, w int) string {
 }
 
 func trunc(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
 	if len(s) <= w {
 		return s
+	}
+	if w == 1 {
+		return "…"
 	}
 	return s[:w-1] + "…"
 }
