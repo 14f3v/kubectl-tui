@@ -7,7 +7,9 @@ package k8s
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -124,14 +126,25 @@ func (s *Session) Dispose() {
 	s.cancel()
 }
 
-// RefreshServerVersion queries discovery for the cluster's Kubernetes version and
-// updates Identity. Best-effort; safe to ignore the error.
+// RefreshServerVersion queries /version for the cluster's Kubernetes version and
+// updates Identity. It is bounded by an 8s timeout so an unreachable cluster
+// cannot stall startup indefinitely (client-go's ServerVersion() takes no
+// context). Best-effort; safe to ignore the error. Must be called before the
+// Session is handed to the UI so the Identity write is not raced by rendering.
 func (s *Session) RefreshServerVersion() error {
-	v, err := s.Disco.ServerVersion()
+	ctx, cancel := context.WithTimeout(s.ctx, 8*time.Second)
+	defer cancel()
+	body, err := s.Disco.RESTClient().Get().AbsPath("/version").Do(ctx).Raw()
 	if err != nil {
 		return err
 	}
-	s.Identity.K8sVersion = v.GitVersion
+	var info struct {
+		GitVersion string `json:"gitVersion"`
+	}
+	if err := json.Unmarshal(body, &info); err != nil {
+		return err
+	}
+	s.Identity.K8sVersion = info.GitVersion
 	return nil
 }
 

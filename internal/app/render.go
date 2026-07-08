@@ -54,7 +54,9 @@ func (m *Model) render() string {
 	case m.fatal != nil:
 		return m.renderFatal()
 	case m.booting || m.sess == nil:
-		return m.renderCentered("connecting to cluster…", m.theme.Dim)
+		body := m.theme.Base.Render("connecting to cluster…") + "\n\n" +
+			m.theme.Faint.Render("press q to cancel")
+		return m.renderCentered(body, m.theme.Dim)
 	}
 
 	cmd := m.renderCommandBar()

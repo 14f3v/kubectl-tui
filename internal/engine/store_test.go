@@ -122,9 +122,10 @@ func TestViewStore_ReadyPath(t *testing.T) {
 		return s.Phase == PhaseReady && len(s.Rows) == 3
 	}, 3*time.Second)
 
-	if c.count() == 0 {
-		t.Fatal("sink never received a snapshot")
-	}
+	// The first snapshot is delivered asynchronously by the coalescer loop (Start
+	// no longer flushes synchronously), so wait for the sink rather than checking
+	// it immediately.
+	waitFor(t, func() bool { return c.count() > 0 }, 2*time.Second)
 }
 
 // Stale-not-cleared: a transient watch error marks the view stale but keeps the
@@ -235,6 +236,33 @@ func TestViewStore_Coalesces(t *testing.T) {
 	}
 	if p, ok := c.lastPhase(); !ok || p != PhaseReady {
 		t.Fatalf("last emitted phase = %v (ok=%v), want ready", p, ok)
+	}
+}
+
+// Regression guard: Start is called from a page's OnEnter, which runs inside the
+// Bubble Tea Update loop. A synchronous sink send there blocks on the program's
+// unbuffered channel and deadlocks the whole UI (froze at "connecting"). Start
+// must only emit snapshots asynchronously from the coalescer loop.
+func TestStartDoesNotFlushSynchronously(t *testing.T) {
+	c := &collector{}
+	vs := NewViewStore("pods", &cache.ListWatch{}, &corev1.Pod{}, columns.For("pods"), c.sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	vs.Start(ctx)
+	defer vs.Stop()
+	if n := c.count(); n != 0 {
+		t.Fatalf("Start sent %d snapshots synchronously; must be async only (deadlock risk)", n)
+	}
+}
+
+// Regression guard: ResumeAndFlush runs from Update (after a terminal handoff) and
+// must not send synchronously either.
+func TestResumeAndFlushIsAsync(t *testing.T) {
+	c := &collector{}
+	vs := NewViewStore("pods", &cache.ListWatch{}, &corev1.Pod{}, columns.For("pods"), c.sink)
+	vs.ResumeAndFlush()
+	if n := c.count(); n != 0 {
+		t.Fatalf("ResumeAndFlush sent %d snapshots synchronously; must only mark dirty", n)
 	}
 }
 

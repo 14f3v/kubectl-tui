@@ -76,14 +76,18 @@ func (vs *ViewStore) Kind() string { return vs.kind }
 func (vs *ViewStore) SetViewID(id uint64) { vs.viewID.Store(id) }
 
 // Start runs the informer and the coalescer. It is idempotent.
+//
+// It must NOT flush synchronously: Start is called from a page's OnEnter, which
+// runs inside the Bubble Tea Update loop, and the sink (program.Send) blocks on
+// an unbuffered channel until Update returns — flushing here self-deadlocks the
+// UI. The page paints immediately by reading Snapshot() directly in OnEnter; the
+// coalescer loop delivers the first sink-driven snapshot once the cache syncs.
 func (vs *ViewStore) Start(ctx context.Context) {
 	if !vs.started.CompareAndSwap(false, true) {
 		return
 	}
 	go vs.informer.Run(vs.stopCh)
 	go vs.loop(ctx)
-	// Emit an immediate Loading snapshot so the view paints without waiting a tick.
-	vs.flush()
 }
 
 // Stop halts the informer and the coalescer. The informer's cache is left intact
@@ -96,11 +100,13 @@ func (vs *ViewStore) Stop() {
 // terminal). Watch events still accumulate in the informer cache.
 func (vs *ViewStore) Pause() { vs.paused.Store(true) }
 
-// ResumeAndFlush re-enables emission and pushes one fresh snapshot immediately.
+// ResumeAndFlush re-enables emission and marks the store dirty so the coalescer
+// loop pushes a fresh snapshot on its next tick. It does not flush synchronously:
+// it is called from Update (after a terminal handoff), where a sink send would
+// block on the unbuffered program channel and deadlock the UI.
 func (vs *ViewStore) ResumeAndFlush() {
 	vs.paused.Store(false)
 	vs.dirty.Store(true)
-	vs.flush()
 }
 
 // heartbeat forces a re-flush at least this often so the AGE column and the

@@ -214,8 +214,12 @@ func (m *Manager) List() []Info {
 	return out
 }
 
+// notify triggers a repaint of the :pf view. It dispatches on a goroutine because
+// several callers (Start/Stop/Remove) run inside the Bubble Tea Update loop, where
+// a direct sink send would block on the program's unbuffered channel and deadlock
+// the UI. PFChanged is an idempotent repaint signal, so async delivery is safe.
 func (m *Manager) notify() {
 	if m.sink != nil {
-		m.sink(msg.PFChanged{})
+		go m.sink(msg.PFChanged{})
 	}
 }
