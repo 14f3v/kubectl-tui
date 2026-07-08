@@ -292,6 +292,7 @@ func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 		Theme:     m.theme,
 		Namespace: namespace,
 		ReadOnly:  m.cfg.Config.ReadOnly,
+		TierLabel: m.cfg.Config.TierLabel,
 	})
 	if !ok {
 		return m, func() tea.Msg {

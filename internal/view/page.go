@@ -34,6 +34,7 @@ type Deps struct {
 	Theme     style.Theme
 	Namespace string
 	ReadOnly  bool
+	TierLabel string // tenant label key for the TIER column
 }
 
 // Page is a routed sub-model. The root calls OnEnter when it becomes active and
