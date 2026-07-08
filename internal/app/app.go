@@ -9,7 +9,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -501,16 +500,17 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		buf := m.inputBuf
 		mode := m.mode
-		sel := m.cmdSel
+		// Resolve the highlighted palette command BEFORE clearing the buffer, since
+		// selectedCommand() filters by m.inputBuf.
+		selected, hasSel := "", false
+		if mode == modeCommand {
+			selected, hasSel = m.selectedCommand()
+		}
 		m.mode = modeNone
 		m.inputBuf = ""
 		if mode == modeCommand {
-			// An argument form (has a space) runs the raw buffer; otherwise run the
-			// highlighted palette command.
-			if !strings.Contains(buf, " ") {
-				if matches := m.commandMatches(); len(matches) > 0 && sel < len(matches) {
-					return m.runCommand(matches[sel].Name)
-				}
+			if hasSel {
+				return m.runCommand(selected)
 			}
 			return m.runCommand(buf)
 		}

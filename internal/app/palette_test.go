@@ -72,6 +72,36 @@ func TestCatalogHasAppVerbs(t *testing.T) {
 	}
 }
 
+func TestSelectedCommand(t *testing.T) {
+	// Regression: typing a command then Enter must resolve to that command, not
+	// the first catalog entry. (The bug: the buffer was cleared before filtering.)
+	if name, ok := (&Model{inputBuf: "pods", cmdSel: 0}).selectedCommand(); !ok || name != "pods" {
+		t.Fatalf("typed 'pods' = %q/%v, want pods/true", name, ok)
+	}
+	if name, ok := (&Model{inputBuf: "de", cmdSel: 0}).selectedCommand(); !ok || name != "deployments" {
+		t.Fatalf("typed 'de' = %q/%v, want deployments/true", name, ok)
+	}
+	// Argument form (has a space) runs the raw buffer, not a palette pick.
+	if _, ok := (&Model{inputBuf: "pods kube-system", cmdSel: 0}).selectedCommand(); ok {
+		t.Fatal("argument form should not resolve to a palette command")
+	}
+	// Unknown token: no match; caller parses the raw buffer.
+	if _, ok := (&Model{inputBuf: "zzzz", cmdSel: 0}).selectedCommand(); ok {
+		t.Fatal("unknown token should not resolve to a palette command")
+	}
+	// Cursor path: empty buffer, selection indexes the full catalog.
+	cat := commandCatalog()
+	idx := -1
+	for i, c := range cat {
+		if c.Name == "pods" {
+			idx = i
+		}
+	}
+	if name, ok := (&Model{inputBuf: "", cmdSel: idx}).selectedCommand(); !ok || name != "pods" {
+		t.Fatalf("cursor-selected pods = %q/%v, want pods/true", name, ok)
+	}
+}
+
 func TestRenderPalette(t *testing.T) {
 	m := &Model{theme: style.Default(), mode: modeCommand, inputBuf: "po", cmdSel: 0}
 	out := strings.Join(m.renderPalette(80), "\n")

@@ -73,6 +73,21 @@ func (m *Model) commandMatches() []view.Command {
 	return matchCommands(commandCatalog(), token)
 }
 
+// selectedCommand returns the palette command Enter would run for the current
+// buffer and selection. ok is false when the buffer is an argument form (contains
+// a space) or nothing matches — in those cases the caller parses the raw buffer.
+// It reads m.inputBuf, so it must be called BEFORE the buffer is cleared.
+func (m *Model) selectedCommand() (name string, ok bool) {
+	if strings.Contains(m.inputBuf, " ") {
+		return "", false
+	}
+	matches := m.commandMatches()
+	if m.cmdSel < 0 || m.cmdSel >= len(matches) {
+		return "", false
+	}
+	return matches[m.cmdSel].Name, true
+}
+
 // shortAlias returns the shortest alias distinct from the name, for a compact
 // hint in the palette (e.g. "portforwards (pf)").
 func shortAlias(c view.Command) string {
