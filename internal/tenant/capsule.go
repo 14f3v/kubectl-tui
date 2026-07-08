@@ -13,8 +13,6 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-
-	"github.com/14f3v/kubectl-tui/internal/engine/columns"
 )
 
 // Capsule label keys used to associate ResourceQuotas with a tenant. The newer
@@ -93,29 +91,6 @@ func (c *Capsule) Refresh(ctx context.Context) {
 
 func (c *Capsule) discovery() discovery.DiscoveryInterface {
 	return c.cs.Discovery()
-}
-
-// Summary returns tenant counts for the overview KPI tile: whether Capsule is
-// available, the tenant count, and how many are over quota. It is a synchronous
-// convenience over the same list+aggregate path Refresh uses.
-func (c *Capsule) Summary(ctx context.Context) (available bool, total, overQuota int) {
-	if c.gvr.Resource == "" {
-		if ok, _ := c.Available(c.discovery()); !ok {
-			return false, 0, 0
-		}
-	}
-	tenants, err := c.listTenants(ctx)
-	if err != nil {
-		return false, 0, 0
-	}
-	used := c.aggregateQuotas(ctx)
-	for _, v := range Aggregate(tenants, used) {
-		total++
-		if v.StatusClass == columns.StatusError {
-			overQuota++
-		}
-	}
-	return true, total, overQuota
 }
 
 func (c *Capsule) listTenants(ctx context.Context) ([]Tenant, error) {
