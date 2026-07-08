@@ -40,6 +40,7 @@ const (
 type Config struct {
 	Sink            engine.Sink
 	Config          config.Config
+	KubeconfigPath  string
 	ContextOverride string
 	StartKind       string
 }
@@ -100,13 +101,13 @@ func New(cfg Config) *Model {
 
 // Init requests the session bootstrap.
 func (m *Model) Init() tea.Cmd {
-	return bootstrapCmd(m.sink, m.cfg.ContextOverride)
+	return bootstrapCmd(m.sink, m.cfg.KubeconfigPath, m.cfg.ContextOverride)
 }
 
 // bootstrapCmd builds a Session off the UI goroutine and reports the result.
-func bootstrapCmd(sink engine.Sink, ctxOverride string) tea.Cmd {
+func bootstrapCmd(sink engine.Sink, kubeconfigPath, ctxOverride string) tea.Cmd {
 	return func() tea.Msg {
-		sess, err := k8s.NewSession(context.Background(), ctxOverride, sink)
+		sess, err := k8s.NewSession(context.Background(), kubeconfigPath, ctxOverride, sink)
 		if err != nil {
 			return msg.SessionError{Err: err}
 		}
@@ -327,7 +328,7 @@ func (m *Model) switchContext(name string) (tea.Model, tea.Cmd) {
 	m.mode = modeNone
 	m.inputBuf = ""
 	m.cfg.ContextOverride = name
-	return m, bootstrapCmd(m.sink, name)
+	return m, bootstrapCmd(m.sink, m.cfg.KubeconfigPath, name)
 }
 
 // jumpNamespace switches the active page to a namespace: "0" is all namespaces,

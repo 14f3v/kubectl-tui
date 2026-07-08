@@ -57,11 +57,18 @@ type Session struct {
 	cancel context.CancelFunc
 }
 
-// NewSession loads the kubeconfig (honoring KUBECONFIG merging and the current
-// context, or contextName when non-empty), builds the clients, and registers the
+// NewSession loads the kubeconfig and builds the clients, then registers the
 // engine factories. It does not start any informer; pages start kinds lazily.
-func NewSession(parent context.Context, contextName string, sink engine.Sink) (*Session, error) {
+//
+// Config resolution, in precedence order: an explicit kubeconfigPath (empty to
+// skip) wins; otherwise the KUBECONFIG environment variable (colon-separated
+// files are merged); otherwise ~/.kube/config. contextName overrides the
+// current-context when non-empty.
+func NewSession(parent context.Context, kubeconfigPath, contextName string, sink engine.Sink) (*Session, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfigPath != "" {
+		loadingRules.ExplicitPath = kubeconfigPath
+	}
 	overrides := &clientcmd.ConfigOverrides{}
 	if contextName != "" {
 		overrides.CurrentContext = contextName

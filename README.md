@@ -36,6 +36,27 @@ go build -o kubetui ./cmd/kubetui
 ./kubetui            # uses your current kubeconfig context
 ```
 
+## Selecting a cluster
+
+`kubetui` resolves its kubeconfig the same way `kubectl` does, in precedence order:
+
+```sh
+./kubetui -kubeconfig /path/to/config      # explicit file (highest precedence)
+KUBECONFIG=/path/to/config ./kubetui       # env var (colon-separated files are merged)
+KUBECONFIG=/a/config:/b/config ./kubetui   # merge multiple files
+./kubetui                                  # default: ~/.kube/config
+```
+
+Pick a context within whatever config is loaded (defaults to its current-context),
+and combine with `-kubeconfig`:
+
+```sh
+./kubetui -context prod-us-east-1
+./kubetui -kubeconfig ~/work.kubeconfig -context staging
+```
+
+You can also switch contexts live from inside the TUI with `:ctx <name>`.
+
 ## Usage
 
 `kubetui` opens on the pods view for your current context.

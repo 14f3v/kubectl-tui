@@ -17,6 +17,7 @@ import (
 var version = "dev"
 
 func main() {
+	kubeconfigFlag := flag.String("kubeconfig", "", "path to a kubeconfig file (overrides $KUBECONFIG and ~/.kube/config)")
 	ctxFlag := flag.String("context", "", "kubeconfig context to use (default: current-context)")
 	kindFlag := flag.String("kind", "pods", "initial resource view")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -43,6 +44,7 @@ func main() {
 	model := app.New(app.Config{
 		Sink:            sink,
 		Config:          cfg,
+		KubeconfigPath:  *kubeconfigFlag,
 		ContextOverride: *ctxFlag,
 		StartKind:       *kindFlag,
 	})
