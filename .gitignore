@@ -1,0 +1,25 @@
+# Binaries
+/kubetui
+/dist/
+*.exe
+*.test
+*.out
+
+# Go
+/vendor/
+/bin/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local state / logs
+*.log
+/coverage.txt
+
+# Local kubeconfigs / secrets — never commit
+kubeconfig
+*.kubeconfig
+kubeconfig.yaml

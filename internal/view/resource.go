@@ -1,0 +1,222 @@
+package view
+
+import (
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/key"
+
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/component"
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+)
+
+// resourcePage is the generic table page shared by every core kind. It watches
+// one engine kind, renders a windowed table, and applies a live filter. Kind-
+// specific behavior (extra keys, drill-in) is layered by wrapping this page.
+type resourcePage struct {
+	kind  string
+	title string
+
+	sess  deps
+	theme style.Theme
+	table *component.Table
+
+	viewID    uint64
+	namespace string
+
+	remote  engine.Remote[columns.Row]
+	allRows []columns.Row
+	filter  string
+}
+
+// deps mirrors Deps but lets resourcePage store the session without re-importing.
+type deps = Deps
+
+// newResourcePage builds a generic page for a kind.
+func newResourcePage(kind, title string, d Deps) *resourcePage {
+	tbl := component.NewTable(d.Theme)
+	if proj := columns.For(kind); proj != nil {
+		tbl.SetColumns(proj.Columns())
+	}
+	return &resourcePage{
+		kind:      kind,
+		title:     title,
+		sess:      d,
+		theme:     d.Theme,
+		table:     tbl,
+		namespace: d.Session.Identity.Namespace,
+	}
+}
+
+func (p *resourcePage) Init() tea.Cmd { return nil }
+
+func (p *resourcePage) Title() string     { return p.title }
+func (p *resourcePage) Kind() string      { return p.kind }
+func (p *resourcePage) Namespace() string { return p.namespace }
+func (p *resourcePage) Filter() string    { return p.filter }
+
+func (p *resourcePage) OnEnter() tea.Cmd {
+	vs, err := p.sess.Session.Engine.Ensure(p.kind, p.namespace)
+	if err != nil {
+		return func() tea.Msg { return msg.Toast{Text: err.Error(), Level: msg.LevelError} }
+	}
+	p.viewID = p.sess.Session.Engine.NextViewID()
+	vs.SetViewID(p.viewID)
+	// Paint the current cache immediately; further snapshots arrive via the sink.
+	p.apply(vs.Snapshot())
+	return nil
+}
+
+func (p *resourcePage) OnLeave() {
+	p.sess.Session.Engine.StopIfScreenScoped(p.kind)
+}
+
+func (p *resourcePage) SetFilter(f string) {
+	p.filter = f
+	p.reapplyFilter()
+}
+
+func (p *resourcePage) Summary() Summary {
+	total, ok, warn, errc := statusCounts(p.allRows)
+	return Summary{
+		Total:    total,
+		OK:       ok,
+		Warn:     warn,
+		Err:      errc,
+		Phase:    p.remote.Phase,
+		Error:    p.remote.Err,
+		SyncedAt: p.remote.SyncedAt,
+	}
+}
+
+func (p *resourcePage) Keys() []key.Binding {
+	return []key.Binding{
+		keyEnter, keyDescribe, keyLogs, keyShell, keyYAML,
+		keyEdit, keyDelete, keyKill, keyPortFwd,
+	}
+}
+
+func (p *resourcePage) Update(m tea.Msg) (Page, tea.Cmd) {
+	switch t := m.(type) {
+	case engine.SnapshotMsg:
+		if t.Kind == p.kind && t.ViewID == p.viewID {
+			p.apply(t.Snap)
+		}
+		return p, nil
+	case tea.KeyPressMsg:
+		return p.handleKey(t)
+	}
+	return p, nil
+}
+
+func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
+	switch {
+	case key.Matches(k, keyUp):
+		p.table.MoveUp()
+	case key.Matches(k, keyDown):
+		p.table.MoveDown()
+	case key.Matches(k, keyPageUp):
+		p.table.PageUp()
+	case key.Matches(k, keyPageDown):
+		p.table.PageDown()
+	case key.Matches(k, keyHome):
+		p.table.Home()
+	case key.Matches(k, keyEnd):
+		p.table.End()
+	case isAction(k):
+		// Inspect/mutation handlers are wired in later phases; acknowledge for now
+		// so the keybinding is discoverable.
+		if _, ok := p.table.Selected(); ok {
+			return p, func() tea.Msg {
+				return msg.Toast{Text: k.String() + ": coming soon", Level: msg.LevelInfo}
+			}
+		}
+	}
+	return p, nil
+}
+
+func isAction(k tea.KeyPressMsg) bool {
+	return key.Matches(k, keyEnter, keyDescribe, keyLogs, keyShell, keyYAML,
+		keyEdit, keyDelete, keyKill, keyPortFwd)
+}
+
+func (p *resourcePage) View(width, height int) string {
+	if height < 2 {
+		height = 2
+	}
+	p.table.SetSize(width, height-1) // one line for the column header
+	return p.table.Header() + "\n" + p.table.Body()
+}
+
+// apply stores a new snapshot and refreshes the filtered view.
+func (p *resourcePage) apply(snap engine.Remote[columns.Row]) {
+	p.remote = snap
+	p.allRows = snap.Rows
+	p.reapplyFilter()
+}
+
+func (p *resourcePage) reapplyFilter() {
+	rows := filterRows(p.allRows, p.filter)
+	p.table.SetRows(rows)
+}
+
+// filterRows applies the live filter: case-insensitive substring over the row's
+// name and cell text, with a leading "!" inverting the match.
+func filterRows(rows []columns.Row, filter string) []columns.Row {
+	if filter == "" {
+		return rows
+	}
+	invert := false
+	term := filter
+	if strings.HasPrefix(term, "!") {
+		invert = true
+		term = term[1:]
+	}
+	term = strings.ToLower(term)
+	if term == "" {
+		return rows
+	}
+	out := make([]columns.Row, 0, len(rows))
+	for _, r := range rows {
+		if rowMatches(r, term) != invert {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func rowMatches(r columns.Row, term string) bool {
+	if strings.Contains(strings.ToLower(r.Name), term) {
+		return true
+	}
+	for _, c := range r.Cells {
+		if strings.Contains(strings.ToLower(c.Text), term) {
+			return true
+		}
+	}
+	return false
+}
+
+// statusCounts tallies rows by the class of their status cell, for the header.
+func statusCounts(rows []columns.Row) (total, ok, warn, errc int) {
+	total = len(rows)
+	for _, r := range rows {
+		for _, c := range r.Cells {
+			if c.Role == columns.RoleStatus {
+				switch c.Status {
+				case columns.StatusOK:
+					ok++
+				case columns.StatusWarn:
+					warn++
+				case columns.StatusError:
+					errc++
+				}
+				break
+			}
+		}
+	}
+	return total, ok, warn, errc
+}
