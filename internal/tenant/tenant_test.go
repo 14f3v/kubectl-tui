@@ -3,7 +3,7 @@ package tenant
 import (
 	"testing"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
 )
 
 const (

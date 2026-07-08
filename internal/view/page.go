@@ -11,9 +11,9 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/engine"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
+	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
 // Summary is the data the root chrome needs from the active page: the status

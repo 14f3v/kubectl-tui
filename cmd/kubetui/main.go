@@ -9,8 +9,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/app"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/config"
+	"github.com/14f3v/kubectl-tui/internal/app"
+	"github.com/14f3v/kubectl-tui/internal/config"
 )
 
 // version is stamped at build time: -ldflags "-X main.version=v1.2.3".

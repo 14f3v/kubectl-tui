@@ -21,7 +21,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
 )
 
 // disableWatchList turns off the client-go watch-list streaming feature for a

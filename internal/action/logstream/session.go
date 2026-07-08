@@ -10,7 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
+	"github.com/14f3v/kubectl-tui/internal/msg"
 )
 
 // flushInterval is how often buffered log lines are delivered to the UI as one

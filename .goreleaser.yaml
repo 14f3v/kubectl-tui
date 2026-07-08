@@ -43,8 +43,8 @@ changelog:
 # Uncomment and set the tap repo to publish a Homebrew formula on release.
 # brews:
 #   - repository:
-#       owner: khemphetsouvannaphasy
+#       owner: 14f3v
 #       name: homebrew-tap
-#     homepage: "https://github.com/khemphetsouvannaphasy/kubectl-tui"
+#     homepage: "https://github.com/14f3v/kubectl-tui"
 #     description: "A terminal UI for managing and monitoring Kubernetes clusters"
 #     license: "TBD"

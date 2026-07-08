@@ -9,7 +9,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
 // Config is the user-tunable configuration.

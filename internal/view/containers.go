@@ -9,10 +9,10 @@ import (
 	"charm.land/lipgloss/v2"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/execshell"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/action/execshell"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
+	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
 // containerInfo is the decoded per-container state shown in the drill-in.

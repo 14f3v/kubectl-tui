@@ -9,9 +9,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/portfwd"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/action/portfwd"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
+	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
 func init() {

@@ -8,17 +8,17 @@ import (
 	tea "charm.land/bubbletea/v2"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/editor"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/execshell"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/inspect"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/write"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/component"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/metrics"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/action/editor"
+	"github.com/14f3v/kubectl-tui/internal/action/execshell"
+	"github.com/14f3v/kubectl-tui/internal/action/inspect"
+	"github.com/14f3v/kubectl-tui/internal/action/write"
+	"github.com/14f3v/kubectl-tui/internal/component"
+	"github.com/14f3v/kubectl-tui/internal/engine"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
+	"github.com/14f3v/kubectl-tui/internal/metrics"
+	"github.com/14f3v/kubectl-tui/internal/msg"
+	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
 // resourcePage is the generic table page shared by every core kind. It watches

@@ -6,8 +6,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
 func testCols() []columns.Column {

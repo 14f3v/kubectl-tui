@@ -6,10 +6,10 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/logstream"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/action/logstream"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
+	"github.com/14f3v/kubectl-tui/internal/msg"
+	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
 // maxLogLines bounds the log page's own display buffer; older lines scroll off.

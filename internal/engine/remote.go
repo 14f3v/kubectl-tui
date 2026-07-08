@@ -11,7 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
 )
 
 // Phase is the lifecycle state of a view's data.

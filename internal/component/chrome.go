@@ -6,7 +6,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
 // Gauge renders a fixed-width block bar (█ filled, ░ empty) colored by threshold:

@@ -9,10 +9,10 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/component"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/view"
+	"github.com/14f3v/kubectl-tui/internal/component"
+	"github.com/14f3v/kubectl-tui/internal/engine"
+	"github.com/14f3v/kubectl-tui/internal/msg"
+	"github.com/14f3v/kubectl-tui/internal/view"
 )
 
 const headerHeight = 5

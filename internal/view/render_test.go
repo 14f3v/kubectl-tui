@@ -7,9 +7,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/tenant"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/tenant"
 )
 
 func TestTenantsPageRender(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
 )
 
 // Density controls how tightly rows are packed. In a terminal every row is one

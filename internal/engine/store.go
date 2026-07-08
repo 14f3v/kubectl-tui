@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
 )
 
 // defaultCoalesce is the maximum snapshot rate. Watch events set a dirty flag;

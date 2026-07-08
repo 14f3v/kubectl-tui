@@ -14,14 +14,14 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/config"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/metrics"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/view"
+	"github.com/14f3v/kubectl-tui/internal/action"
+	"github.com/14f3v/kubectl-tui/internal/config"
+	"github.com/14f3v/kubectl-tui/internal/engine"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
+	"github.com/14f3v/kubectl-tui/internal/metrics"
+	"github.com/14f3v/kubectl-tui/internal/msg"
+	"github.com/14f3v/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/view"
 )
 
 // Version is stamped at build time via -ldflags; "dev" in local builds.

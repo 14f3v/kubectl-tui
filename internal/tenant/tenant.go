@@ -6,7 +6,7 @@
 // events.
 package tenant
 
-import "github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
+import "github.com/14f3v/kubectl-tui/internal/engine/columns"
 
 // Tenant is the decoded subset of a Capsule Tenant we care about.
 type Tenant struct {

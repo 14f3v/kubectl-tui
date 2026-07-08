@@ -11,9 +11,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/tenant"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/tenant"
 )
 
 func init() {

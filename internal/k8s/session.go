@@ -26,9 +26,9 @@ import (
 	// work through rest.Config's exec provider without any import.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/portfwd"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/action/portfwd"
+	"github.com/14f3v/kubectl-tui/internal/engine"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
 )
 
 // Identity is the human-facing description of the active context, shown in the

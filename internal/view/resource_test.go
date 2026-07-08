@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/component"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/component"
+	"github.com/14f3v/kubectl-tui/internal/engine"
+	"github.com/14f3v/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
 func row(name, status string, class columns.StatusClass) columns.Row {

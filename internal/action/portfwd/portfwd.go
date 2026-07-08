@@ -16,7 +16,7 @@ import (
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 
-	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
+	"github.com/14f3v/kubectl-tui/internal/msg"
 )
 
 // State is a forward's lifecycle state.

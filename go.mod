@@ -1,4 +1,4 @@
-module github.com/khemphetsouvannaphasy/kubectl-tui
+module github.com/14f3v/kubectl-tui
 
 go 1.26.0
 
