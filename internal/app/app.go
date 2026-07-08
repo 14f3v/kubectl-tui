@@ -88,7 +88,7 @@ type confirmState struct {
 func New(cfg Config) *Model {
 	theme := style.New(style.AccentPreset(cfg.Config.Accent), cfg.Config.DensityValue())
 	if cfg.StartKind == "" {
-		cfg.StartKind = "pods"
+		cfg.StartKind = "overview"
 	}
 	return &Model{
 		cfg:     cfg,

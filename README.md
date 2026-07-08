@@ -59,11 +59,15 @@ You can also switch contexts live from inside the TUI with `:ctx <name>`.
 
 ## Usage
 
-`kubetui` opens on the pods view for your current context.
+`kubetui` opens on the **overview dashboard** — cluster KPIs (nodes ready, pods
+running, tenants, alerts), capacity bars, a node summary, pod-phase breakdown,
+workload readiness, top CPU consumers, and recent events. From there, `p`/`t`/`n`/`e`
+jump to pods/tenants/nodes/events, or use the command line. (`--kind pods` opens
+straight on a resource list instead.)
 
 | Key | Action |
 |-----|--------|
-| `:` | command line — `:pods` `:deploy` `:svc` `:nodes` `:ns` `:events` `:tenants` `:pf`; `:ctx <name>` switch context; `:q` quit |
+| `:` | command line — `:overview` `:pods` `:deploy` `:svc` `:nodes` `:ns` `:events` `:tenants` `:pf`; `:ctx <name>` switch context; `:q` quit |
 | `/` | filter rows (`!term` to invert) |
 | `j`/`k`, `↑`/`↓`, `g`/`G` | move the cursor / top / bottom |
 | `enter` | drill in (pod → containers → logs/shell) |
