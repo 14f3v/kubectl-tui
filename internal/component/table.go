@@ -100,6 +100,19 @@ func (t *Table) SetSize(width, bodyHeight int) {
 // SortColumn returns the current sort column index and direction.
 func (t *Table) SortColumn() (int, bool) { return t.sortCol, t.sortDesc }
 
+// SetSortState sets the sort column and direction directly (no toggle) and
+// re-sorts. Used by pages that open with a non-default sort, e.g. events newest
+// first.
+func (t *Table) SetSortState(col int, desc bool) {
+	if col < 0 || col >= len(t.cols) {
+		return
+	}
+	t.sortCol = col
+	t.sortDesc = desc
+	t.applySort()
+	t.cache = map[string]string{}
+}
+
 // SetSort selects a sort column; selecting the current column again toggles
 // direction.
 func (t *Table) SetSort(col int) {

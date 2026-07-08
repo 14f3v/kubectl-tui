@@ -3,8 +3,8 @@ package view
 import (
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/component"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
@@ -35,20 +35,33 @@ type resourcePage struct {
 // deps mirrors Deps but lets resourcePage store the session without re-importing.
 type deps = Deps
 
+// Option customizes a resource page at construction.
+type Option func(*resourcePage)
+
+// WithInitialSort opens the page sorted by a column and direction (e.g. events
+// newest-first) instead of the default NAME-ascending.
+func WithInitialSort(col int, desc bool) Option {
+	return func(p *resourcePage) { p.table.SetSortState(col, desc) }
+}
+
 // newResourcePage builds a generic page for a kind.
-func newResourcePage(kind, title string, d Deps) *resourcePage {
+func newResourcePage(kind, title string, d Deps, opts ...Option) *resourcePage {
 	tbl := component.NewTable(d.Theme)
 	if proj := columns.For(kind); proj != nil {
 		tbl.SetColumns(proj.Columns())
 	}
-	return &resourcePage{
+	p := &resourcePage{
 		kind:      kind,
 		title:     title,
 		sess:      d,
 		theme:     d.Theme,
 		table:     tbl,
-		namespace: d.Session.Identity.Namespace,
+		namespace: d.Namespace,
 	}
+	for _, o := range opts {
+		o(p)
+	}
+	return p
 }
 
 func (p *resourcePage) Init() tea.Cmd { return nil }
@@ -200,22 +213,17 @@ func rowMatches(r columns.Row, term string) bool {
 	return false
 }
 
-// statusCounts tallies rows by the class of their status cell, for the header.
+// statusCounts tallies rows by their health class, for the header count line.
 func statusCounts(rows []columns.Row) (total, ok, warn, errc int) {
 	total = len(rows)
 	for _, r := range rows {
-		for _, c := range r.Cells {
-			if c.Role == columns.RoleStatus {
-				switch c.Status {
-				case columns.StatusOK:
-					ok++
-				case columns.StatusWarn:
-					warn++
-				case columns.StatusError:
-					errc++
-				}
-				break
-			}
+		switch r.Health {
+		case columns.StatusOK:
+			ok++
+		case columns.StatusWarn:
+			warn++
+		case columns.StatusError:
+			errc++
 		}
 	}
 	return total, ok, warn, errc

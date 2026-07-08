@@ -8,8 +8,8 @@ import (
 	"sort"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
@@ -26,11 +26,13 @@ type Summary struct {
 	SyncedAt             time.Time
 }
 
-// Deps are what every page needs to exist: the active Session and the resolved
-// theme. The root model supplies them when it builds a page.
+// Deps are what every page needs to exist: the active Session, the resolved
+// theme, and the namespace scope ("" = all namespaces). The root model supplies
+// them when it builds a page.
 type Deps struct {
-	Session *k8s.Session
-	Theme   style.Theme
+	Session   *k8s.Session
+	Theme     style.Theme
+	Namespace string
 }
 
 // Page is a routed sub-model. The root calls OnEnter when it becomes active and

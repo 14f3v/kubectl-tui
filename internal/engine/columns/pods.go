@@ -76,6 +76,7 @@ func (podsProjector) Project(obj any, now time.Time) (Row, bool) {
 		Namespace: pod.Namespace,
 		Name:      pod.Name,
 		Version:   pod.ResourceVersion,
+		Health:    statusClass(status),
 		Cells:     cells,
 		SortKeys:  sortKeys,
 	}, true

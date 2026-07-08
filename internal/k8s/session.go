@@ -9,8 +9,10 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -123,15 +125,29 @@ func (s *Session) RefreshServerVersion() error {
 }
 
 // registerFactories wires each supported kind to a list/watch-backed ViewStore.
-// Core kinds are warm (kept running after their view is left); events and tenants
-// are screen-scoped and registered by their own packages later.
+// Core kinds are warm (kept running after their view is left); events is
+// screen-scoped (highest churn). Cluster-scoped kinds ignore the namespace.
 func (s *Session) registerFactories() {
 	core := s.CS.CoreV1().RESTClient()
+	apps := s.CS.AppsV1().RESTClient()
 
-	s.Engine.Register("pods", true, func(sink engine.Sink, ns string) *engine.ViewStore {
-		lw := cache.NewListWatchFromClient(core, "pods", nsOrAll(ns), fields.Everything())
-		return engine.NewViewStore("pods", lw, &corev1.Pod{}, columns.For("pods"), sink)
-	})
+	reg := func(kind, resource string, warm bool, getter cache.Getter, example runtime.Object, clusterScoped bool) {
+		s.Engine.Register(kind, warm, func(sink engine.Sink, ns string) *engine.ViewStore {
+			scope := ns
+			if clusterScoped {
+				scope = ""
+			}
+			lw := cache.NewListWatchFromClient(getter, resource, nsOrAll(scope), fields.Everything())
+			return engine.NewViewStore(kind, lw, example, columns.For(kind), sink)
+		})
+	}
+
+	reg("pods", "pods", true, core, &corev1.Pod{}, false)
+	reg("deployments", "deployments", true, apps, &appsv1.Deployment{}, false)
+	reg("services", "services", true, core, &corev1.Service{}, false)
+	reg("nodes", "nodes", true, core, &corev1.Node{}, true)
+	reg("namespaces", "namespaces", true, core, &corev1.Namespace{}, true)
+	reg("events", "events", false, core, &corev1.Event{}, false)
 }
 
 // nsOrAll maps an empty namespace to the all-namespaces sentinel.

@@ -99,7 +99,8 @@ type Row struct {
 	UID       string // stable object identity (metadata.uid)
 	Namespace string
 	Name      string
-	Version   string // resourceVersion; invalidates the per-row render cache
+	Version   string      // resourceVersion; invalidates the per-row render cache
+	Health    StatusClass // overall row health, for the header count line
 	Cells     []Cell
 	SortKeys  []SortKey
 }

@@ -33,12 +33,12 @@ func (d Density) CellPad() int {
 
 // Palette is the raw color token set. The zero value is not useful; use a preset.
 type Palette struct {
-	Bg, Panel                 color.Color
-	Border, BorderStrong      color.Color
-	Text, TextDim, TextFaint  color.Color
-	Accent                    color.Color
-	OK, Warn, Err, Info       color.Color
-	Pink, Cyan                color.Color
+	Bg, Panel                color.Color
+	Border, BorderStrong     color.Color
+	Text, TextDim, TextFaint color.Color
+	Accent                   color.Color
+	OK, Warn, Err, Info      color.Color
+	Pink, Cyan               color.Color
 }
 
 // designPalette is the palette from the reference design.

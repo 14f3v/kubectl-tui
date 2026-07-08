@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/config"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
@@ -36,10 +36,10 @@ const (
 
 // Config parameterizes the root model.
 type Config struct {
-	Sink           engine.Sink
-	Config         config.Config
+	Sink            engine.Sink
+	Config          config.Config
 	ContextOverride string
-	StartKind      string
+	StartKind       string
 }
 
 // Model is the root model.
@@ -165,12 +165,13 @@ func (m *Model) onSessionReady(t msg.SessionReady) (tea.Model, tea.Cmd) {
 	return m.navigate(m.cfg.StartKind, sess.Identity.Namespace)
 }
 
-// navigate replaces the page stack with a fresh page for kind.
+// navigate replaces the page stack with a fresh page for kind, scoped to
+// namespace ("" = all namespaces).
 func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	if m.sess == nil {
 		return m, nil
 	}
-	page, ok := view.NewPage(kind, view.Deps{Session: m.sess, Theme: m.theme})
+	page, ok := view.NewPage(kind, view.Deps{Session: m.sess, Theme: m.theme, Namespace: namespace})
 	if !ok {
 		return m, func() tea.Msg {
 			return msg.Toast{Text: "unknown resource: " + kind, Level: msg.LevelError}
@@ -183,6 +184,45 @@ func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	m.mode = modeNone
 	m.inputBuf = ""
 	return m, tea.Batch(page.Init(), page.OnEnter())
+}
+
+// switchContext disposes the current Session and bootstraps one for the named
+// kubeconfig context. All informers, log streams, and forwards die with the old
+// Session's context.
+func (m *Model) switchContext(name string) (tea.Model, tea.Cmd) {
+	for _, p := range m.pages {
+		p.OnLeave()
+	}
+	m.pages = nil
+	if m.sess != nil {
+		m.sess.Dispose()
+		m.sess = nil
+	}
+	m.booting = true
+	m.mode = modeNone
+	m.inputBuf = ""
+	m.cfg.ContextOverride = name
+	return m, bootstrapCmd(m.sink, name)
+}
+
+// jumpNamespace switches the active page to a namespace: "0" is all namespaces,
+// digits 1-9 select configured favorite namespaces.
+func (m *Model) jumpNamespace(d string) (tea.Model, tea.Cmd) {
+	p := m.active()
+	if p == nil {
+		return m, nil
+	}
+	if d == "0" {
+		return m.navigate(p.Kind(), "")
+	}
+	idx := int(d[0] - '1')
+	favs := m.cfg.Config.Favorites
+	if idx < 0 || idx >= len(favs) {
+		return m, func() tea.Msg {
+			return msg.Toast{Text: "no favorite namespace in slot " + d, Level: msg.LevelInfo}
+		}
+	}
+	return m.navigate(p.Kind(), favs[idx])
 }
 
 func (m *Model) active() view.Page {
@@ -257,9 +297,16 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			p.SetFilter("")
 		}
 		return m, nil
+	case isDigitKey(k):
+		return m.jumpNamespace(k.String())
 	default:
 		return m, m.routeToPage(k)
 	}
+}
+
+func isDigitKey(k tea.KeyPressMsg) bool {
+	s := k.String()
+	return len(s) == 1 && s[0] >= '0' && s[0] <= '9'
 }
 
 // handleInputKey drives the command line while typing after ":" or "/".
@@ -320,6 +367,13 @@ func (m *Model) runCommand(buf string) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			return msg.Toast{Text: "unknown resource: " + cmd.kind, Level: msg.LevelError}
 		}
+	case "ctx":
+		if cmd.arg == "" {
+			return m, func() tea.Msg {
+				return msg.Toast{Text: "usage: :ctx <context-name>", Level: msg.LevelInfo}
+			}
+		}
+		return m.switchContext(cmd.arg)
 	default:
 		return m, nil
 	}

@@ -32,6 +32,15 @@ func Kinds() []string {
 	return out
 }
 
+// age renders a creation time as a humanized age plus a numeric sort key (the
+// creation unix seconds, so ascending sort is oldest-first).
+func age(created, now time.Time) (string, SortKey) {
+	if created.IsZero() {
+		return "—", SortKey{}
+	}
+	return humanAge(now.Sub(created)), NumKey(float64(created.Unix()))
+}
+
 // humanAge renders a duration the way kubectl does: the two most significant
 // units, collapsing to one once the value is large (e.g. "38m", "4d2h", "11d").
 func humanAge(since time.Duration) string {
