@@ -231,3 +231,18 @@ func (vs *ViewStore) Snapshot() Remote[columns.Row] {
 
 // HasSynced reports whether the informer's initial list has completed.
 func (vs *ViewStore) HasSynced() bool { return vs.informer.HasSynced() }
+
+// Get returns the cached object for a namespace/name, or ok=false if absent.
+// Cluster-scoped kinds pass an empty namespace. Used by inspect actions (yaml,
+// describe) to read the live object without a fresh API call.
+func (vs *ViewStore) Get(namespace, name string) (any, bool) {
+	key := name
+	if namespace != "" {
+		key = namespace + "/" + name
+	}
+	obj, ok, err := vs.informer.GetStore().GetByKey(key)
+	if err != nil || !ok {
+		return nil, false
+	}
+	return obj, true
+}

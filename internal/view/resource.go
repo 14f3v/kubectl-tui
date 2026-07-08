@@ -6,6 +6,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/inspect"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/component"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
@@ -139,9 +140,12 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		p.table.Home()
 	case key.Matches(k, keyEnd):
 		p.table.End()
-	case isAction(k):
-		// Inspect/mutation handlers are wired in later phases; acknowledge for now
-		// so the keybinding is discoverable.
+	case key.Matches(k, keyYAML):
+		return p, p.yamlAction()
+	case key.Matches(k, keyDescribe):
+		return p, p.describeAction()
+	case isPendingAction(k):
+		// Handlers wired in later phases; acknowledge so the binding is discoverable.
 		if _, ok := p.table.Selected(); ok {
 			return p, func() tea.Msg {
 				return msg.Toast{Text: k.String() + ": coming soon", Level: msg.LevelInfo}
@@ -151,9 +155,54 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 	return p, nil
 }
 
-func isAction(k tea.KeyPressMsg) bool {
-	return key.Matches(k, keyEnter, keyDescribe, keyLogs, keyShell, keyYAML,
+func isPendingAction(k tea.KeyPressMsg) bool {
+	return key.Matches(k, keyEnter, keyLogs, keyShell,
 		keyEdit, keyDelete, keyKill, keyPortFwd)
+}
+
+// yamlAction reads the selected object from the informer cache and pushes a YAML
+// text page. It runs synchronously (the object is already cached).
+func (p *resourcePage) yamlAction() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	vs := p.sess.Session.Engine.Get(p.kind)
+	if vs == nil {
+		return toast("no live data for "+p.kind, msg.LevelError)
+	}
+	obj, ok := vs.Get(row.Namespace, row.Name)
+	if !ok {
+		return toast(row.Name+" is no longer in the cache", msg.LevelWarn)
+	}
+	yamlStr, err := inspect.YAML(obj)
+	if err != nil {
+		return toast("yaml: "+err.Error(), msg.LevelError)
+	}
+	tv := NewTextView(row.Name+" · yaml", yamlStr, p.theme)
+	return func() tea.Msg { return PushMsg{Page: tv} }
+}
+
+// describeAction runs kubectl-style describe as a command (it makes its own API
+// calls) and pushes the result as a text page.
+func (p *resourcePage) describeAction() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	cfg := p.sess.Session.RestCfg
+	kind, ns, name, theme := p.kind, row.Namespace, row.Name, p.theme
+	return func() tea.Msg {
+		out, err := inspect.Describe(cfg, kind, ns, name)
+		if err != nil {
+			return msg.Toast{Text: "describe: " + err.Error(), Level: msg.LevelError}
+		}
+		return PushMsg{Page: NewTextView(name+" · describe", out, theme)}
+	}
+}
+
+func toast(text string, level msg.Level) tea.Cmd {
+	return func() tea.Msg { return msg.Toast{Text: text, Level: level} }
 }
 
 func (p *resourcePage) View(width, height int) string {

@@ -135,10 +135,38 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 	case msg.Navigate:
 		return m.navigate(t.Kind, t.Namespace)
 
+	case view.PushMsg:
+		return m.pushPage(t.Page)
+
+	case view.PopMsg:
+		return m.popPage()
+
 	default:
 		// Everything else (engine snapshots, action results) goes to the page.
 		return m, m.routeToPage(message)
 	}
+}
+
+// pushPage drills into a new page, keeping the parent on the stack.
+func (m *Model) pushPage(p view.Page) (tea.Model, tea.Cmd) {
+	if p == nil {
+		return m, nil
+	}
+	m.pages = append(m.pages, p)
+	m.mode = modeNone
+	m.inputBuf = ""
+	return m, tea.Batch(p.Init(), p.OnEnter())
+}
+
+// popPage backs out of a drill-in. The base page is never popped.
+func (m *Model) popPage() (tea.Model, tea.Cmd) {
+	if len(m.pages) <= 1 {
+		return m, nil
+	}
+	top := m.pages[len(m.pages)-1]
+	top.OnLeave()
+	m.pages = m.pages[:len(m.pages)-1]
+	return m, nil
 }
 
 // routeToPage forwards a message to the active page and installs the returned
@@ -292,7 +320,10 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.inputBuf = ""
 		return m, nil
 	case key.Matches(k, keyEsc):
-		// Clear an active filter, otherwise no-op at the top level.
+		// A drill-in pops; otherwise esc clears an active filter.
+		if len(m.pages) > 1 {
+			return m.popPage()
+		}
 		if p := m.active(); p != nil && p.Filter() != "" {
 			p.SetFilter("")
 		}
