@@ -49,3 +49,17 @@ type SessionReady struct {
 type SessionError struct {
 	Err error
 }
+
+// LogBatch delivers a coalesced batch of new log lines for a log session, plus
+// the count of lines dropped since the last batch (producer outran the buffer).
+type LogBatch struct {
+	SessionID string
+	Lines     []string
+	Dropped   int
+}
+
+// LogEnded signals that a log stream closed, cleanly (Err nil) or with an error.
+type LogEnded struct {
+	SessionID string
+	Err       error
+}

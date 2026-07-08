@@ -55,6 +55,10 @@ func (e *Engine) Register(kind string, warm bool, f FactoryFn) {
 // stamps it on its store so late snapshots from a previous entry are dropped.
 func (e *Engine) NextViewID() uint64 { return e.viewSeq.Add(1) }
 
+// Sink returns the message sink (tea.Program.Send in production). Action
+// subsystems that deliver their own messages (logs, port-forward) use it.
+func (e *Engine) Sink() Sink { return e.sink }
+
 // Ensure returns the running store for a kind, scoped to namespace, building and
 // starting it on first use. If the namespace changed since last time, the old
 // store is stopped and a fresh one is started so only that one kind relists.

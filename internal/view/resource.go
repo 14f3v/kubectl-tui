@@ -144,6 +144,8 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		return p, p.yamlAction()
 	case key.Matches(k, keyDescribe):
 		return p, p.describeAction()
+	case key.Matches(k, keyLogs):
+		return p, p.logsAction()
 	case isPendingAction(k):
 		// Handlers wired in later phases; acknowledge so the binding is discoverable.
 		if _, ok := p.table.Selected(); ok {
@@ -156,8 +158,21 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 }
 
 func isPendingAction(k tea.KeyPressMsg) bool {
-	return key.Matches(k, keyEnter, keyLogs, keyShell,
+	return key.Matches(k, keyEnter, keyShell,
 		keyEdit, keyDelete, keyKill, keyPortFwd)
+}
+
+// logsAction follows the selected pod's logs in a new page. Logs are pod-only.
+func (p *resourcePage) logsAction() tea.Cmd {
+	if p.kind != "pods" {
+		return toast("logs: select a pod", msg.LevelInfo)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	page := NewLogsPage(p.sess.Session, p.theme, row.Namespace, row.Name, "")
+	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
 // yamlAction reads the selected object from the informer cache and pushes a YAML
