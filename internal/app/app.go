@@ -9,6 +9,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -67,6 +68,7 @@ type Model struct {
 
 	mode     inputMode
 	inputBuf string
+	cmdSel   int // selected index in the command palette (command mode)
 
 	toast      *msg.Toast
 	toastToken int
@@ -417,6 +419,7 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(k, keyCommand):
 		m.mode = modeCommand
 		m.inputBuf = ""
+		m.cmdSel = 0
 		return m, nil
 	case key.Matches(k, keyFilter):
 		m.mode = modeFilter
@@ -460,8 +463,31 @@ func (m *Model) handleConfirmKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// handleInputKey drives the command line while typing after ":" or "/".
+// handleInputKey drives the command line while typing after ":" or "/". In
+// command mode it also drives the command palette (↑/↓ select, Tab complete).
 func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Palette navigation is only meaningful in command mode.
+	if m.mode == modeCommand {
+		switch k.String() {
+		case "up", "ctrl+p":
+			if m.cmdSel > 0 {
+				m.cmdSel--
+			}
+			return m, nil
+		case "down", "ctrl+n":
+			if m.cmdSel < len(m.commandMatches())-1 {
+				m.cmdSel++
+			}
+			return m, nil
+		case "tab":
+			if matches := m.commandMatches(); len(matches) > 0 && m.cmdSel < len(matches) {
+				m.inputBuf = matches[m.cmdSel].Name
+				m.cmdSel = 0
+			}
+			return m, nil
+		}
+	}
+
 	switch k.String() {
 	case "esc":
 		if m.mode == modeFilter {
@@ -475,9 +501,17 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		buf := m.inputBuf
 		mode := m.mode
+		sel := m.cmdSel
 		m.mode = modeNone
 		m.inputBuf = ""
 		if mode == modeCommand {
+			// An argument form (has a space) runs the raw buffer; otherwise run the
+			// highlighted palette command.
+			if !strings.Contains(buf, " ") {
+				if matches := m.commandMatches(); len(matches) > 0 && sel < len(matches) {
+					return m.runCommand(matches[sel].Name)
+				}
+			}
 			return m.runCommand(buf)
 		}
 		// Filter is already applied live; enter just commits it.
@@ -486,6 +520,7 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(m.inputBuf) > 0 {
 			m.inputBuf = m.inputBuf[:len(m.inputBuf)-1]
 		}
+		m.cmdSel = 0
 		if m.mode == modeFilter {
 			if p := m.active(); p != nil {
 				p.SetFilter(m.inputBuf)
@@ -495,6 +530,7 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default:
 		if s := k.String(); len([]rune(s)) == 1 {
 			m.inputBuf += s
+			m.cmdSel = 0
 			if m.mode == modeFilter {
 				if p := m.active(); p != nil {
 					p.SetFilter(m.inputBuf)

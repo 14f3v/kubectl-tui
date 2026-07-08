@@ -17,7 +17,7 @@ import (
 )
 
 func init() {
-	Register("tenants", []string{"tnt", "tenant", "tenants"}, func(d Deps) Page {
+	Register("tenants", []string{"tnt", "tenant", "tenants"}, "Capsule tenant dashboard", func(d Deps) Page {
 		tier := d.TierLabel
 		if tier == "" {
 			tier = "tier"

@@ -63,7 +63,7 @@ You can also switch contexts live from inside the TUI with `:ctx <name>`.
 
 | Key | Action |
 |-----|--------|
-| `:` | command line — `:pods` `:deploy` `:svc` `:nodes` `:ns` `:events` `:tenants` `:pf`; `:ctx <name>` switch context; `:q` quit |
+| `:` | command palette — opens a searchable list of commands (`pods`, `deploy`, `svc`, `nodes`, `ns`, `events`, `tenants`, `pf`, `ctx`, `q`). Type to filter, `↑`/`↓` to select, `Tab` to complete, `Enter` to run. Arguments still work: `:pods kube-system`, `:ctx <name>` |
 | `/` | filter rows (`!term` to invert) |
 | `j`/`k`, `↑`/`↓`, `g`/`G` | move the cursor / top / bottom |
 | `enter` | drill in (pod → containers → logs/shell) |

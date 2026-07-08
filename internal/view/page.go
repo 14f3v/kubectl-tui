@@ -70,19 +70,38 @@ type Page interface {
 // Factory builds a page from its dependencies.
 type Factory func(Deps) Page
 
+// Command describes a `:` command for the command palette: its canonical name
+// (the kind), its aliases, and a one-line description shown to the user.
+type Command struct {
+	Name    string
+	Aliases []string
+	Desc    string
+}
+
 var (
 	factories   = map[string]Factory{}
 	aliasToKind = map[string]string{}
+	commandList []Command
 )
 
-// Register wires a kind and its command aliases to a factory. Called from page
-// files' init() so adding a page is one new file.
-func Register(kind string, aliases []string, f Factory) {
+// Register wires a kind and its command aliases to a factory, with a description
+// used by the command palette. Called from page files' init() so adding a page is
+// one new file — and the required description makes new commands self-documenting.
+func Register(kind string, aliases []string, desc string, f Factory) {
 	factories[kind] = f
 	aliasToKind[kind] = kind
 	for _, a := range aliases {
 		aliasToKind[a] = kind
 	}
+	commandList = append(commandList, Command{Name: kind, Aliases: aliases, Desc: desc})
+}
+
+// Commands returns the registered page commands, sorted by name, for the palette.
+func Commands() []Command {
+	out := make([]Command, len(commandList))
+	copy(out, commandList)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // ResolveKind maps a command alias (e.g. "po") to its canonical kind ("pods").

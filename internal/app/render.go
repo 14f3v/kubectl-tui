@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -70,7 +71,93 @@ func (m *Model) render() string {
 	}
 	content := m.renderContent(contentH)
 
-	return strings.Join([]string{cmd, header, crumb, content, footer}, "\n")
+	frame := strings.Join([]string{cmd, header, crumb, content, footer}, "\n")
+
+	// In command mode, overlay the palette dropdown just under the prompt (row 0),
+	// leaving the command bar and footer visible.
+	if m.mode == modeCommand {
+		frame = m.overlayPalette(frame)
+	}
+	return frame
+}
+
+// overlayPalette splices the command palette box onto the frame's lines starting
+// at row 1 (over the header/breadcrumb), never touching the command bar (row 0)
+// or the footer (last row).
+func (m *Model) overlayPalette(frame string) string {
+	lines := strings.Split(frame, "\n")
+	box := m.renderPalette(m.width)
+	for i, bl := range box {
+		row := 1 + i
+		if row >= len(lines)-1 { // keep the footer intact
+			break
+		}
+		lines[row] = fitLine(bl, m.width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderPalette builds the command-palette dropdown lines: a header that teaches
+// the controls, then one row per matching command (name · alias hint · desc) with
+// the selected row highlighted.
+func (m *Model) renderPalette(width int) []string {
+	t := m.theme
+	matches := m.commandMatches()
+	if m.cmdSel >= len(matches) {
+		m.cmdSel = len(matches) - 1
+	}
+	if m.cmdSel < 0 {
+		m.cmdSel = 0
+	}
+
+	boxW := 64
+	if boxW > width-4 {
+		boxW = width - 4
+	}
+	if boxW < 24 {
+		boxW = 24
+	}
+	inner := boxW - 4 // account for border + padding
+
+	head := t.AccentText.Bold(true).Render("COMMANDS") + "  " +
+		t.Faint.Render("↑↓ select · tab complete · enter run · esc close")
+
+	var rows []string
+	rows = append(rows, head)
+	if len(matches) == 0 {
+		rows = append(rows, t.Faint.Render("no matching command"))
+	}
+	const maxRows = 10
+	for i, c := range matches {
+		if i >= maxRows {
+			rows = append(rows, t.Faint.Render(fmt.Sprintf("…and %d more", len(matches)-maxRows)))
+			break
+		}
+		name := c.Name
+		if sa := shortAlias(c); sa != "" {
+			name += " (" + sa + ")"
+		}
+		selected := i == m.cmdSel
+		marker := "  "
+		nameStyle := t.Dim
+		if selected {
+			marker = t.AccentText.Render("▶ ")
+			nameStyle = t.Base.Bold(true)
+		}
+		row := marker + nameStyle.Render(padRight(name, 20)) + t.Faint.Render(c.Desc)
+		if selected {
+			row = lipgloss.NewStyle().Background(lipgloss.Color("#1a1d2e")).Render(fitLine(row, inner))
+		}
+		rows = append(rows, row)
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Pal.Accent).
+		Padding(0, 1).
+		Width(boxW).
+		Render(strings.Join(rows, "\n"))
+	return strings.Split(box, "\n")
 }
 
 // ---- command bar ----

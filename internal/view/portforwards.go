@@ -15,7 +15,7 @@ import (
 )
 
 func init() {
-	Register("portforwards", []string{"pf", "portforward", "portforwards"}, func(d Deps) Page {
+	Register("portforwards", []string{"pf", "portforward", "portforwards"}, "active port-forwards", func(d Deps) Page {
 		return &pfPage{sess: d.Session, theme: d.Theme}
 	})
 }
