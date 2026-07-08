@@ -1,6 +1,7 @@
 package view
 
 import (
+	"os/exec"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -15,6 +16,27 @@ type PushMsg struct{ Page Page }
 
 // PopMsg asks the root model to pop the top page (back out of a drill-in).
 type PopMsg struct{}
+
+// ConfirmRequest asks the root model to show a modal confirm dialog. On confirm
+// the root runs Action as a command; on cancel it is discarded. Danger styles the
+// dialog for destructive operations.
+type ConfirmRequest struct {
+	Title  string
+	Prompt string
+	Danger bool
+	Action func() tea.Msg
+}
+
+// ExecRequest asks the root model to hand the terminal to a child process through
+// the TerminalGate. Exactly one of Command (an interactive tea.ExecCommand, e.g.
+// a pod shell) or Process (an *exec.Cmd, e.g. $EDITOR) is set. After, if present,
+// runs once the terminal is restored (e.g. the edit's server-side apply).
+type ExecRequest struct {
+	Label   string
+	Command tea.ExecCommand
+	Process *exec.Cmd
+	After   func(err error) tea.Msg
+}
 
 // TextView is a read-only scrollable text page used for YAML and describe output.
 // It renders the visible window of lines; the root chrome fits width and height.

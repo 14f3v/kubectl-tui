@@ -27,12 +27,13 @@ type Summary struct {
 }
 
 // Deps are what every page needs to exist: the active Session, the resolved
-// theme, and the namespace scope ("" = all namespaces). The root model supplies
-// them when it builds a page.
+// theme, the namespace scope ("" = all namespaces), and whether mutating actions
+// are disabled. The root model supplies them when it builds a page.
 type Deps struct {
 	Session   *k8s.Session
 	Theme     style.Theme
 	Namespace string
+	ReadOnly  bool
 }
 
 // Page is a routed sub-model. The root calls OnEnter when it becomes active and

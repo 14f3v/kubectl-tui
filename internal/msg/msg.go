@@ -63,3 +63,7 @@ type LogEnded struct {
 	SessionID string
 	Err       error
 }
+
+// PFChanged signals that the port-forward set changed (a forward started, became
+// active, broke, or was removed), prompting a repaint of the :pf view.
+type PFChanged struct{}

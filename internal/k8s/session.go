@@ -26,6 +26,7 @@ import (
 	// work through rest.Config's exec provider without any import.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/portfwd"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
 )
@@ -49,6 +50,7 @@ type Session struct {
 	Disco    discovery.DiscoveryInterface
 	Metrics  metricsclient.Interface // nil if the metrics client cannot be built
 	Engine   *engine.Engine
+	Forwards *portfwd.Manager
 	Identity Identity
 
 	ctx    context.Context
@@ -98,6 +100,7 @@ func NewSession(parent context.Context, contextName string, sink engine.Sink) (*
 		ctx:     ctx,
 		cancel:  cancel,
 	}
+	s.Forwards = portfwd.NewManager(restCfg, cs, sink)
 	s.Identity = deriveIdentity(cc, restCfg)
 	s.registerFactories()
 	return s, nil
@@ -106,9 +109,10 @@ func NewSession(parent context.Context, contextName string, sink engine.Sink) (*
 // Context returns the Session's context; it is cancelled on Dispose.
 func (s *Session) Context() context.Context { return s.ctx }
 
-// Dispose cancels the context and stops every engine store. After Dispose the
-// Session must not be reused.
+// Dispose cancels the context and stops every engine store and port-forward.
+// After Dispose the Session must not be reused.
 func (s *Session) Dispose() {
+	s.Forwards.StopAll()
 	s.Engine.StopAll()
 	s.cancel()
 }

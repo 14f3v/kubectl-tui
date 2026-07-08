@@ -14,6 +14,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/config"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
@@ -48,6 +49,7 @@ type Model struct {
 	theme style.Theme
 
 	sink engine.Sink
+	gate *action.TerminalGate
 
 	sess    *k8s.Session
 	pages   []view.Page // stack; top is active
@@ -62,8 +64,17 @@ type Model struct {
 	toast      *msg.Toast
 	toastToken int
 	showHelp   bool
+	confirm    *confirmState
 
 	panicInfo string
+}
+
+// confirmState holds an active modal confirm dialog.
+type confirmState struct {
+	title  string
+	prompt string
+	danger bool
+	action func() tea.Msg
 }
 
 // New builds the root model.
@@ -76,6 +87,7 @@ func New(cfg Config) *Model {
 		cfg:     cfg,
 		theme:   theme,
 		sink:    cfg.Sink,
+		gate:    action.NewTerminalGate(),
 		booting: true,
 	}
 }
@@ -141,10 +153,72 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 	case view.PopMsg:
 		return m.popPage()
 
+	case view.ConfirmRequest:
+		m.confirm = &confirmState{title: t.Title, prompt: t.Prompt, danger: t.Danger, action: t.Action}
+		return m, nil
+
+	case view.ExecRequest:
+		return m.handleExecRequest(t)
+
+	case execDoneMsg:
+		return m.onExecDone(t)
+
 	default:
 		// Everything else (engine snapshots, action results) goes to the page.
 		return m, m.routeToPage(message)
 	}
+}
+
+// execDoneMsg is delivered when a child process (shell/editor) exits and the
+// terminal is restored. after, if set, runs the follow-up (e.g. the edit apply).
+type execDoneMsg struct {
+	err   error
+	after func(err error) tea.Msg
+}
+
+// handleExecRequest hands the terminal to a child process through the gate,
+// pausing the engine coalescer while the child owns the terminal.
+func (m *Model) handleExecRequest(req view.ExecRequest) (tea.Model, tea.Cmd) {
+	if m.sess == nil {
+		return m, nil
+	}
+	if !m.gate.Acquire() {
+		return m, func() tea.Msg {
+			return msg.Toast{Text: "another terminal session is active", Level: msg.LevelWarn}
+		}
+	}
+	m.sess.Engine.PauseAll()
+	after := req.After
+	cb := func(err error) tea.Msg { return execDoneMsg{err: err, after: after} }
+
+	switch {
+	case req.Command != nil:
+		return m, tea.Exec(req.Command, cb)
+	case req.Process != nil:
+		return m, tea.ExecProcess(req.Process, cb)
+	default:
+		m.gate.Release()
+		m.sess.Engine.ResumeAllAndFlush()
+		return m, nil
+	}
+}
+
+// onExecDone restores TUI ownership, resumes the engine, and runs any follow-up.
+func (m *Model) onExecDone(t execDoneMsg) (tea.Model, tea.Cmd) {
+	m.gate.Release()
+	if m.sess != nil {
+		m.sess.Engine.ResumeAllAndFlush()
+	}
+	if t.after != nil {
+		after, err := t.after, t.err
+		return m, func() tea.Msg { return after(err) }
+	}
+	if t.err != nil {
+		return m, func() tea.Msg {
+			return msg.Toast{Text: "session ended: " + t.err.Error(), Level: msg.LevelWarn}
+		}
+	}
+	return m, nil
 }
 
 // pushPage drills into a new page, keeping the parent on the stack.
@@ -199,7 +273,12 @@ func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	if m.sess == nil {
 		return m, nil
 	}
-	page, ok := view.NewPage(kind, view.Deps{Session: m.sess, Theme: m.theme, Namespace: namespace})
+	page, ok := view.NewPage(kind, view.Deps{
+		Session:   m.sess,
+		Theme:     m.theme,
+		Namespace: namespace,
+		ReadOnly:  m.cfg.Config.ReadOnly,
+	})
 	if !ok {
 		return m, func() tea.Msg {
 			return msg.Toast{Text: "unknown resource: " + kind, Level: msg.LevelError}
@@ -294,7 +373,12 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Command-line capture takes precedence over everything.
+	// A modal confirm dialog captures all input until resolved.
+	if m.confirm != nil {
+		return m.handleConfirmKey(k)
+	}
+
+	// Command-line capture takes precedence over everything else.
 	if m.mode != modeNone {
 		return m.handleInputKey(k)
 	}
@@ -338,6 +422,23 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func isDigitKey(k tea.KeyPressMsg) bool {
 	s := k.String()
 	return len(s) == 1 && s[0] >= '0' && s[0] <= '9'
+}
+
+// handleConfirmKey resolves an active confirm dialog: y/enter runs the action,
+// anything else cancels.
+func (m *Model) handleConfirmKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	action := m.confirm.action
+	switch k.String() {
+	case "y", "Y", "enter":
+		m.confirm = nil
+		if action != nil {
+			return m, func() tea.Msg { return action() }
+		}
+		return m, nil
+	default: // n, N, esc, or any other key cancels
+		m.confirm = nil
+		return m, nil
+	}
 }
 
 // handleInputKey drives the command line while typing after ":" or "/".

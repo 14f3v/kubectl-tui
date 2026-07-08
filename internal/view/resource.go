@@ -1,15 +1,21 @@
 package view
 
 import (
+	"os"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	corev1 "k8s.io/api/core/v1"
 
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/editor"
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/execshell"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/inspect"
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/action/write"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/component"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
 )
@@ -146,6 +152,16 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		return p, p.describeAction()
 	case key.Matches(k, keyLogs):
 		return p, p.logsAction()
+	case key.Matches(k, keyDelete):
+		return p, p.deleteAction(false)
+	case key.Matches(k, keyKill):
+		return p, p.deleteAction(true)
+	case key.Matches(k, keyShell):
+		return p, p.shellAction()
+	case key.Matches(k, keyEdit):
+		return p, p.editAction()
+	case key.Matches(k, keyPortFwd):
+		return p, p.portForwardAction()
 	case isPendingAction(k):
 		// Handlers wired in later phases; acknowledge so the binding is discoverable.
 		if _, ok := p.table.Selected(); ok {
@@ -158,8 +174,184 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 }
 
 func isPendingAction(k tea.KeyPressMsg) bool {
-	return key.Matches(k, keyEnter, keyShell,
-		keyEdit, keyDelete, keyKill, keyPortFwd)
+	return key.Matches(k, keyEnter)
+}
+
+// portForwardAction forwards the selected pod's declared container ports to
+// ephemeral local ports. Open ":pf" to see the resolved local ports.
+func (p *resourcePage) portForwardAction() tea.Cmd {
+	if p.kind != "pods" {
+		return toast("port-forward: select a pod", msg.LevelInfo)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	vs := p.sess.Session.Engine.Get("pods")
+	if vs == nil {
+		return toast("no live data for pods", msg.LevelError)
+	}
+	obj, ok := vs.Get(row.Namespace, row.Name)
+	if !ok {
+		return toast(row.Name+" is no longer in the cache", msg.LevelWarn)
+	}
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return toast("unexpected object type", msg.LevelError)
+	}
+	ports := podForwardPorts(pod)
+	if len(ports) == 0 {
+		return toast(row.Name+" declares no container ports", msg.LevelWarn)
+	}
+	p.sess.Session.Forwards.Start(row.Namespace, row.Name, ports)
+	return toast("port-forward starting — open :pf to view", msg.LevelSuccess)
+}
+
+// podForwardPorts collects the pod's distinct container ports as ":remote"
+// specs, letting the kernel pick each local port.
+func podForwardPorts(pod *corev1.Pod) []string {
+	seen := map[int32]bool{}
+	var out []string
+	for _, c := range pod.Spec.Containers {
+		for _, port := range c.Ports {
+			if port.ContainerPort == 0 || seen[port.ContainerPort] {
+				continue
+			}
+			seen[port.ContainerPort] = true
+			out = append(out, ":"+itoa32(port.ContainerPort))
+		}
+	}
+	return out
+}
+
+func itoa32(n int32) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [12]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
+}
+
+// shellAction hands the terminal to an interactive shell in the selected pod
+// (pods only).
+func (p *resourcePage) shellAction() tea.Cmd {
+	if p.kind != "pods" {
+		return toast("shell: select a pod", msg.LevelInfo)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	sess := p.sess.Session
+	cmd := execshell.New(sess.RestCfg, sess.CS, row.Namespace, row.Name, "", nil)
+	return func() tea.Msg {
+		return ExecRequest{Label: "shell", Command: cmd}
+	}
+}
+
+// editAction dumps the selected object to $EDITOR and applies changes with SSA.
+func (p *resourcePage) editAction() tea.Cmd {
+	if p.sess.ReadOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	info, ok := k8s.ResourceFor(p.kind)
+	if !ok {
+		return toast("edit not supported for "+p.kind, msg.LevelError)
+	}
+	vs := p.sess.Session.Engine.Get(p.kind)
+	if vs == nil {
+		return toast("no live data for "+p.kind, msg.LevelError)
+	}
+	obj, ok := vs.Get(row.Namespace, row.Name)
+	if !ok {
+		return toast(row.Name+" is no longer in the cache", msg.LevelWarn)
+	}
+	yamlStr, err := inspect.YAML(obj)
+	if err != nil {
+		return toast("edit: "+err.Error(), msg.LevelError)
+	}
+	path, sum, err := editor.WriteTemp(yamlStr)
+	if err != nil {
+		return toast("edit: "+err.Error(), msg.LevelError)
+	}
+
+	sess := p.sess.Session
+	ns, name := row.Namespace, row.Name
+	after := func(execErr error) tea.Msg {
+		defer os.Remove(path)
+		if execErr != nil {
+			return msg.Toast{Text: "editor: " + execErr.Error(), Level: msg.LevelError}
+		}
+		changed, aerr := editor.Apply(sess.Context(), sess.Dyn, info.GVR, info.Namespaced, ns, name, path, sum)
+		switch {
+		case aerr != nil:
+			return msg.Toast{Text: "apply " + name + ": " + aerr.Error(), Level: msg.LevelError}
+		case !changed:
+			return msg.Toast{Text: "no changes", Level: msg.LevelInfo}
+		default:
+			return msg.Toast{Text: name + " applied", Level: msg.LevelSuccess}
+		}
+	}
+	return func() tea.Msg {
+		return ExecRequest{Label: "edit", Process: editor.Process(path), After: after}
+	}
+}
+
+// deleteAction confirms and then deletes (or force-deletes) the selected object.
+// The delete is fire-and-observe: on success nothing mutates locally; the watch
+// removes the row.
+func (p *resourcePage) deleteAction(force bool) tea.Cmd {
+	if p.sess.ReadOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	info, ok := k8s.ResourceFor(p.kind)
+	if !ok {
+		return toast("delete not supported for "+p.kind, msg.LevelError)
+	}
+
+	sess := p.sess.Session
+	ns, name := row.Namespace, row.Name
+	verb := "delete"
+	act := func() tea.Msg {
+		err := write.Delete(sess.Context(), sess.Dyn, info.GVR, info.Namespaced, ns, name, force)
+		if err != nil {
+			return msg.Toast{Text: "delete " + name + ": " + err.Error(), Level: msg.LevelError}
+		}
+		what := "deleted"
+		if force {
+			what = "killed"
+		}
+		return msg.Toast{Text: name + " " + what, Level: msg.LevelSuccess}
+	}
+
+	title := "Delete " + info.Kind
+	prompt := "Delete " + name + "?"
+	if force {
+		title = "Kill (force-delete) " + info.Kind
+		prompt = "Force-delete " + name + " now with grace period 0?"
+	}
+	// Preflight the permission so the dialog can warn early (best-effort).
+	if allowed, err := write.CanI(sess.Context(), sess.CS, verb, info.GVR, ns); err == nil && !allowed {
+		prompt += "  (your account may not be permitted to " + verb + ")"
+	}
+
+	return func() tea.Msg {
+		return ConfirmRequest{Title: title, Prompt: prompt, Danger: true, Action: act}
+	}
 }
 
 // logsAction follows the selected pod's logs in a new page. Logs are pod-only.

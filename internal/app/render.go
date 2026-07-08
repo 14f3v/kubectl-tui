@@ -96,6 +96,11 @@ func (m *Model) renderCommandBar() string {
 		}
 	}
 	right := t.Faint.Render("last sync ") + lipgloss.NewStyle().Foreground(t.Pal.OK).Render(clock)
+	if m.sess != nil {
+		if n := m.sess.Forwards.Count(); n > 0 {
+			right = lipgloss.NewStyle().Foreground(t.Pal.Cyan).Render("⇄ "+strconv.Itoa(n)) + t.Faint.Render("  ·  ") + right
+		}
+	}
 	return spread(left, right, m.width)
 }
 
@@ -256,6 +261,9 @@ func (m *Model) renderToast() string {
 // ---- content ----
 
 func (m *Model) renderContent(h int) string {
+	if m.confirm != nil {
+		return m.renderConfirm(h)
+	}
 	if m.showHelp {
 		return m.renderHelp(h)
 	}
@@ -284,6 +292,32 @@ func (m *Model) renderBanner(e *engine.EngineErr, h int) string {
 	body := lipgloss.NewStyle().Foreground(t.Pal.Err).Bold(true).Render(title) + "\n\n" +
 		t.Faint.Render(e.Detail)
 	return m.renderCentered(body, t.Base)
+}
+
+func (m *Model) renderConfirm(h int) string {
+	t := m.theme
+	titleColor := t.Pal.Accent
+	if m.confirm.danger {
+		titleColor = t.Pal.Err
+	}
+	boxW := 60
+	if boxW > m.width-8 {
+		boxW = m.width - 8
+	}
+	if boxW < 20 {
+		boxW = 20
+	}
+	title := lipgloss.NewStyle().Foreground(titleColor).Bold(true).Render(m.confirm.title)
+	prompt := t.Dim.Render(m.confirm.prompt)
+	hint := lipgloss.NewStyle().Foreground(t.Pal.OK).Render("[y] confirm") + "   " + t.Faint.Render("[n] cancel")
+	inner := title + "\n\n" + prompt + "\n\n" + hint
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(titleColor).
+		Padding(1, 3).
+		Width(boxW).
+		Render(inner)
+	return fitBlock(lipgloss.Place(m.width, h, lipgloss.Center, lipgloss.Center, box), m.width, h)
 }
 
 func (m *Model) renderHelp(h int) string {
