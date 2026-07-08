@@ -140,12 +140,18 @@ func (m *Model) renderHeader() string {
 		sum = p.Summary()
 		kind = p.Title()
 	}
+	cpuCell := t.Faint.Render("metrics n/a")
+	memCell := t.Faint.Render("metrics n/a")
+	if m.metricsOK {
+		cpuCell = component.Gauge(m.clusterCPU, 16, t) + " " + t.Dim.Render(pctStr(m.clusterCPU))
+		memCell = component.Gauge(m.clusterMem, 16, t) + " " + t.Dim.Render(pctStr(m.clusterMem))
+	}
 	colB := []string{
 		kv("Namespace", nsLabel, 10, labelB, val),
 		kv("Resource", kind, 10, labelB, val),
 		labelB.Render(padRight("Count", 10)) + component.Count(sum.Total, sum.OK, sum.Warn, sum.Err, t),
-		labelB.Render(padRight("CPU", 10)) + t.Faint.Render("metrics n/a"),
-		labelB.Render(padRight("MEM", 10)) + t.Faint.Render("metrics n/a"),
+		labelB.Render(padRight("CPU", 10)) + cpuCell,
+		labelB.Render(padRight("MEM", 10)) + memCell,
 	}
 
 	colC := m.renderKeyGrid()
@@ -436,3 +442,11 @@ func orDash(s string) string {
 
 // itoa is a tiny int formatter used by the breadcrumb count.
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// pctStr formats a utilization percentage as a right-sized "NN%".
+func pctStr(pct float64) string {
+	if pct < 0 {
+		pct = 0
+	}
+	return strconv.Itoa(int(pct+0.5)) + "%"
+}

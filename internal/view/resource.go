@@ -16,6 +16,7 @@ import (
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine/columns"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/metrics"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
 )
@@ -37,6 +38,10 @@ type resourcePage struct {
 	remote  engine.Remote[columns.Row]
 	allRows []columns.Row
 	filter  string
+
+	metrics map[string]metrics.PodUsage // pod usage keyed by ns/name (pods only)
+	cpuCol  int                         // CPU column index, or -1
+	memCol  int                         // MEM column index, or -1
 }
 
 // deps mirrors Deps but lets resourcePage store the session without re-importing.
@@ -64,6 +69,18 @@ func newResourcePage(kind, title string, d Deps, opts ...Option) *resourcePage {
 		theme:     d.Theme,
 		table:     tbl,
 		namespace: d.Namespace,
+		cpuCol:    -1,
+		memCol:    -1,
+	}
+	if proj := columns.For(kind); proj != nil {
+		for i, c := range proj.Columns() {
+			switch c.Title {
+			case "CPU":
+				p.cpuCol = i
+			case "MEM":
+				p.memCol = i
+			}
+		}
 	}
 	for _, o := range opts {
 		o(p)
@@ -125,6 +142,14 @@ func (p *resourcePage) Update(m tea.Msg) (Page, tea.Cmd) {
 		if t.Kind == p.kind && t.ViewID == p.viewID {
 			p.apply(t.Snap)
 		}
+		return p, nil
+	case metrics.Snapshot:
+		if t.Available {
+			p.metrics = t.Pods
+		} else {
+			p.metrics = nil
+		}
+		p.reapplyFilter()
 		return p, nil
 	case tea.KeyPressMsg:
 		return p.handleKey(t)
@@ -429,7 +454,31 @@ func (p *resourcePage) apply(snap engine.Remote[columns.Row]) {
 
 func (p *resourcePage) reapplyFilter() {
 	rows := filterRows(p.allRows, p.filter)
+	p.overlayMetrics(rows)
 	p.table.SetRows(rows)
+}
+
+// overlayMetrics rewrites the CPU/MEM cells from the latest metrics snapshot.
+// It clones each modified row's cells so the shared projector output (allRows) is
+// not mutated. A no-op unless the kind has CPU/MEM columns and metrics are live.
+func (p *resourcePage) overlayMetrics(rows []columns.Row) {
+	if p.metrics == nil || (p.cpuCol < 0 && p.memCol < 0) {
+		return
+	}
+	for i := range rows {
+		u, ok := p.metrics[rows[i].Namespace+"/"+rows[i].Name]
+		if !ok {
+			continue
+		}
+		cells := append([]columns.Cell(nil), rows[i].Cells...)
+		if p.cpuCol >= 0 && p.cpuCol < len(cells) {
+			cells[p.cpuCol] = columns.Cell{Text: metrics.FormatCPU(u.CPUMillis), Status: columns.StatusNeutral}
+		}
+		if p.memCol >= 0 && p.memCol < len(cells) {
+			cells[p.memCol] = columns.Cell{Text: metrics.FormatMem(u.MemBytes), Status: columns.StatusNeutral}
+		}
+		rows[i].Cells = cells
+	}
 }
 
 // filterRows applies the live filter: case-insensitive substring over the row's

@@ -18,6 +18,7 @@ import (
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/config"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/engine"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/k8s"
+	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/metrics"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/msg"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/style"
 	"github.com/khemphetsouvannaphasy/kubectl-tui/internal/view"
@@ -50,6 +51,11 @@ type Model struct {
 
 	sink engine.Sink
 	gate *action.TerminalGate
+
+	poller     *metrics.Poller
+	metricsOK  bool
+	clusterCPU float64
+	clusterMem float64
 
 	sess    *k8s.Session
 	pages   []view.Page // stack; top is active
@@ -163,6 +169,12 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 	case execDoneMsg:
 		return m.onExecDone(t)
 
+	case metrics.Snapshot:
+		m.metricsOK = t.Available
+		m.clusterCPU = t.ClusterCPUPct
+		m.clusterMem = t.ClusterMemPct
+		return m, m.routeToPage(t) // the active page overlays per-pod CPU/MEM
+
 	default:
 		// Everything else (engine snapshots, action results) goes to the page.
 		return m, m.routeToPage(message)
@@ -264,6 +276,8 @@ func (m *Model) onSessionReady(t msg.SessionReady) (tea.Model, tea.Cmd) {
 	}
 	m.sess = sess
 	m.booting = false
+	m.poller = metrics.NewPoller(sess.CS, sess.Metrics, sess.Disco, m.sink)
+	go m.poller.Run(sess.Context())
 	return m.navigate(m.cfg.StartKind, sess.Identity.Namespace)
 }
 
@@ -290,6 +304,9 @@ func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	m.pages = []view.Page{page}
 	m.mode = modeNone
 	m.inputBuf = ""
+	if m.poller != nil {
+		m.poller.SetNamespace(namespace)
+	}
 	return m, tea.Batch(page.Init(), page.OnEnter())
 }
 
