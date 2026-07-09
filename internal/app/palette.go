@@ -90,6 +90,28 @@ func (m *Model) selectedCommand() (name string, ok bool) {
 	return matches[m.cmdSel].Name, true
 }
 
+// paletteWindow returns the [start,end) slice of n items, at most size rows, that
+// keeps the selected index visible — the window pins to the top until the
+// selection reaches its bottom edge, then scrolls to follow it (clamped at the
+// end). This is what makes the dropdown track the cursor past the visible rows.
+func paletteWindow(sel, n, size int) (start, end int) {
+	if size >= n {
+		return 0, n
+	}
+	if sel >= size {
+		start = sel - size + 1
+	}
+	end = start + size
+	if end > n {
+		end = n
+		start = end - size
+		if start < 0 {
+			start = 0
+		}
+	}
+	return start, end
+}
+
 // shortAlias returns the shortest alias distinct from the name, for a compact
 // hint in the palette (e.g. "portforwards (pf)").
 func shortAlias(c view.Command) string {

@@ -119,20 +119,41 @@ func (m *Model) renderPalette(width int) []string {
 	}
 	inner := boxW - 4 // account for border + padding
 
+	// Visible command rows: capped at 10, but no more than fit above the footer
+	// (the box is border(2) + header(1) + rows over frame rows 1..height-2). A zero
+	// height means the size isn't known yet — use the full cap.
+	maxRows := 10
+	if m.height > 0 {
+		if fit := m.height - 5; fit < maxRows {
+			maxRows = fit
+		}
+	}
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	// Scroll the window so the highlighted row stays visible.
+	start, end := paletteWindow(m.cmdSel, len(matches), maxRows)
+
 	head := t.AccentText.Bold(true).Render("COMMANDS") + "  " +
 		t.Faint.Render("↑↓ select · tab complete · enter run · esc close")
+	if len(matches) > 0 {
+		pos := fmt.Sprintf("   %d/%d", m.cmdSel+1, len(matches))
+		if start > 0 {
+			pos += " ↑"
+		}
+		if end < len(matches) {
+			pos += " ↓"
+		}
+		head += t.Faint.Render(pos)
+	}
 
 	var rows []string
 	rows = append(rows, head)
 	if len(matches) == 0 {
 		rows = append(rows, t.Faint.Render("no matching command"))
 	}
-	const maxRows = 10
-	for i, c := range matches {
-		if i >= maxRows {
-			rows = append(rows, t.Faint.Render(fmt.Sprintf("…and %d more", len(matches)-maxRows)))
-			break
-		}
+	for i := start; i < end; i++ {
+		c := matches[i]
 		name := c.Name
 		if sa := shortAlias(c); sa != "" {
 			name += " (" + sa + ")"
