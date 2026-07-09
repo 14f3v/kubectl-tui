@@ -29,4 +29,8 @@ var (
 	keyRollout  = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rollout"))
 	keySortNext = key.NewBinding(key.WithKeys(">"), key.WithHelp(">", "sort col"))
 	keySortDir  = key.NewBinding(key.WithKeys("<"), key.WithHelp("<", "sort dir"))
+	keyApprove  = key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "approve"))
+	keyDeny     = key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "deny"))
+	keyDebug    = key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "debug"))
+	keySet      = key.NewBinding(key.WithKeys("="), key.WithHelp("=", "set/patch"))
 )
