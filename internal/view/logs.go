@@ -1,13 +1,16 @@
 package view
 
 import (
+	"fmt"
 	"hash/fnv"
 	"image/color"
+	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/14f3v/kubectl-tui/internal/action/logstream"
@@ -33,8 +36,16 @@ type logsPage struct {
 	theme style.Theme
 	sess  *k8s.Session
 
-	id        string
+	id        string // current stream id (bumped on restart so stale msgs are ignored)
+	baseID    string // stable base for id, without the restart generation suffix
+	gen       int
 	namespace string
+
+	// Single-pod restart params. pod/container are empty for grouped pages.
+	pod       string
+	container string
+	opts      logstream.Options
+	wrap      bool
 
 	// Exactly one start path is set. startSingle opens one pod/container stream
 	// synchronously; resolve lists a workload's pods off the UI thread, after which
@@ -55,6 +66,13 @@ type logsPage struct {
 	autoscroll bool
 }
 
+// logsApplyOptsMsg carries an option change from a modal prompt (which runs off
+// the UI thread) back to the page's Update so the stream restarts on-thread.
+type logsApplyOptsMsg struct {
+	baseID string
+	opts   logstream.Options
+}
+
 // logRefsResolved delivers the pods a workload's selector expanded to, so the
 // group stream can start once the (blocking) list finishes off the UI thread.
 type logRefsResolved struct {
@@ -65,23 +83,67 @@ type logRefsResolved struct {
 
 // NewLogsPage builds a logs page for a single pod (optionally a specific container).
 func NewLogsPage(sess *k8s.Session, theme style.Theme, namespace, pod, container string) *logsPage {
-	title := pod + " · logs"
-	if container != "" {
-		title = pod + "/" + container + " · logs"
-	}
-	id := namespace + "/" + pod + "/" + container
+	return newSinglePodLogs(sess, theme, namespace, pod, container, logstream.Options{})
+}
+
+// NewPreviousLogsPage opens the previous (terminated) container's logs.
+func NewPreviousLogsPage(sess *k8s.Session, theme style.Theme, namespace, pod, container string) *logsPage {
+	return newSinglePodLogs(sess, theme, namespace, pod, container, logstream.Options{Previous: true})
+}
+
+func newSinglePodLogs(sess *k8s.Session, theme style.Theme, namespace, pod, container string, opts logstream.Options) *logsPage {
+	base := namespace + "/" + pod + "/" + container
 	p := &logsPage{
-		title:      title,
 		theme:      theme,
 		sess:       sess,
-		id:         id,
+		id:         base,
+		baseID:     base,
 		namespace:  namespace,
+		pod:        pod,
+		container:  container,
+		opts:       opts,
 		autoscroll: true,
 	}
+	p.title = p.computeTitle()
+	// Reads p.id and p.opts at call time so restart picks up the new generation.
 	p.startSingle = func(sink func(tea.Msg)) logStopper {
-		return logstream.Start(sess.Context(), sess.CS, sink, id, namespace, pod, container)
+		return logstream.StartWithOptions(sess.Context(), sess.CS, sink, p.id, p.namespace, p.pod, p.container, p.opts)
 	}
 	return p
+}
+
+func (p *logsPage) computeTitle() string {
+	t := p.pod
+	if p.container != "" {
+		t = p.pod + "/" + p.container
+	}
+	t += " · logs"
+	if p.opts.Previous {
+		t += " (previous)"
+	}
+	return t
+}
+
+// restart stops the current single-pod stream and reopens it with p.opts. The id
+// is bumped so any late messages from the old stream are ignored.
+func (p *logsPage) restart() {
+	if p.grouped || p.startSingle == nil {
+		return
+	}
+	if p.stream != nil {
+		p.stream.Stop()
+		p.stream = nil
+	}
+	p.gen++
+	p.id = fmt.Sprintf("%s#%d", p.baseID, p.gen)
+	p.lines = nil
+	p.dropped = 0
+	p.ended = false
+	p.endErr = nil
+	p.offset = 0
+	p.autoscroll = true
+	p.title = p.computeTitle()
+	p.stream = p.startSingle(p.sess.Engine.Sink())
 }
 
 // NewMultiLogsPage builds a logs page that tails every pod matching a workload's
@@ -113,12 +175,22 @@ func (p *logsPage) SetFilter(string)  {}
 func (p *logsPage) Summary() Summary { return Summary{Total: len(p.lines)} }
 
 func (p *logsPage) Keys() []key.Binding {
-	return []key.Binding{
+	keys := []key.Binding{
 		key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "scroll")),
 		key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
 		key.NewBinding(key.WithKeys("g", "G"), key.WithHelp("g/G", "top/bottom")),
-		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wrap")),
+		key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "save")),
 	}
+	// Restart-based options only apply to a single pod/container stream.
+	if !p.grouped {
+		keys = append(keys,
+			key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "previous")),
+			key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "container")),
+			key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tail")),
+		)
+	}
+	return append(keys, key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")))
 }
 
 func (p *logsPage) OnEnter() tea.Cmd {
@@ -173,6 +245,12 @@ func (p *logsPage) Update(m tea.Msg) (Page, tea.Cmd) {
 		}
 		p.stream = logstream.StartGroup(p.sess.Context(), p.sess.CS, p.sess.Engine.Sink(), p.id, p.namespace, t.refs)
 		return p, nil
+	case logsApplyOptsMsg:
+		if t.baseID == p.baseID {
+			p.opts = t.opts
+			p.restart()
+		}
+		return p, nil
 	case tea.KeyPressMsg:
 		return p.handleKey(t)
 	}
@@ -203,8 +281,100 @@ func (p *logsPage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		if p.autoscroll {
 			p.offset = p.maxOffset()
 		}
+	case "w":
+		p.wrap = !p.wrap
+	case "C":
+		return p, p.saveAction()
+	case "p":
+		if p.grouped {
+			return p, toast("previous logs are single-pod only", msg.LevelInfo)
+		}
+		p.opts.Previous = !p.opts.Previous
+		p.restart()
+	case "c":
+		if p.grouped {
+			return p, toast("container picker is single-pod only", msg.LevelInfo)
+		}
+		return p, p.containerPicker()
+	case "t":
+		if p.grouped {
+			return p, toast("tail is single-pod only", msg.LevelInfo)
+		}
+		return p, p.tailPrompt()
 	}
 	return p, nil
+}
+
+// saveAction prompts for a path and writes the current buffer to it.
+func (p *logsPage) saveAction() tea.Cmd {
+	lines := append([]string(nil), p.lines...) // snapshot; the prompt runs off-thread
+	name := strings.ReplaceAll(p.pod, "/", "-")
+	if name == "" {
+		name = "logs"
+	}
+	def := "/tmp/" + name + ".log"
+	return func() tea.Msg {
+		return PromptRequest{
+			Title:   "Save logs",
+			Label:   "Path",
+			Initial: def,
+			Action: func(path string) tea.Msg {
+				if err := logstream.SaveLines(strings.TrimSpace(path), lines); err != nil {
+					return msg.Toast{Text: "save: " + err.Error(), Level: msg.LevelError}
+				}
+				return msg.Toast{Text: fmt.Sprintf("saved %d lines to %s", len(lines), strings.TrimSpace(path)), Level: msg.LevelSuccess}
+			},
+		}
+	}
+}
+
+// tailPrompt asks for a tail-line count and restarts the stream via a msg (the
+// prompt Action runs off-thread, so it must not touch page state directly).
+func (p *logsPage) tailPrompt() tea.Cmd {
+	baseID := p.baseID
+	cur := p.opts
+	initial := "500"
+	if cur.TailLines > 0 {
+		initial = strconv.FormatInt(cur.TailLines, 10)
+	}
+	return func() tea.Msg {
+		return PromptRequest{
+			Title:   "Tail lines",
+			Label:   "Lines",
+			Initial: initial,
+			Validate: func(s string) error {
+				n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+				if err != nil || n < 0 {
+					return fmt.Errorf("enter a non-negative whole number")
+				}
+				return nil
+			},
+			Action: func(s string) tea.Msg {
+				n, _ := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+				newOpts := cur
+				newOpts.TailLines = n
+				return logsApplyOptsMsg{baseID: baseID, opts: newOpts}
+			},
+		}
+	}
+}
+
+// containerPicker pushes the container drill-in for the current pod (from cache).
+func (p *logsPage) containerPicker() tea.Cmd {
+	vs := p.sess.Engine.Get("pods")
+	if vs == nil {
+		return toast("no live pod data", msg.LevelError)
+	}
+	obj, ok := vs.Get(p.namespace, p.pod)
+	if !ok {
+		return toast(p.pod+" is no longer in the cache", msg.LevelWarn)
+	}
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+	page := newContainersPage(p.sess, p.theme, pod)
+	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
 func (p *logsPage) View(width, height int) string {
@@ -230,7 +400,11 @@ func (p *logsPage) View(width, height int) string {
 		for _, ln := range p.lines[p.offset:end] {
 			rendered = append(rendered, p.renderLine(ln))
 		}
-		visible = strings.Join(rendered, "\n")
+		body := strings.Join(rendered, "\n")
+		if p.wrap && width > 0 {
+			body = lipgloss.NewStyle().Width(width).Render(body)
+		}
+		visible = body
 	}
 	return visible + "\n" + p.status()
 }
@@ -271,6 +445,15 @@ func (p *logsPage) status() string {
 		parts = append(parts, t.AccentText.Render("following"))
 	} else {
 		parts = append(parts, t.Faint.Render("paused (f to follow)"))
+	}
+	if p.opts.Previous {
+		parts = append(parts, t.Faint.Render("previous"))
+	}
+	if p.opts.TailLines > 0 {
+		parts = append(parts, t.Faint.Render("tail "+strconv.FormatInt(p.opts.TailLines, 10)))
+	}
+	if p.wrap {
+		parts = append(parts, t.Faint.Render("wrap"))
 	}
 	if p.dropped > 0 {
 		parts = append(parts, t.PinkText.Render("… "+itoaLocal(p.dropped)+" lines dropped"))

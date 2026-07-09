@@ -8,7 +8,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/14f3v/kubectl-tui/internal/msg"
@@ -24,6 +23,7 @@ type Group struct {
 	ID   string
 	sink func(tea.Msg)
 	buf  *buffer
+	opts Options
 
 	cancel    context.CancelFunc
 	stopFlush chan struct{}
@@ -37,31 +37,10 @@ type Group struct {
 // StartGroup opens a follow log stream for every PodRef and begins delivering
 // merged, tagged batches under id. It mirrors Session's shape (one reader goroutine
 // per source plus one flusher) so downstream UI handling is identical to a single
-// session. If pods is empty the group ends immediately with a clean LogEnded.
+// session. If pods is empty the group ends immediately with a clean LogEnded. It is
+// the default-Options case of StartGroupWithOptions.
 func StartGroup(parent context.Context, cs kubernetes.Interface, sink func(tea.Msg), id, namespace string, pods []PodRef) *Group {
-	ctx, cancel := context.WithCancel(parent)
-	g := &Group{
-		ID:        id,
-		sink:      sink,
-		buf:       newBuffer(DefaultCap),
-		cancel:    cancel,
-		stopFlush: make(chan struct{}),
-	}
-	g.remaining.Store(int32(len(pods)))
-
-	go g.flushLoop(ctx)
-
-	// With no sources there is no reader to drive the terminal flush, so end here.
-	if len(pods) == 0 {
-		g.stopFlushing()
-		g.sink(msg.LogEnded{SessionID: g.ID})
-		return g
-	}
-
-	for _, ref := range pods {
-		go g.read(ctx, cs, namespace, ref)
-	}
-	return g
+	return StartGroupWithOptions(parent, cs, sink, id, namespace, pods, Options{})
 }
 
 // Stop cancels every reader and the flusher. It is idempotent: repeated calls (and
@@ -76,13 +55,7 @@ func (g *Group) Stop() {
 func (g *Group) read(ctx context.Context, cs kubernetes.Interface, namespace string, ref PodRef) {
 	defer g.readerDone()
 
-	tail := int64(500)
-	req := cs.CoreV1().Pods(namespace).GetLogs(ref.Pod, &corev1.PodLogOptions{
-		Follow:     true,
-		TailLines:  &tail,
-		Timestamps: true,
-		Container:  ref.Container,
-	})
+	req := cs.CoreV1().Pods(namespace).GetLogs(ref.Pod, g.opts.podLogOptions(ref.Container))
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		g.buf.append(taggedLine(ref.Tag, "stream error: "+err.Error()))

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/14f3v/kubectl-tui/internal/msg"
@@ -18,11 +17,14 @@ import (
 const flushInterval = 75 * time.Millisecond
 
 // Session streams one pod/container's logs. The reader goroutine never blocks on
-// the UI; the flusher delivers coalesced batches. Stop cancels both.
+// the UI; the flusher delivers coalesced batches. Stop cancels both. opts records
+// the fetch knobs (previous/since/tail) chosen when the session was opened, so the
+// reader can rebuild the exact PodLogOptions.
 type Session struct {
 	ID   string
 	sink func(tea.Msg)
 	buf  *buffer
+	opts Options
 
 	cancel    context.CancelFunc
 	stopFlush chan struct{}
@@ -30,31 +32,17 @@ type Session struct {
 }
 
 // Start opens a follow log stream and begins delivering batches tagged with id.
+// It is the default-Options case of StartWithOptions; zero Options reproduce the
+// historical behavior (follow, 500-line tail, timestamps on).
 func Start(parent context.Context, cs kubernetes.Interface, sink func(tea.Msg), id, namespace, pod, container string) *Session {
-	ctx, cancel := context.WithCancel(parent)
-	s := &Session{
-		ID:        id,
-		sink:      sink,
-		buf:       newBuffer(DefaultCap),
-		cancel:    cancel,
-		stopFlush: make(chan struct{}),
-	}
-	go s.read(ctx, cs, namespace, pod, container)
-	go s.flushLoop(ctx)
-	return s
+	return StartWithOptions(parent, cs, sink, id, namespace, pod, container, Options{})
 }
 
 // Stop cancels the stream and the flusher.
 func (s *Session) Stop() { s.cancel() }
 
 func (s *Session) read(ctx context.Context, cs kubernetes.Interface, namespace, pod, container string) {
-	tail := int64(500)
-	req := cs.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{
-		Follow:     true,
-		TailLines:  &tail,
-		Timestamps: true,
-		Container:  container,
-	})
+	req := cs.CoreV1().Pods(namespace).GetLogs(pod, s.opts.podLogOptions(container))
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		s.stopFlushing()
