@@ -119,6 +119,35 @@ func TestFindResource(t *testing.T) {
 	}
 }
 
+func TestFindResourceAny(t *testing.T) {
+	lists := []*metav1.APIResourceList{
+		{GroupVersion: "v1", APIResources: []metav1.APIResource{
+			{Name: "endpoints", Kind: "Endpoints", Namespaced: true},
+			{Name: "componentstatuses", Kind: "ComponentStatus", Namespaced: false},
+		}},
+		{GroupVersion: "coordination.k8s.io/v1", APIResources: []metav1.APIResource{
+			{Name: "leases", Kind: "Lease", Namespaced: true},
+		}},
+	}
+
+	// Core-group resource: empty group, name is the bare plural (no dot).
+	got, ok := findResourceAny(lists, "endpoints")
+	if !ok || got.Group != "" || got.Kind != "Endpoints" || got.Name != "endpoints" || !got.Namespaced {
+		t.Fatalf("endpoints = %+v ok=%v", got, ok)
+	}
+	// Cluster-scoped core-group resource.
+	if got, ok := findResourceAny(lists, "componentstatuses"); !ok || got.Namespaced || got.Scope != "Cluster" {
+		t.Fatalf("componentstatuses = %+v ok=%v", got, ok)
+	}
+	// Grouped resource: group filled, dotted name.
+	if got, ok := findResourceAny(lists, "leases"); !ok || got.Group != "coordination.k8s.io" || got.Name != "leases.coordination.k8s.io" {
+		t.Fatalf("leases = %+v ok=%v", got, ok)
+	}
+	if _, ok := findResourceAny(lists, "nope"); ok {
+		t.Error("findResourceAny matched a missing resource")
+	}
+}
+
 // crdUnstructured builds a minimal CustomResourceDefinition as unstructured data
 // with the fields crdInfoFrom reads.
 func crdUnstructured(group, plural, kind, scope string, versions []interface{}) *unstructured.Unstructured {
