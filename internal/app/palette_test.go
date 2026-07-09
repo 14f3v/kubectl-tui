@@ -8,6 +8,38 @@ import (
 	"github.com/14f3v/kubectl-tui/internal/view"
 )
 
+func TestPaletteWindow(t *testing.T) {
+	// The window must always keep the selection visible and stay the right size.
+	for _, tc := range []struct{ n, size int }{{10, 5}, {10, 10}, {12, 7}, {3, 5}, {1, 1}} {
+		size := tc.size
+		if size > tc.n {
+			size = tc.n
+		}
+		for sel := 0; sel < tc.n; sel++ {
+			start, end := paletteWindow(sel, tc.n, tc.size)
+			if start < 0 || end > tc.n || start > end {
+				t.Fatalf("n=%d size=%d sel=%d: bad window [%d,%d)", tc.n, tc.size, sel, start, end)
+			}
+			if sel < start || sel >= end {
+				t.Fatalf("n=%d size=%d sel=%d: selection outside window [%d,%d)", tc.n, tc.size, sel, start, end)
+			}
+			if got := end - start; got != size {
+				t.Fatalf("n=%d size=%d sel=%d: window has %d rows, want %d", tc.n, tc.size, sel, got, size)
+			}
+		}
+	}
+	// Spot-check the scroll boundary: n=10, size=5.
+	if s, e := paletteWindow(4, 10, 5); s != 0 || e != 5 {
+		t.Fatalf("sel=4: got [%d,%d), want [0,5)", s, e)
+	}
+	if s, e := paletteWindow(5, 10, 5); s != 1 || e != 6 {
+		t.Fatalf("sel=5: got [%d,%d), want [1,6)", s, e)
+	}
+	if s, e := paletteWindow(9, 10, 5); s != 5 || e != 10 {
+		t.Fatalf("sel=9: got [%d,%d), want [5,10)", s, e)
+	}
+}
+
 func names(cmds []view.Command) []string {
 	out := make([]string, len(cmds))
 	for i, c := range cmds {
