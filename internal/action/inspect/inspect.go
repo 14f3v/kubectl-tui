@@ -56,6 +56,8 @@ var groupKinds = map[string]schema.GroupKind{
 	"poddisruptionbudgets":     {Group: "policy", Kind: "PodDisruptionBudget"},
 	"resourcequotas":           {Group: "", Kind: "ResourceQuota"},
 	"limitranges":              {Group: "", Kind: "LimitRange"},
+
+	"certificatesigningrequests": {Group: "certificates.k8s.io", Kind: "CertificateSigningRequest"},
 }
 
 // GroupKindFor returns the GroupKind for a kind key.

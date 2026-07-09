@@ -52,6 +52,9 @@ func init() {
 	registerKind("poddisruptionbudgets", []string{"pdb", "poddisruptionbudget", "poddisruptionbudgets"}, "pod disruption budgets")
 	registerKind("resourcequotas", []string{"quota", "resourcequota", "resourcequotas"}, "resource quotas")
 	registerKind("limitranges", []string{"limits", "limitrange", "limitranges"}, "limit ranges")
+
+	// Certificate signing requests (#25) — approve/deny via a/x on the CSR view.
+	registerKind("certificatesigningrequests", []string{"csr", "csrs", "certificatesigningrequest", "certificatesigningrequests"}, "certificate signing requests (a approve / x deny)")
 }
 
 // registerKind wires a generic resource page (title == kind) for kinds whose

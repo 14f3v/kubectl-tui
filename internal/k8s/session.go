@@ -15,6 +15,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
+	certv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -193,6 +194,7 @@ func (s *Session) registerFactories() {
 	storage := s.CS.StorageV1().RESTClient()
 	autoscaling := s.CS.AutoscalingV2().RESTClient()
 	policy := s.CS.PolicyV1().RESTClient()
+	certificates := s.CS.CertificatesV1().RESTClient()
 
 	reg := func(kind, resource string, warm bool, getter cache.Getter, example runtime.Object, clusterScoped bool) {
 		s.Engine.Register(kind, warm, func(sink engine.Sink, ns string) *engine.ViewStore {
@@ -243,6 +245,9 @@ func (s *Session) registerFactories() {
 	reg("poddisruptionbudgets", "poddisruptionbudgets", true, policy, &policyv1.PodDisruptionBudget{}, false)
 	reg("resourcequotas", "resourcequotas", true, core, &corev1.ResourceQuota{}, false)
 	reg("limitranges", "limitranges", true, core, &corev1.LimitRange{}, false)
+
+	// Certificate signing requests (#25) — cluster-scoped.
+	reg("certificatesigningrequests", "certificatesigningrequests", true, certificates, &certv1.CertificateSigningRequest{}, true)
 }
 
 // nsOrAll maps an empty namespace to the all-namespaces sentinel.
