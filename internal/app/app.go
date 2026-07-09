@@ -9,12 +9,15 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/14f3v/kubectl-tui/internal/action"
+	"github.com/14f3v/kubectl-tui/internal/action/apply"
+	"github.com/14f3v/kubectl-tui/internal/action/editor"
 	"github.com/14f3v/kubectl-tui/internal/config"
 	"github.com/14f3v/kubectl-tui/internal/engine"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
@@ -180,6 +183,9 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 	case view.PromptRequest:
 		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, validate: t.Validate, action: t.Action}
 		return m, nil
+
+	case view.SwitchContextRequest:
+		return m.switchContext(t.Name)
 
 	case view.ExecRequest:
 		return m.handleExecRequest(t)
@@ -619,12 +625,97 @@ func (m *Model) runCommand(buf string) (tea.Model, tea.Cmd) {
 		}
 	case "ctx":
 		if cmd.arg == "" {
-			return m, func() tea.Msg {
-				return msg.Toast{Text: "usage: :ctx <context-name>", Level: msg.LevelInfo}
+			if m.sess == nil {
+				return m, nil
 			}
+			return m.pushPage(view.NewContextPicker(m.sess, m.theme))
 		}
 		return m.switchContext(cmd.arg)
+	case "apply":
+		return m.applyCommand()
 	default:
 		return m, nil
 	}
+}
+
+// applyCommand opens $EDITOR on a blank manifest and server-side applies whatever
+// the user saves (multi-doc supported). GVR is resolved from each document via a
+// discovery-backed REST mapper, so it works for any kind — including CRDs.
+func (m *Model) applyCommand() (tea.Model, tea.Cmd) {
+	if m.sess == nil {
+		return m, nil
+	}
+	if m.cfg.Config.ReadOnly {
+		return m, toastCmd("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	ns := ""
+	if p := m.active(); p != nil {
+		ns = p.Namespace()
+	}
+	path, _, err := editor.WriteTemp(applyTemplate(ns))
+	if err != nil {
+		return m, toastCmd("apply: "+err.Error(), msg.LevelError)
+	}
+	sess := m.sess
+	after := func(execErr error) tea.Msg {
+		defer os.Remove(path)
+		if execErr != nil {
+			return msg.Toast{Text: "editor: " + execErr.Error(), Level: msg.LevelError}
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return msg.Toast{Text: "apply: " + rerr.Error(), Level: msg.LevelError}
+		}
+		mapper := apply.NewMapper(sess.Disco)
+		return applyToast(apply.Apply(sess.Context(), sess.Dyn, mapper, data, "kubetui", ns))
+	}
+	return m, func() tea.Msg {
+		return view.ExecRequest{Label: "apply", Process: editor.Process(path), After: after}
+	}
+}
+
+// applyTemplate is the starter buffer for :apply, with guidance in comments (which
+// are dropped before applying, so saving unchanged applies nothing).
+func applyTemplate(ns string) string {
+	if ns == "" {
+		ns = "default"
+	}
+	return "# Write one or more Kubernetes manifests below, then save & quit to apply.\n" +
+		"# Separate documents with '---'. Applied server-side (field manager: kubetui).\n" +
+		"# Example:\n" +
+		"# apiVersion: v1\n" +
+		"# kind: ConfigMap\n" +
+		"# metadata:\n" +
+		"#   name: example\n" +
+		"#   namespace: " + ns + "\n" +
+		"# data:\n" +
+		"#   key: value\n"
+}
+
+// applyToast summarizes an apply result set into a single toast.
+func applyToast(results []apply.Result) msg.Toast {
+	if len(results) == 0 {
+		return msg.Toast{Text: "nothing to apply", Level: msg.LevelInfo}
+	}
+	var okc, failed int
+	firstErr := ""
+	for _, r := range results {
+		if r.Err != nil {
+			failed++
+			if firstErr == "" {
+				firstErr = r.Name + ": " + r.Err.Error()
+			}
+			continue
+		}
+		okc++
+	}
+	if failed == 0 {
+		return msg.Toast{Text: fmt.Sprintf("applied %d object(s)", okc), Level: msg.LevelSuccess}
+	}
+	return msg.Toast{Text: fmt.Sprintf("applied %d, %d failed — %s", okc, failed, firstErr), Level: msg.LevelError}
+}
+
+// toastCmd is a small helper for returning a toast as a command.
+func toastCmd(text string, level msg.Level) tea.Cmd {
+	return func() tea.Msg { return msg.Toast{Text: text, Level: level} }
 }

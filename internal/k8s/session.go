@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -62,8 +63,16 @@ type Session struct {
 	Forwards *portfwd.Manager
 	Identity Identity
 
+	contexts []string // available kubeconfig context names, sorted
+
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+// Contexts returns the available kubeconfig context names (sorted) and the
+// currently active one, for the :ctx picker.
+func (s *Session) Contexts() (names []string, current string) {
+	return s.contexts, s.Identity.Context
 }
 
 // NewSession loads the kubeconfig and builds the clients, then registers the
@@ -118,8 +127,24 @@ func NewSession(parent context.Context, kubeconfigPath, contextName string, sink
 	}
 	s.Forwards = portfwd.NewManager(restCfg, cs, sink)
 	s.Identity = deriveIdentity(cc, restCfg)
+	s.contexts = contextNames(cc)
 	s.registerFactories()
 	return s, nil
+}
+
+// contextNames returns the sorted kubeconfig context names, or nil if the raw
+// config cannot be read.
+func contextNames(cc clientcmd.ClientConfig) []string {
+	raw, err := cc.RawConfig()
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(raw.Contexts))
+	for name := range raw.Contexts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Context returns the Session's context; it is cancelled on Dispose.

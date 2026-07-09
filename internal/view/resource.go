@@ -2,6 +2,7 @@ package view
 
 import (
 	"os"
+	"regexp"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -137,7 +138,7 @@ func (p *resourcePage) Summary() Summary {
 func (p *resourcePage) Keys() []key.Binding {
 	keys := []key.Binding{
 		keyEnter, keyDescribe, keyLogs, keyShell, keyYAML,
-		keyEdit, keyDelete, keyKill, keyPortFwd,
+		keyEdit, keyDelete, keyKill, keyPortFwd, keySortNext, keySortDir,
 	}
 	// Workload-only actions are advertised only where they apply.
 	if scale.Scalable(p.kind) {
@@ -204,10 +205,30 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		return p, p.scaleAction()
 	case key.Matches(k, keyRollout):
 		return p, p.rolloutAction()
+	case key.Matches(k, keySortNext):
+		p.cycleSort()
+	case key.Matches(k, keySortDir):
+		p.toggleSortDir()
 	case key.Matches(k, keyEnter):
 		return p, p.enterAction()
 	}
 	return p, nil
+}
+
+// cycleSort advances the sort to the next column (wrapping), ascending.
+func (p *resourcePage) cycleSort() {
+	n := p.table.ColumnCount()
+	if n == 0 {
+		return
+	}
+	col, _ := p.table.SortColumn()
+	p.table.SetSortState((col+1)%n, false)
+}
+
+// toggleSortDir flips the current sort column's direction.
+func (p *resourcePage) toggleSortDir() {
+	col, _ := p.table.SortColumn()
+	p.table.SetSort(col) // re-selecting the current column toggles direction
 }
 
 // enterAction drills into the selected row: a pod's containers, or a secret's
@@ -219,9 +240,34 @@ func (p *resourcePage) enterAction() tea.Cmd {
 		return p.enterPod()
 	case "secrets":
 		return p.enterSecret()
+	case "namespaces":
+		return p.enterNamespace()
+	case "nodes":
+		return p.enterNode()
 	default:
 		return nil
 	}
+}
+
+// enterNamespace drills into a namespace by scoping the pods view to it (k9s-style
+// "open this namespace").
+func (p *resourcePage) enterNamespace() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	ns := row.Name
+	return func() tea.Msg { return msg.Navigate{Kind: "pods", Namespace: ns} }
+}
+
+// enterNode opens the node operations menu (cordon/uncordon/drain).
+func (p *resourcePage) enterNode() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	page := newNodeOpsPage(p.sess.Session, p.theme, row.Name, p.sess.ReadOnly)
+	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
 func (p *resourcePage) enterPod() tea.Cmd {
@@ -676,8 +722,10 @@ func (p *resourcePage) overlayMetrics(rows []columns.Row) {
 	}
 }
 
-// filterRows applies the live filter: case-insensitive substring over the row's
-// name and cell text, with a leading "!" inverting the match.
+// filterRows applies the live filter over the row's name and cell text. A leading
+// "!" inverts the match. By default the term is a case-insensitive substring; a
+// leading "~" switches to a case-insensitive regular expression. An unparseable
+// regex filters nothing (all rows pass) until it becomes valid.
 func filterRows(rows []columns.Row, filter string) []columns.Row {
 	if filter == "" {
 		return rows
@@ -688,20 +736,41 @@ func filterRows(rows []columns.Row, filter string) []columns.Row {
 		invert = true
 		term = term[1:]
 	}
-	term = strings.ToLower(term)
 	if term == "" {
 		return rows
 	}
+	var re *regexp.Regexp
+	if strings.HasPrefix(term, "~") {
+		compiled, err := regexp.Compile("(?i)" + term[1:])
+		if err != nil {
+			return rows
+		}
+		re = compiled
+	}
+	lower := strings.ToLower(term)
 	out := make([]columns.Row, 0, len(rows))
 	for _, r := range rows {
-		if rowMatches(r, term) != invert {
+		if rowMatches(r, lower, re) != invert {
 			out = append(out, r)
 		}
 	}
 	return out
 }
 
-func rowMatches(r columns.Row, term string) bool {
+// rowMatches reports whether a row matches the filter: regex when re != nil,
+// otherwise case-insensitive substring on term.
+func rowMatches(r columns.Row, term string, re *regexp.Regexp) bool {
+	if re != nil {
+		if re.MatchString(r.Name) {
+			return true
+		}
+		for _, c := range r.Cells {
+			if re.MatchString(c.Text) {
+				return true
+			}
+		}
+		return false
+	}
 	if strings.Contains(strings.ToLower(r.Name), term) {
 		return true
 	}

@@ -27,6 +27,8 @@ func parseCommand(s string) command {
 			c.arg = fields[1] // preserve case for the context name
 		}
 		return c
+	case "apply", "create":
+		return command{verb: "apply"}
 	default:
 		c := command{verb: "nav", kind: head}
 		if len(fields) > 1 {
