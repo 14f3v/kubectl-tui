@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/14f3v/kubectl-tui/internal/action"
 	"github.com/14f3v/kubectl-tui/internal/action/apply"
+	"github.com/14f3v/kubectl-tui/internal/action/dynbrowse"
 	"github.com/14f3v/kubectl-tui/internal/action/editor"
 	"github.com/14f3v/kubectl-tui/internal/config"
 	"github.com/14f3v/kubectl-tui/internal/engine"
@@ -633,8 +635,45 @@ func (m *Model) runCommand(buf string) (tea.Model, tea.Cmd) {
 		return m.switchContext(cmd.arg)
 	case "apply":
 		return m.applyCommand()
+	case "crds":
+		if m.sess == nil {
+			return m, nil
+		}
+		return m.pushPage(view.NewCRDList(m.sess, m.theme, m.activeNamespace(), m.cfg.Config.ReadOnly))
+	case "crdopen":
+		return m.openCRD(cmd.arg)
 	default:
 		return m, nil
+	}
+}
+
+// activeNamespace is the namespace scope of the active page ("" = all namespaces).
+func (m *Model) activeNamespace() string {
+	if p := m.active(); p != nil {
+		return p.Namespace()
+	}
+	return ""
+}
+
+// openCRD resolves a fully-qualified <plural>.<group> to its served resource
+// (off the UI thread) and opens the Table-protocol browse page.
+func (m *Model) openCRD(token string) (tea.Model, tea.Cmd) {
+	if m.sess == nil {
+		return m, nil
+	}
+	i := strings.Index(token, ".")
+	if i <= 0 || i >= len(token)-1 {
+		return m, toastCmd("usage: :<plural>.<group> (e.g. certificates.cert-manager.io)", msg.LevelInfo)
+	}
+	plural, group := token[:i], token[i+1:]
+	sess, theme, ns, ro := m.sess, m.theme, m.activeNamespace(), m.cfg.Config.ReadOnly
+	return m, func() tea.Msg {
+		info, err := dynbrowse.ResolvePluralGroup(sess.Context(), sess.Disco, plural, group)
+		if err != nil {
+			return msg.Toast{Text: err.Error(), Level: msg.LevelError}
+		}
+		title := info.Kind + " (" + info.Group + ")"
+		return view.PushMsg{Page: view.NewCRDBrowse(sess, theme, title, info.GVR(), info.Namespaced, ns, ro)}
 	}
 }
 
