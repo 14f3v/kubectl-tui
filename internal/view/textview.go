@@ -1,11 +1,14 @@
 package view
 
 import (
+	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/14f3v/kubectl-tui/internal/style"
 )
@@ -57,6 +60,7 @@ type ExecRequest struct {
 
 // TextView is a read-only scrollable text page used for YAML and describe output.
 // It renders the visible window of lines; the root chrome fits width and height.
+// An active filter (the "/" search) highlights every match in the visible text.
 type TextView struct {
 	title   string
 	theme   style.Theme
@@ -64,16 +68,23 @@ type TextView struct {
 	offset  int
 	height  int
 	filter  string
-	matched []int // line indices matching the active filter
-	matchAt int   // index into matched of the current match
+	needle  string         // lowercased substring to match, when not a regex
+	re      *regexp.Regexp // compiled matcher when the filter starts with "~"
+	matched []int          // line indices matching the active filter
+	matchAt int            // index into matched of the current match
+
+	matchStyle lipgloss.Style // every match
+	curStyle   lipgloss.Style // the match n/N is currently on
 }
 
 // NewTextView builds a text page titled title over content.
 func NewTextView(title, content string, theme style.Theme) *TextView {
 	return &TextView{
-		title: title,
-		theme: theme,
-		lines: strings.Split(content, "\n"),
+		title:      title,
+		theme:      theme,
+		lines:      strings.Split(content, "\n"),
+		matchStyle: lipgloss.NewStyle().Foreground(theme.Pal.Bg).Background(theme.Pal.Warn),
+		curStyle:   lipgloss.NewStyle().Foreground(theme.Pal.Bg).Background(theme.Pal.Accent).Bold(true),
 	}
 }
 
@@ -95,24 +106,104 @@ func (v *TextView) Keys() []key.Binding {
 	}
 }
 
-// SetFilter treats the filter as an in-page search: it jumps to the first
-// matching line and records matches for n/N.
+// SetFilter treats the filter as an in-page search: it records matching lines
+// (for n/N and highlighting) and jumps to the first. A leading "~" makes the term
+// a case-insensitive regex (mirroring the resource-table filter); otherwise it is
+// a case-insensitive substring. An unparseable regex matches nothing.
 func (v *TextView) SetFilter(f string) {
 	v.filter = f
 	v.matched = v.matched[:0]
 	v.matchAt = 0
+	v.needle = ""
+	v.re = nil
 	if f == "" {
 		return
 	}
-	needle := strings.ToLower(f)
+	if strings.HasPrefix(f, "~") {
+		body := f[1:]
+		if body == "" {
+			return
+		}
+		re, err := regexp.Compile("(?i)" + body)
+		if err != nil {
+			return
+		}
+		v.re = re
+	} else {
+		v.needle = strings.ToLower(f)
+	}
 	for i, ln := range v.lines {
-		if strings.Contains(strings.ToLower(ln), needle) {
+		if len(v.matchRanges(ln)) > 0 {
 			v.matched = append(v.matched, i)
 		}
 	}
 	if len(v.matched) > 0 {
 		v.scrollTo(v.matched[0])
 	}
+}
+
+// matchRanges returns the [start,end) byte spans of the active filter's matches in
+// a line: regex when set, otherwise a case-insensitive substring scan. Zero-width
+// matches are skipped so highlighting never renders an empty span.
+func (v *TextView) matchRanges(line string) [][2]int {
+	if v.re != nil {
+		idx := v.re.FindAllStringIndex(line, -1)
+		out := make([][2]int, 0, len(idx))
+		for _, r := range idx {
+			if r[1] > r[0] {
+				out = append(out, [2]int{r[0], r[1]})
+			}
+		}
+		return out
+	}
+	if v.needle == "" {
+		return nil
+	}
+	lower := strings.ToLower(line)
+	var out [][2]int
+	for from := 0; ; {
+		i := strings.Index(lower[from:], v.needle)
+		if i < 0 {
+			break
+		}
+		s := from + i
+		out = append(out, [2]int{s, s + len(v.needle)})
+		from = s + len(v.needle)
+	}
+	return out
+}
+
+// highlight wraps each match span in a highlight style. The current match's line
+// uses a brighter style so n/N is easy to track.
+func (v *TextView) highlight(line string, isCurrent bool) string {
+	ranges := v.matchRanges(line)
+	if len(ranges) == 0 {
+		return line
+	}
+	st := v.matchStyle
+	if isCurrent {
+		st = v.curStyle
+	}
+	var b strings.Builder
+	last := 0
+	for _, r := range ranges {
+		if r[0] < last {
+			continue // defensive against overlaps
+		}
+		b.WriteString(line[last:r[0]])
+		b.WriteString(st.Render(line[r[0]:r[1]]))
+		last = r[1]
+	}
+	b.WriteString(line[last:])
+	return b.String()
+}
+
+// matchStatus is the faint bottom row shown while a filter is active.
+func (v *TextView) matchStatus() string {
+	if len(v.matched) == 0 {
+		return v.theme.Faint.Render(fmt.Sprintf("no matches for %q", v.filter))
+	}
+	return v.theme.Faint.Render(fmt.Sprintf("match %d/%d for %q · n/N jump", v.matchAt+1, len(v.matched), v.filter))
 }
 
 func (v *TextView) Update(m tea.Msg) (Page, tea.Cmd) {
@@ -142,16 +233,42 @@ func (v *TextView) Update(m tea.Msg) (Page, tea.Cmd) {
 }
 
 func (v *TextView) View(width, height int) string {
-	v.height = height
+	filtering := v.filter != ""
+	body := height
+	if filtering {
+		body = height - 1 // reserve the bottom row for the match status
+		if body < 1 {
+			body = 1
+		}
+	}
+	v.height = body
 	if v.offset > v.maxOffset() {
 		v.offset = v.maxOffset()
 	}
-	end := v.offset + height
+	if v.offset < 0 {
+		v.offset = 0
+	}
+	end := v.offset + body
 	if end > len(v.lines) {
 		end = len(v.lines)
 	}
-	visible := v.lines[v.offset:end]
-	return strings.Join(visible, "\n")
+	cur := -1
+	if len(v.matched) > 0 {
+		cur = v.matched[v.matchAt]
+	}
+	rendered := make([]string, 0, end-v.offset)
+	for i := v.offset; i < end; i++ {
+		ln := v.lines[i]
+		if filtering {
+			ln = v.highlight(ln, i == cur)
+		}
+		rendered = append(rendered, ln)
+	}
+	out := strings.Join(rendered, "\n")
+	if filtering {
+		out += "\n" + v.matchStatus()
+	}
+	return out
 }
 
 func (v *TextView) scroll(delta int) {
