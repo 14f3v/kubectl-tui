@@ -16,11 +16,14 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	certv1 "k8s.io/api/certificates/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	nodev1 "k8s.io/api/node/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	schedulingv1 "k8s.io/api/scheduling/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -195,6 +198,9 @@ func (s *Session) registerFactories() {
 	autoscaling := s.CS.AutoscalingV2().RESTClient()
 	policy := s.CS.PolicyV1().RESTClient()
 	certificates := s.CS.CertificatesV1().RESTClient()
+	scheduling := s.CS.SchedulingV1().RESTClient()
+	node := s.CS.NodeV1().RESTClient()
+	coordination := s.CS.CoordinationV1().RESTClient()
 
 	reg := func(kind, resource string, warm bool, getter cache.Getter, example runtime.Object, clusterScoped bool) {
 		s.Engine.Register(kind, warm, func(sink engine.Sink, ns string) *engine.ViewStore {
@@ -248,6 +254,12 @@ func (s *Session) registerFactories() {
 
 	// Certificate signing requests (#25) — cluster-scoped.
 	reg("certificatesigningrequests", "certificatesigningrequests", true, certificates, &certv1.CertificateSigningRequest{}, true)
+
+	// Scheduling / runtime / networking / coordination kinds (#26).
+	reg("priorityclasses", "priorityclasses", true, scheduling, &schedulingv1.PriorityClass{}, true)
+	reg("runtimeclasses", "runtimeclasses", true, node, &nodev1.RuntimeClass{}, true)
+	reg("ingressclasses", "ingressclasses", true, net, &networkingv1.IngressClass{}, true)
+	reg("leases", "leases", true, coordination, &coordinationv1.Lease{}, false)
 }
 
 // nsOrAll maps an empty namespace to the all-namespaces sentinel.

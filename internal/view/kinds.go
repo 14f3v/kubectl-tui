@@ -55,6 +55,12 @@ func init() {
 
 	// Certificate signing requests (#25) — approve/deny via a/x on the CSR view.
 	registerKind("certificatesigningrequests", []string{"csr", "csrs", "certificatesigningrequest", "certificatesigningrequests"}, "certificate signing requests (a approve / x deny)")
+
+	// Scheduling / runtime / networking / coordination kinds (#26).
+	registerKind("priorityclasses", []string{"pc", "priorityclass", "priorityclasses"}, "priority classes")
+	registerKind("runtimeclasses", []string{"runtimeclass", "runtimeclasses"}, "runtime classes")
+	registerKind("ingressclasses", []string{"ingressclass", "ingressclasses"}, "ingress classes")
+	registerKind("leases", []string{"lease", "leases"}, "coordination leases")
 }
 
 // registerKind wires a generic resource page (title == kind) for kinds whose
