@@ -193,12 +193,21 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 	return p, nil
 }
 
-// enterAction drills into a pod's containers. For other kinds enter is a no-op
-// for now (their detail views can be added later).
+// enterAction drills into the selected row: a pod's containers, or a secret's
+// (masked) data keys. For other kinds enter is a no-op for now (their detail
+// views can be added later).
 func (p *resourcePage) enterAction() tea.Cmd {
-	if p.kind != "pods" {
+	switch p.kind {
+	case "pods":
+		return p.enterPod()
+	case "secrets":
+		return p.enterSecret()
+	default:
 		return nil
 	}
+}
+
+func (p *resourcePage) enterPod() tea.Cmd {
 	row, ok := p.table.Selected()
 	if !ok {
 		return nil
@@ -216,6 +225,27 @@ func (p *resourcePage) enterAction() tea.Cmd {
 		return nil
 	}
 	page := newContainersPage(p.sess.Session, p.theme, pod)
+	return func() tea.Msg { return PushMsg{Page: page} }
+}
+
+func (p *resourcePage) enterSecret() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	vs := p.sess.Session.Engine.Get("secrets")
+	if vs == nil {
+		return nil
+	}
+	obj, ok := vs.Get(row.Namespace, row.Name)
+	if !ok {
+		return toast(row.Name+" is no longer in the cache", msg.LevelWarn)
+	}
+	sec, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	page := newSecretRevealPage(p.sess.Session, p.theme, sec)
 	return func() tea.Msg { return PushMsg{Page: page} }
 }
 

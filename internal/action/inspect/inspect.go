@@ -6,6 +6,7 @@ package inspect
 import (
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -23,6 +24,38 @@ var groupKinds = map[string]schema.GroupKind{
 	"namespaces":  {Group: "", Kind: "Namespace"},
 	"events":      {Group: "", Kind: "Event"},
 	"deployments": {Group: "apps", Kind: "Deployment"},
+
+	// Workloads (#3).
+	"statefulsets": {Group: "apps", Kind: "StatefulSet"},
+	"daemonsets":   {Group: "apps", Kind: "DaemonSet"},
+	"replicasets":  {Group: "apps", Kind: "ReplicaSet"},
+	"jobs":         {Group: "batch", Kind: "Job"},
+	"cronjobs":     {Group: "batch", Kind: "CronJob"},
+
+	// Config & storage (#4) and secrets (#2).
+	"configmaps":             {Group: "", Kind: "ConfigMap"},
+	"secrets":                {Group: "", Kind: "Secret"},
+	"persistentvolumeclaims": {Group: "", Kind: "PersistentVolumeClaim"},
+	"persistentvolumes":      {Group: "", Kind: "PersistentVolume"},
+	"storageclasses":         {Group: "storage.k8s.io", Kind: "StorageClass"},
+
+	// Networking (#5).
+	"ingresses":       {Group: "networking.k8s.io", Kind: "Ingress"},
+	"networkpolicies": {Group: "networking.k8s.io", Kind: "NetworkPolicy"},
+	"endpointslices":  {Group: "discovery.k8s.io", Kind: "EndpointSlice"},
+
+	// RBAC (#6).
+	"serviceaccounts":     {Group: "", Kind: "ServiceAccount"},
+	"roles":               {Group: "rbac.authorization.k8s.io", Kind: "Role"},
+	"rolebindings":        {Group: "rbac.authorization.k8s.io", Kind: "RoleBinding"},
+	"clusterroles":        {Group: "rbac.authorization.k8s.io", Kind: "ClusterRole"},
+	"clusterrolebindings": {Group: "rbac.authorization.k8s.io", Kind: "ClusterRoleBinding"},
+
+	// Autoscaling & policy (#7).
+	"horizontalpodautoscalers": {Group: "autoscaling", Kind: "HorizontalPodAutoscaler"},
+	"poddisruptionbudgets":     {Group: "policy", Kind: "PodDisruptionBudget"},
+	"resourcequotas":           {Group: "", Kind: "ResourceQuota"},
+	"limitranges":              {Group: "", Kind: "LimitRange"},
 }
 
 // GroupKindFor returns the GroupKind for a kind key.
@@ -45,11 +78,30 @@ func YAML(obj any) (string, error) {
 			clone.GetObjectKind().SetGroupVersionKind(gvks[0])
 		}
 	}
+	redactSecret(clone)
 	b, err := yaml.Marshal(clone)
 	if err != nil {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// redactSecret masks a Secret's values so the yaml view never leaks credentials.
+// Each data value becomes "<redacted: N bytes>" and stringData is dropped. The
+// argument is always a deep copy, so the shared cache object is unaffected. A
+// no-op for every other type. The reveal drill-in (enter on a secret row) reads
+// the real values straight from the cache and shows them only on demand.
+func redactSecret(obj runtime.Object) {
+	s, ok := obj.(*corev1.Secret)
+	if !ok {
+		return
+	}
+	for k, v := range s.Data {
+		s.Data[k] = []byte(fmt.Sprintf("<redacted: %d bytes>", len(v)))
+	}
+	for k := range s.StringData {
+		s.StringData[k] = "<redacted>"
+	}
 }
 
 // Describe runs the kubectl describer for a kind and object, returning its text.

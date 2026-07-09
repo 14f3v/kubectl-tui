@@ -12,7 +12,14 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery"
@@ -154,6 +161,13 @@ func (s *Session) RefreshServerVersion() error {
 func (s *Session) registerFactories() {
 	core := s.CS.CoreV1().RESTClient()
 	apps := s.CS.AppsV1().RESTClient()
+	batch := s.CS.BatchV1().RESTClient()
+	net := s.CS.NetworkingV1().RESTClient()
+	disc := s.CS.DiscoveryV1().RESTClient()
+	rbac := s.CS.RbacV1().RESTClient()
+	storage := s.CS.StorageV1().RESTClient()
+	autoscaling := s.CS.AutoscalingV2().RESTClient()
+	policy := s.CS.PolicyV1().RESTClient()
 
 	reg := func(kind, resource string, warm bool, getter cache.Getter, example runtime.Object, clusterScoped bool) {
 		s.Engine.Register(kind, warm, func(sink engine.Sink, ns string) *engine.ViewStore {
@@ -172,6 +186,38 @@ func (s *Session) registerFactories() {
 	reg("nodes", "nodes", true, core, &corev1.Node{}, true)
 	reg("namespaces", "namespaces", true, core, &corev1.Namespace{}, true)
 	reg("events", "events", false, core, &corev1.Event{}, false)
+
+	// Workloads (#3).
+	reg("statefulsets", "statefulsets", true, apps, &appsv1.StatefulSet{}, false)
+	reg("daemonsets", "daemonsets", true, apps, &appsv1.DaemonSet{}, false)
+	reg("replicasets", "replicasets", false, apps, &appsv1.ReplicaSet{}, false)
+	reg("jobs", "jobs", true, batch, &batchv1.Job{}, false)
+	reg("cronjobs", "cronjobs", true, batch, &batchv1.CronJob{}, false)
+
+	// Config & storage (#4) and secrets (#2).
+	reg("configmaps", "configmaps", true, core, &corev1.ConfigMap{}, false)
+	reg("secrets", "secrets", true, core, &corev1.Secret{}, false)
+	reg("persistentvolumeclaims", "persistentvolumeclaims", true, core, &corev1.PersistentVolumeClaim{}, false)
+	reg("persistentvolumes", "persistentvolumes", true, core, &corev1.PersistentVolume{}, true)
+	reg("storageclasses", "storageclasses", true, storage, &storagev1.StorageClass{}, true)
+
+	// Networking (#5).
+	reg("ingresses", "ingresses", true, net, &networkingv1.Ingress{}, false)
+	reg("networkpolicies", "networkpolicies", true, net, &networkingv1.NetworkPolicy{}, false)
+	reg("endpointslices", "endpointslices", true, disc, &discoveryv1.EndpointSlice{}, false)
+
+	// RBAC (#6).
+	reg("serviceaccounts", "serviceaccounts", true, core, &corev1.ServiceAccount{}, false)
+	reg("roles", "roles", true, rbac, &rbacv1.Role{}, false)
+	reg("rolebindings", "rolebindings", true, rbac, &rbacv1.RoleBinding{}, false)
+	reg("clusterroles", "clusterroles", true, rbac, &rbacv1.ClusterRole{}, true)
+	reg("clusterrolebindings", "clusterrolebindings", true, rbac, &rbacv1.ClusterRoleBinding{}, true)
+
+	// Autoscaling & policy (#7).
+	reg("horizontalpodautoscalers", "horizontalpodautoscalers", true, autoscaling, &autoscalingv2.HorizontalPodAutoscaler{}, false)
+	reg("poddisruptionbudgets", "poddisruptionbudgets", true, policy, &policyv1.PodDisruptionBudget{}, false)
+	reg("resourcequotas", "resourcequotas", true, core, &corev1.ResourceQuota{}, false)
+	reg("limitranges", "limitranges", true, core, &corev1.LimitRange{}, false)
 }
 
 // nsOrAll maps an empty namespace to the all-namespaces sentinel.
