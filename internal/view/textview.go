@@ -101,7 +101,8 @@ func (v *TextView) Keys() []key.Binding {
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "scroll")),
 		key.NewBinding(key.WithKeys("g", "G"), key.WithHelp("g/G", "top/bottom")),
-		key.NewBinding(key.WithKeys("n", "N"), key.WithHelp("n/N", "next/prev match")),
+		key.NewBinding(key.WithKeys("enter", "n"), key.WithHelp("enter/n", "next match")),
+		key.NewBinding(key.WithKeys("N"), key.WithHelp("N", "prev match")),
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 	}
 }
@@ -224,7 +225,7 @@ func (v *TextView) Update(m tea.Msg) (Page, tea.Cmd) {
 		v.offset = 0
 	case "G", "end":
 		v.offset = v.maxOffset()
-	case "n":
+	case "enter", "n":
 		v.jumpMatch(1)
 	case "N":
 		v.jumpMatch(-1)
