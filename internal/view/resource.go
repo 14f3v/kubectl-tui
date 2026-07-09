@@ -6,11 +6,16 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/14f3v/kubectl-tui/internal/action/editor"
 	"github.com/14f3v/kubectl-tui/internal/action/execshell"
 	"github.com/14f3v/kubectl-tui/internal/action/inspect"
+	"github.com/14f3v/kubectl-tui/internal/action/rollout"
+	"github.com/14f3v/kubectl-tui/internal/action/scale"
 	"github.com/14f3v/kubectl-tui/internal/action/write"
 	"github.com/14f3v/kubectl-tui/internal/component"
 	"github.com/14f3v/kubectl-tui/internal/engine"
@@ -130,10 +135,18 @@ func (p *resourcePage) Summary() Summary {
 }
 
 func (p *resourcePage) Keys() []key.Binding {
-	return []key.Binding{
+	keys := []key.Binding{
 		keyEnter, keyDescribe, keyLogs, keyShell, keyYAML,
 		keyEdit, keyDelete, keyKill, keyPortFwd,
 	}
+	// Workload-only actions are advertised only where they apply.
+	if scale.Scalable(p.kind) {
+		keys = append(keys, keyScale)
+	}
+	if rollout.Restartable(p.kind) {
+		keys = append(keys, keyRollout)
+	}
+	return keys
 }
 
 func (p *resourcePage) Update(m tea.Msg) (Page, tea.Cmd) {
@@ -187,6 +200,10 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		return p, p.editAction()
 	case key.Matches(k, keyPortFwd):
 		return p, p.portForwardAction()
+	case key.Matches(k, keyScale):
+		return p, p.scaleAction()
+	case key.Matches(k, keyRollout):
+		return p, p.rolloutAction()
 	case key.Matches(k, keyEnter):
 		return p, p.enterAction()
 	}
@@ -426,18 +443,149 @@ func (p *resourcePage) deleteAction(force bool) tea.Cmd {
 	}
 }
 
-// logsAction follows the selected pod's logs in a new page. Logs are pod-only.
+// logsAction follows logs in a new page: a single pod, or — for a workload — every
+// pod its selector matches, merged into one tagged stream.
 func (p *resourcePage) logsAction() tea.Cmd {
-	if p.kind != "pods" {
-		return toast("logs: select a pod", msg.LevelInfo)
+	switch {
+	case p.kind == "pods":
+		row, ok := p.table.Selected()
+		if !ok {
+			return nil
+		}
+		page := NewLogsPage(p.sess.Session, p.theme, row.Namespace, row.Name, "")
+		return func() tea.Msg { return PushMsg{Page: page} }
+	case logsWorkload(p.kind):
+		return p.workloadLogsAction()
+	default:
+		return toast("logs: select a pod or workload", msg.LevelInfo)
+	}
+}
+
+// workloadLogsAction resolves the selected workload's pod selector and opens a
+// merged multi-pod logs page.
+func (p *resourcePage) workloadLogsAction() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	vs := p.sess.Session.Engine.Get(p.kind)
+	if vs == nil {
+		return toast("no live data for "+p.kind, msg.LevelError)
+	}
+	obj, ok := vs.Get(row.Namespace, row.Name)
+	if !ok {
+		return toast(row.Name+" is no longer in the cache", msg.LevelWarn)
+	}
+	sel := workloadSelector(obj)
+	if sel == nil {
+		return toast(row.Name+" has no pod selector", msg.LevelWarn)
+	}
+	title := singularKind(p.kind) + "/" + row.Name + " · logs"
+	page := NewMultiLogsPage(p.sess.Session, p.theme, title, row.Namespace, sel)
+	return func() tea.Msg { return PushMsg{Page: page} }
+}
+
+// scaleAction prompts for a replica count and scales the selected workload.
+func (p *resourcePage) scaleAction() tea.Cmd {
+	if p.sess.ReadOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	if !scale.Scalable(p.kind) {
+		return toast("scale: select a deployment, statefulset or replicaset", msg.LevelInfo)
 	}
 	row, ok := p.table.Selected()
 	if !ok {
 		return nil
 	}
-	page := NewLogsPage(p.sess.Session, p.theme, row.Namespace, row.Name, "")
+	cur := ""
+	if vs := p.sess.Session.Engine.Get(p.kind); vs != nil {
+		if obj, ok := vs.Get(row.Namespace, row.Name); ok {
+			cur = currentReplicas(obj)
+		}
+	}
+	sess := p.sess.Session
+	kind, ns, name := p.kind, row.Namespace, row.Name
+	return func() tea.Msg {
+		return PromptRequest{
+			Title:    "Scale " + name,
+			Label:    "Replicas",
+			Initial:  cur,
+			Validate: func(s string) error { _, err := scale.ParseReplicas(s); return err },
+			Action: func(s string) tea.Msg {
+				n, err := scale.ParseReplicas(s)
+				if err != nil {
+					return msg.Toast{Text: err.Error(), Level: msg.LevelError}
+				}
+				if err := scale.Scale(sess.Context(), sess.CS, kind, ns, name, n); err != nil {
+					return msg.Toast{Text: "scale " + name + ": " + err.Error(), Level: msg.LevelError}
+				}
+				return msg.Toast{Text: name + " scaled to " + s, Level: msg.LevelSuccess}
+			},
+		}
+	}
+}
+
+// rolloutAction opens the rollout menu (restart / status) for the selected workload.
+func (p *resourcePage) rolloutAction() tea.Cmd {
+	if !rollout.Restartable(p.kind) {
+		return toast("rollout: select a deployment, statefulset or daemonset", msg.LevelInfo)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	page := newRolloutPage(p.sess.Session, p.theme, p.kind, row.Namespace, row.Name, p.sess.ReadOnly)
 	return func() tea.Msg { return PushMsg{Page: page} }
 }
+
+// logsWorkload reports whether merged multi-pod logs apply to a kind.
+func logsWorkload(kind string) bool {
+	switch kind {
+	case "deployments", "statefulsets", "daemonsets", "replicasets", "jobs":
+		return true
+	}
+	return false
+}
+
+// workloadSelector returns a cached workload object's pod selector, or nil.
+func workloadSelector(obj any) *metav1.LabelSelector {
+	switch o := obj.(type) {
+	case *appsv1.Deployment:
+		return o.Spec.Selector
+	case *appsv1.StatefulSet:
+		return o.Spec.Selector
+	case *appsv1.DaemonSet:
+		return o.Spec.Selector
+	case *appsv1.ReplicaSet:
+		return o.Spec.Selector
+	case *batchv1.Job:
+		return o.Spec.Selector
+	}
+	return nil
+}
+
+// currentReplicas renders a cached workload's desired replica count for prefilling
+// the scale prompt, or "" if unknown.
+func currentReplicas(obj any) string {
+	switch o := obj.(type) {
+	case *appsv1.Deployment:
+		if o.Spec.Replicas != nil {
+			return itoa32(*o.Spec.Replicas)
+		}
+	case *appsv1.StatefulSet:
+		if o.Spec.Replicas != nil {
+			return itoa32(*o.Spec.Replicas)
+		}
+	case *appsv1.ReplicaSet:
+		if o.Spec.Replicas != nil {
+			return itoa32(*o.Spec.Replicas)
+		}
+	}
+	return ""
+}
+
+// singularKind maps a plural kind key to a short singular label for titles.
+func singularKind(kind string) string { return strings.TrimSuffix(kind, "s") }
 
 // yamlAction reads the selected object from the informer cache and pushes a YAML
 // text page. It runs synchronously (the object is already cached).
