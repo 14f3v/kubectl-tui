@@ -98,6 +98,7 @@ func (p *containersPage) Keys() []key.Binding {
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "move")),
 		key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "logs")),
+		key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "previous logs")),
 		key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "shell")),
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 	}
@@ -120,6 +121,11 @@ func (p *containersPage) Update(m tea.Msg) (Page, tea.Cmd) {
 	case "l":
 		if c, ok := p.selected(); ok {
 			page := NewLogsPage(p.sess, p.theme, p.namespace, p.pod, c.Name)
+			return p, func() tea.Msg { return PushMsg{Page: page} }
+		}
+	case "p":
+		if c, ok := p.selected(); ok {
+			page := NewPreviousLogsPage(p.sess, p.theme, p.namespace, p.pod, c.Name)
 			return p, func() tea.Msg { return PushMsg{Page: page} }
 		}
 	case "s":
@@ -162,6 +168,6 @@ func (p *containersPage) View(width, height int) string {
 			pad(state, 22) +
 			t.Faint.Render(trunc(c.Image, width-64)) + "\n")
 	}
-	b.WriteString("\n" + t.Faint.Render("  l logs · s shell · esc back"))
+	b.WriteString("\n" + t.Faint.Render("  l logs · p previous · s shell · esc back"))
 	return b.String()
 }

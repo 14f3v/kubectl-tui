@@ -27,4 +27,6 @@ var (
 	keyPortFwd  = key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "port-fwd"))
 	keyScale    = key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "scale"))
 	keyRollout  = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rollout"))
+	keySortNext = key.NewBinding(key.WithKeys(">"), key.WithHelp(">", "sort col"))
+	keySortDir  = key.NewBinding(key.WithKeys("<"), key.WithHelp("<", "sort dir"))
 )

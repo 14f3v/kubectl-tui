@@ -43,6 +43,18 @@ func TestFilterRows(t *testing.T) {
 	if got := filterRows(rows, "!running"); len(got) != 1 || got[0].Name != "notifications" {
 		t.Fatalf("inverse filter: got %v", got)
 	}
+	// Regex filter (leading "~"), case-insensitive, anchored alternation.
+	if got := filterRows(rows, "~^(checkout|payments)"); len(got) != 2 {
+		t.Fatalf("regex filter: got %d, want 2", len(got))
+	}
+	// Inverted regex composes with "!".
+	if got := filterRows(rows, "!~worker$"); len(got) != 2 {
+		t.Fatalf("inverse regex filter: got %d, want 2", len(got))
+	}
+	// An unparseable regex filters nothing (all rows pass) until it's valid.
+	if got := filterRows(rows, "~[unclosed"); len(got) != 3 {
+		t.Fatalf("invalid regex should pass all: got %d, want 3", len(got))
+	}
 }
 
 // newBarePage constructs a resourcePage without a Session, for rendering tests

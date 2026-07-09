@@ -40,6 +40,10 @@ type PromptRequest struct {
 	Action   func(string) tea.Msg
 }
 
+// SwitchContextRequest asks the root model to switch to another kubeconfig
+// context (rebuilding the Session). Emitted by the context picker.
+type SwitchContextRequest struct{ Name string }
+
 // ExecRequest asks the root model to hand the terminal to a child process through
 // the TerminalGate. Exactly one of Command (an interactive tea.ExecCommand, e.g.
 // a pod shell) or Process (an *exec.Cmd, e.g. $EDITOR) is set. After, if present,
