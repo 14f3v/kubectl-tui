@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,8 +24,15 @@ import (
 	"k8s.io/kubectl/pkg/util/term"
 )
 
-// defaultShell tries bash with a sane TERM, falling back to sh.
-var defaultShell = []string{"/bin/sh", "-c", "TERM=xterm-256color exec /bin/bash 2>/dev/null || exec /bin/sh"}
+// defaultShell prefers bash but reliably falls back to sh. It must NOT use
+// "exec bash || exec sh": a failed exec terminates the shell before the ||, so on
+// a bash-less image (Alpine/busybox) that yields exit 127 instead of falling
+// back. Testing with `command -v` avoids that. The outer "sh" is resolved via the
+// container's PATH so it works even when the shell is not at /bin/sh.
+var defaultShell = []string{
+	"sh", "-c",
+	"export TERM=${TERM:-xterm-256color}; if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi",
+}
 
 // Cmd is a tea.ExecCommand that streams an interactive shell. Bubble Tea releases
 // the terminal, wires Set{Stdin,Stdout,Stderr}, calls Run, and restores the
@@ -107,7 +115,7 @@ func (c *Cmd) Run() (retErr error) {
 		}
 	}
 
-	return tty.Safe(func() error {
+	err = tty.Safe(func() error {
 		return exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
 			Stdin:             in,
 			Stdout:            out,
@@ -115,6 +123,12 @@ func (c *Cmd) Run() (retErr error) {
 			TerminalSizeQueue: sizeQueue,
 		})
 	})
+	// Exit 127 means the container runtime could not find a shell at all — the
+	// image has no sh (distroless/scratch/static binary). Make that actionable.
+	if err != nil && strings.Contains(err.Error(), "exit code 127") {
+		return fmt.Errorf("no shell in this container — it may be a minimal/distroless image (%w)", err)
+	}
+	return err
 }
 
 // saveCrashStack appends the recovered panic and its stack to a temp log file and

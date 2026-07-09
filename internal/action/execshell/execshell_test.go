@@ -1,10 +1,33 @@
 package execshell
 
 import (
+	"strings"
 	"testing"
 
 	"k8s.io/kubectl/pkg/util/term"
 )
+
+// TestDefaultShellFallsBackSafely guards the exit-127 regression: a failed `exec`
+// terminates the shell before any `||`, so the default must test for bash with
+// `command -v` rather than `exec bash || exec sh` (which dead-ends on bash-less
+// images like Alpine/busybox).
+func TestDefaultShellFallsBackSafely(t *testing.T) {
+	script := defaultShell[len(defaultShell)-1]
+	if strings.Contains(script, "|| exec") {
+		t.Fatalf("default shell relies on a fatal `exec ... || exec` fallback: %q", script)
+	}
+	if !strings.Contains(script, "command -v bash") {
+		t.Fatalf("default shell should probe bash with `command -v` before exec: %q", script)
+	}
+	if !strings.Contains(script, "exec sh") {
+		t.Fatalf("default shell should fall back to `exec sh`: %q", script)
+	}
+	// The outer interpreter must be PATH-resolved (not an absolute path that may
+	// not exist), so a shell anywhere on PATH is found.
+	if defaultShell[0] != "sh" {
+		t.Fatalf("default shell outer interpreter = %q, want PATH-resolved \"sh\"", defaultShell[0])
+	}
+}
 
 // staticQueue yields one fixed size then blocks are irrelevant (Next is called
 // once per test).
