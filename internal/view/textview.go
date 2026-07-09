@@ -27,6 +27,19 @@ type ConfirmRequest struct {
 	Action func() tea.Msg
 }
 
+// PromptRequest asks the root model to show a modal single-line text input (e.g.
+// the replica count for a scale). On enter the value is validated with Validate
+// (nil means always valid); a non-nil error is shown and the prompt stays open.
+// On a valid enter the root runs Action(value) as a command and dismisses; esc
+// cancels. Initial pre-fills the field.
+type PromptRequest struct {
+	Title    string
+	Label    string
+	Initial  string
+	Validate func(string) error
+	Action   func(string) tea.Msg
+}
+
 // ExecRequest asks the root model to hand the terminal to a child process through
 // the TerminalGate. Exactly one of Command (an interactive tea.ExecCommand, e.g.
 // a pod shell) or Process (an *exec.Cmd, e.g. $EDITOR) is set. After, if present,

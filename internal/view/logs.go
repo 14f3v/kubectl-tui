@@ -1,10 +1,14 @@
 package view
 
 import (
+	"hash/fnv"
+	"image/color"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/14f3v/kubectl-tui/internal/action/logstream"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
@@ -15,9 +19,15 @@ import (
 // maxLogLines bounds the log page's own display buffer; older lines scroll off.
 const maxLogLines = 50000
 
-// logsPage follows a pod's logs. It receives coalesced LogBatch messages, keeps a
-// bounded display buffer, autoscrolls unless the user has scrolled up, and
-// surfaces dropped-line counts and stream termination.
+// logStopper is the minimal control surface a logsPage needs over its stream. A
+// single-pod Session and a multi-pod Group both satisfy it and both deliver via
+// the same LogBatch/LogEnded messages keyed by the page's id, so the page body is
+// identical for either source.
+type logStopper interface{ Stop() }
+
+// logsPage follows a pod's (or a whole workload's) logs. It receives coalesced
+// LogBatch messages, keeps a bounded display buffer, autoscrolls unless the user
+// has scrolled up, and surfaces dropped-line counts and stream termination.
 type logsPage struct {
 	title string
 	theme style.Theme
@@ -25,35 +35,71 @@ type logsPage struct {
 
 	id        string
 	namespace string
-	pod       string
-	container string
 
-	session *logstream.Session
+	// Exactly one start path is set. startSingle opens one pod/container stream
+	// synchronously; resolve lists a workload's pods off the UI thread, after which
+	// the group stream starts. grouped enables per-pod tag colouring.
+	startSingle func(sink func(tea.Msg)) logStopper
+	resolve     func() ([]logstream.PodRef, error)
+	grouped     bool
+
+	stream  logStopper
 	lines   []string
 	dropped int
 	ended   bool
 	endErr  error
+	tagCols map[string]color.Color
 
 	offset     int
 	height     int
 	autoscroll bool
 }
 
-// NewLogsPage builds a logs page for a pod (optionally a specific container).
+// logRefsResolved delivers the pods a workload's selector expanded to, so the
+// group stream can start once the (blocking) list finishes off the UI thread.
+type logRefsResolved struct {
+	id   string
+	refs []logstream.PodRef
+	err  error
+}
+
+// NewLogsPage builds a logs page for a single pod (optionally a specific container).
 func NewLogsPage(sess *k8s.Session, theme style.Theme, namespace, pod, container string) *logsPage {
 	title := pod + " · logs"
 	if container != "" {
 		title = pod + "/" + container + " · logs"
 	}
+	id := namespace + "/" + pod + "/" + container
+	p := &logsPage{
+		title:      title,
+		theme:      theme,
+		sess:       sess,
+		id:         id,
+		namespace:  namespace,
+		autoscroll: true,
+	}
+	p.startSingle = func(sink func(tea.Msg)) logStopper {
+		return logstream.Start(sess.Context(), sess.CS, sink, id, namespace, pod, container)
+	}
+	return p
+}
+
+// NewMultiLogsPage builds a logs page that tails every pod matching a workload's
+// selector, merged into one stream with per-pod [tag] prefixes.
+func NewMultiLogsPage(sess *k8s.Session, theme style.Theme, title, namespace string, sel *metav1.LabelSelector) *logsPage {
+	id := "group:" + namespace + "/" + title
 	return &logsPage{
 		title:      title,
 		theme:      theme,
 		sess:       sess,
-		id:         namespace + "/" + pod + "/" + container,
+		id:         id,
 		namespace:  namespace,
-		pod:        pod,
-		container:  container,
+		grouped:    true,
 		autoscroll: true,
+		tagCols:    map[string]color.Color{},
+		resolve: func() ([]logstream.PodRef, error) {
+			return logstream.PodRefsForSelector(sess.Context(), sess.CS, namespace, sel)
+		},
 	}
 }
 
@@ -76,14 +122,22 @@ func (p *logsPage) Keys() []key.Binding {
 }
 
 func (p *logsPage) OnEnter() tea.Cmd {
-	p.session = logstream.Start(p.sess.Context(), p.sess.CS, p.sess.Engine.Sink(), p.id, p.namespace, p.pod, p.container)
-	return nil
+	if p.startSingle != nil {
+		p.stream = p.startSingle(p.sess.Engine.Sink())
+		return nil
+	}
+	// Group: resolve the workload's pods off the UI thread, then start on the result.
+	id, resolve := p.id, p.resolve
+	return func() tea.Msg {
+		refs, err := resolve()
+		return logRefsResolved{id: id, refs: refs, err: err}
+	}
 }
 
 func (p *logsPage) OnLeave() {
-	if p.session != nil {
-		p.session.Stop()
-		p.session = nil
+	if p.stream != nil {
+		p.stream.Stop()
+		p.stream = nil
 	}
 }
 
@@ -107,6 +161,17 @@ func (p *logsPage) Update(m tea.Msg) (Page, tea.Cmd) {
 			p.ended = true
 			p.endErr = t.Err
 		}
+		return p, nil
+	case logRefsResolved:
+		if t.id != p.id {
+			return p, nil
+		}
+		if t.err != nil {
+			p.ended = true
+			p.endErr = t.err
+			return p, nil
+		}
+		p.stream = logstream.StartGroup(p.sess.Context(), p.sess.CS, p.sess.Engine.Sink(), p.id, p.namespace, t.refs)
 		return p, nil
 	case tea.KeyPressMsg:
 		return p.handleKey(t)
@@ -161,9 +226,42 @@ func (p *logsPage) View(width, height int) string {
 	}
 	visible := ""
 	if p.offset < end {
-		visible = strings.Join(p.lines[p.offset:end], "\n")
+		rendered := make([]string, 0, end-p.offset)
+		for _, ln := range p.lines[p.offset:end] {
+			rendered = append(rendered, p.renderLine(ln))
+		}
+		visible = strings.Join(rendered, "\n")
 	}
 	return visible + "\n" + p.status()
+}
+
+// renderLine colours the leading [tag] prefix of a merged log line so each pod is
+// visually distinct. Single-pod pages return the line unchanged (their content may
+// legitimately start with "[").
+func (p *logsPage) renderLine(line string) string {
+	if !p.grouped || !strings.HasPrefix(line, "[") {
+		return line
+	}
+	i := strings.Index(line, "] ")
+	if i < 0 {
+		return line
+	}
+	tag, rest := line[1:i], line[i+2:]
+	return lipgloss.NewStyle().Foreground(p.tagColor(tag)).Render("["+tag+"]") + " " + rest
+}
+
+// tagColor assigns each pod tag a stable colour from the theme palette, hashing
+// the tag so a pod keeps its colour across renders.
+func (p *logsPage) tagColor(tag string) color.Color {
+	if c, ok := p.tagCols[tag]; ok {
+		return c
+	}
+	palette := []color.Color{p.theme.Pal.Accent, p.theme.Pal.OK, p.theme.Pal.Warn, p.theme.Pal.Info, p.theme.Pal.Cyan}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(tag))
+	c := palette[int(h.Sum32())%len(palette)]
+	p.tagCols[tag] = c
+	return c
 }
 
 func (p *logsPage) status() string {

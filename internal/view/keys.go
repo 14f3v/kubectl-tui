@@ -25,4 +25,6 @@ var (
 	keyDelete   = key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl-d", "delete"))
 	keyKill     = key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl-k", "kill"))
 	keyPortFwd  = key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "port-fwd"))
+	keyScale    = key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "scale"))
+	keyRollout  = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rollout"))
 )

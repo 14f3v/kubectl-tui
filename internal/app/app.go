@@ -73,6 +73,7 @@ type Model struct {
 	toastToken int
 	showHelp   bool
 	confirm    *confirmState
+	prompt     *promptState
 
 	panicInfo string
 }
@@ -83,6 +84,17 @@ type confirmState struct {
 	prompt string
 	danger bool
 	action func() tea.Msg
+}
+
+// promptState holds an active modal text-input dialog (e.g. scale replicas). buf
+// is the live input; errMsg shows the last validation failure until resolved.
+type promptState struct {
+	title    string
+	label    string
+	buf      string
+	errMsg   string
+	validate func(string) error
+	action   func(string) tea.Msg
 }
 
 // New builds the root model.
@@ -163,6 +175,10 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 
 	case view.ConfirmRequest:
 		m.confirm = &confirmState{title: t.Title, prompt: t.Prompt, danger: t.Danger, action: t.Action}
+		return m, nil
+
+	case view.PromptRequest:
+		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, validate: t.Validate, action: t.Action}
 		return m, nil
 
 	case view.ExecRequest:
@@ -393,6 +409,11 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// A modal text-input prompt captures all input until resolved.
+	if m.prompt != nil {
+		return m.handlePromptKey(k)
+	}
+
 	// A modal confirm dialog captures all input until resolved.
 	if m.confirm != nil {
 		return m.handleConfirmKey(k)
@@ -458,6 +479,48 @@ func (m *Model) handleConfirmKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	default: // n, N, esc, or any other key cancels
 		m.confirm = nil
+		return m, nil
+	}
+}
+
+// handlePromptKey drives an active text-input prompt: enter validates and runs
+// the action (staying open on a validation error), esc cancels, and printable
+// keys edit the single-line buffer.
+func (m *Model) handlePromptKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "enter":
+		if m.prompt.validate != nil {
+			if err := m.prompt.validate(m.prompt.buf); err != nil {
+				m.prompt.errMsg = err.Error()
+				return m, nil
+			}
+		}
+		action := m.prompt.action
+		val := m.prompt.buf
+		m.prompt = nil
+		if action != nil {
+			return m, func() tea.Msg { return action(val) }
+		}
+		return m, nil
+	case "esc":
+		m.prompt = nil
+		return m, nil
+	case "backspace":
+		if n := len(m.prompt.buf); n > 0 {
+			r := []rune(m.prompt.buf)
+			m.prompt.buf = string(r[:len(r)-1])
+		}
+		m.prompt.errMsg = ""
+		return m, nil
+	case "ctrl+u":
+		m.prompt.buf = ""
+		m.prompt.errMsg = ""
+		return m, nil
+	default:
+		if s := k.String(); len([]rune(s)) == 1 {
+			m.prompt.buf += s
+			m.prompt.errMsg = ""
+		}
 		return m, nil
 	}
 }
