@@ -115,6 +115,18 @@ func (c *Cmd) Run() (retErr error) {
 		}
 	}
 
+	// The TUI has already released the terminal (cooked mode), so there is a blank
+	// gap while the exec stream dials the cluster. Print a connecting line here —
+	// in cooked mode, before Safe switches to raw — so the handoff reads as
+	// intentional rather than a glitch. It scrolls away under the shell's first
+	// output. (An "exited" line is pointless: Bubble Tea re-enters the alt-screen
+	// the moment Run returns and would wipe it instantly.)
+	target := c.pod
+	if c.container != "" {
+		target = c.pod + "/" + c.container
+	}
+	fmt.Fprintf(out, "⏳ connecting to %s/%s…\n", c.namespace, target)
+
 	err = tty.Safe(func() error {
 		return exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
 			Stdin:             in,
