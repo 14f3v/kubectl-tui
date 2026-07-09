@@ -622,9 +622,9 @@ func (m *Model) runCommand(buf string) (tea.Model, tea.Cmd) {
 		if kind, ok := view.ResolveKind(cmd.kind); ok {
 			return m.navigate(kind, cmd.namespace)
 		}
-		return m, func() tea.Msg {
-			return msg.Toast{Text: "unknown resource: " + cmd.kind, Level: msg.LevelError}
-		}
+		// Not a first-class kind — try to resolve the bare plural via discovery and
+		// open it in the Table browser (e.g. :endpoints, :componentstatuses).
+		return m.openResource(cmd.kind, cmd.namespace)
 	case "ctx":
 		if cmd.arg == "" {
 			if m.sess == nil {
@@ -653,6 +653,31 @@ func (m *Model) activeNamespace() string {
 		return p.Namespace()
 	}
 	return ""
+}
+
+// openResource resolves a bare plural that isn't a first-class kind via discovery
+// and opens it in the Table browser, or toasts if nothing matches. This is what
+// makes core-group built-ins like :endpoints reachable by name.
+func (m *Model) openResource(plural, namespace string) (tea.Model, tea.Cmd) {
+	if m.sess == nil {
+		return m, nil
+	}
+	sess, theme, ro := m.sess, m.theme, m.cfg.Config.ReadOnly
+	ns := namespace
+	if ns == "" {
+		ns = m.activeNamespace()
+	}
+	return m, func() tea.Msg {
+		info, err := dynbrowse.ResolveResource(sess.Context(), sess.Disco, plural)
+		if err != nil {
+			return msg.Toast{Text: "unknown resource: " + plural, Level: msg.LevelError}
+		}
+		title := info.Kind
+		if info.Group != "" {
+			title = info.Kind + " (" + info.Group + ")"
+		}
+		return view.PushMsg{Page: view.NewCRDBrowse(sess, theme, title, info.GVR(), info.Namespaced, ns, ro)}
+	}
 }
 
 // openCRD resolves a fully-qualified <plural>.<group> to its served resource
