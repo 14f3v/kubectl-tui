@@ -12,6 +12,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/14f3v/kubectl-tui/internal/action/csr"
+	"github.com/14f3v/kubectl-tui/internal/action/debug"
 	"github.com/14f3v/kubectl-tui/internal/action/editor"
 	"github.com/14f3v/kubectl-tui/internal/action/execshell"
 	"github.com/14f3v/kubectl-tui/internal/action/inspect"
@@ -147,7 +149,22 @@ func (p *resourcePage) Keys() []key.Binding {
 	if rollout.Restartable(p.kind) {
 		keys = append(keys, keyRollout)
 	}
+	if p.settable() {
+		keys = append(keys, keySet)
+	}
+	if p.kind == "pods" {
+		keys = append(keys, keyDebug)
+	}
+	if p.kind == "certificatesigningrequests" {
+		keys = append(keys, keyApprove, keyDeny)
+	}
 	return keys
+}
+
+// settable reports whether the set/patch menu applies to this kind (pod-template
+// workloads and bare pods).
+func (p *resourcePage) settable() bool {
+	return p.kind == "pods" || scale.Scalable(p.kind) || rollout.Restartable(p.kind)
 }
 
 func (p *resourcePage) Update(m tea.Msg) (Page, tea.Cmd) {
@@ -205,6 +222,14 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		return p, p.scaleAction()
 	case key.Matches(k, keyRollout):
 		return p, p.rolloutAction()
+	case key.Matches(k, keySet):
+		return p, p.setAction()
+	case key.Matches(k, keyDebug):
+		return p, p.debugAction()
+	case key.Matches(k, keyApprove):
+		return p, p.csrDecision(true)
+	case key.Matches(k, keyDeny):
+		return p, p.csrDecision(false)
 	case key.Matches(k, keySortNext):
 		p.cycleSort()
 	case key.Matches(k, keySortDir):
@@ -229,6 +254,94 @@ func (p *resourcePage) cycleSort() {
 func (p *resourcePage) toggleSortDir() {
 	col, _ := p.table.SortColumn()
 	p.table.SetSort(col) // re-selecting the current column toggles direction
+}
+
+// csrDecision approves or denies the selected CertificateSigningRequest.
+func (p *resourcePage) csrDecision(approve bool) tea.Cmd {
+	if p.kind != "certificatesigningrequests" {
+		return nil
+	}
+	if p.sess.ReadOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	sess, name := p.sess.Session, row.Name
+	title, past, danger := "Approve CSR", "approved", false
+	if !approve {
+		title, past, danger = "Deny CSR", "denied", true
+	}
+	act := func() tea.Msg {
+		var err error
+		if approve {
+			err = csr.Approve(sess.Context(), sess.CS, name, "via kubetui")
+		} else {
+			err = csr.Deny(sess.Context(), sess.CS, name, "via kubetui")
+		}
+		if err != nil {
+			return msg.Toast{Text: name + ": " + err.Error(), Level: msg.LevelError}
+		}
+		return msg.Toast{Text: name + " " + past, Level: msg.LevelSuccess}
+	}
+	return func() tea.Msg {
+		return ConfirmRequest{Title: title, Prompt: title[:len(title)-4] + " " + name + "?", Danger: danger, Action: act}
+	}
+}
+
+// debugAction adds an ephemeral debug container to the selected pod and execs a
+// shell into it — how you get a shell on a distroless pod. The add + wait run off
+// the UI thread inside the prompt action, then the exec hands over the terminal.
+func (p *resourcePage) debugAction() tea.Cmd {
+	if p.kind != "pods" {
+		return toast("debug: select a pod", msg.LevelInfo)
+	}
+	if p.sess.ReadOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	sess, ns, pod := p.sess.Session, row.Namespace, row.Name
+	return func() tea.Msg {
+		return PromptRequest{
+			Title:   "Debug " + pod,
+			Label:   "Image",
+			Initial: "busybox",
+			Action: func(image string) tea.Msg {
+				image = strings.TrimSpace(image)
+				if image == "" {
+					image = "busybox"
+				}
+				name, err := debug.AddEphemeralContainer(sess.Context(), sess.CS, ns, pod, image, "")
+				if err != nil {
+					return msg.Toast{Text: "debug: " + err.Error(), Level: msg.LevelError}
+				}
+				if err := debug.WaitRunning(sess.Context(), sess.CS, ns, pod, name); err != nil {
+					return msg.Toast{Text: "debug: " + err.Error(), Level: msg.LevelError}
+				}
+				return ExecRequest{Label: "debug", Command: execshell.New(sess.RestCfg, sess.CS, ns, pod, name, nil)}
+			},
+		}
+	}
+}
+
+// setAction opens the set/patch menu for the selected workload or pod.
+func (p *resourcePage) setAction() tea.Cmd {
+	if !p.settable() {
+		return toast("set: select a pod or workload", msg.LevelInfo)
+	}
+	if p.sess.ReadOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	page := newSetMenuPage(p.sess.Session, p.theme, p.kind, row.Namespace, row.Name)
+	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
 // enterAction drills into the selected row: a pod's containers, or a secret's

@@ -7,6 +7,8 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/14f3v/kubectl-tui/internal/action/debug"
+	"github.com/14f3v/kubectl-tui/internal/action/execshell"
 	"github.com/14f3v/kubectl-tui/internal/action/nodeops"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
 	"github.com/14f3v/kubectl-tui/internal/msg"
@@ -33,6 +35,7 @@ func newNodeOpsPage(sess *k8s.Session, theme style.Theme, node string, readOnly 
 			{"Cordon", "mark unschedulable (no new pods land here)"},
 			{"Uncordon", "mark schedulable again"},
 			{"Drain", "cordon, then evict pods (skips DaemonSet & mirror pods)"},
+			{"Debug", "launch a privileged host shell on this node"},
 		},
 	}
 }
@@ -77,9 +80,35 @@ func (p *nodeOpsPage) Update(m tea.Msg) (Page, tea.Cmd) {
 			return p, p.cordon(false)
 		case "Drain":
 			return p, p.drain()
+		case "Debug":
+			return p, p.debug()
 		}
 	}
 	return p, nil
+}
+
+// debug launches a privileged host-namespace pod on the node and execs into it —
+// a node shell without SSH. Confirm-gated (it creates a privileged pod).
+func (p *nodeOpsPage) debug() tea.Cmd {
+	if p.readOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	sess, node := p.sess, p.node
+	act := func() tea.Msg {
+		ns, pod, err := debug.CreateNodeDebug(sess.Context(), sess.CS, node, "busybox")
+		if err != nil {
+			return msg.Toast{Text: "node debug: " + err.Error(), Level: msg.LevelError}
+		}
+		return ExecRequest{Label: "node-debug", Command: execshell.New(sess.RestCfg, sess.CS, ns, pod, "debugger", nil)}
+	}
+	return func() tea.Msg {
+		return ConfirmRequest{
+			Title:  "Node debug " + node,
+			Prompt: "Launch a privileged debug pod on " + node + "? (host root is at /host)",
+			Danger: true,
+			Action: act,
+		}
+	}
 }
 
 func (p *nodeOpsPage) cordon(on bool) tea.Cmd {
