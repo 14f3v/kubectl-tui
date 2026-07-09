@@ -356,6 +356,9 @@ func (m *Model) renderToast() string {
 // ---- content ----
 
 func (m *Model) renderContent(h int) string {
+	if m.prompt != nil {
+		return m.renderPrompt(h)
+	}
 	if m.confirm != nil {
 		return m.renderConfirm(h)
 	}
@@ -406,6 +409,39 @@ func (m *Model) renderConfirm(h int) string {
 	prompt := t.Dim.Render(m.confirm.prompt)
 	hint := lipgloss.NewStyle().Foreground(t.Pal.OK).Render("[y] confirm") + "   " + t.Faint.Render("[n] cancel")
 	inner := title + "\n\n" + prompt + "\n\n" + hint
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(titleColor).
+		Padding(1, 3).
+		Width(boxW).
+		Render(inner)
+	return fitBlock(lipgloss.Place(m.width, h, lipgloss.Center, lipgloss.Center, box), m.width, h)
+}
+
+func (m *Model) renderPrompt(h int) string {
+	t := m.theme
+	titleColor := t.Pal.Accent
+	boxW := 60
+	if boxW > m.width-8 {
+		boxW = m.width - 8
+	}
+	if boxW < 20 {
+		boxW = 20
+	}
+	title := lipgloss.NewStyle().Foreground(titleColor).Bold(true).Render(m.prompt.title)
+	// The input line: label, the current buffer, and a block cursor.
+	field := t.Base.Render(m.prompt.buf) + lipgloss.NewStyle().Foreground(titleColor).Render("▌")
+	label := ""
+	if m.prompt.label != "" {
+		label = t.Dim.Render(m.prompt.label+": ") + field
+	} else {
+		label = field
+	}
+	inner := title + "\n\n" + label
+	if m.prompt.errMsg != "" {
+		inner += "\n" + lipgloss.NewStyle().Foreground(t.Pal.Err).Render(m.prompt.errMsg)
+	}
+	inner += "\n\n" + lipgloss.NewStyle().Foreground(t.Pal.OK).Render("[enter] apply") + "   " + t.Faint.Render("[esc] cancel")
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(titleColor).
