@@ -44,6 +44,7 @@ func newRolloutPage(sess *k8s.Session, theme style.Theme, kind, namespace, name 
 		items: []rolloutItem{
 			{"Restart", "roll all pods with a fresh restartedAt stamp"},
 			{"Status", "show how far the current rollout has progressed"},
+			{"History", "list revisions and roll back to one"},
 		},
 	}
 }
@@ -86,9 +87,17 @@ func (p *rolloutPage) Update(m tea.Msg) (Page, tea.Cmd) {
 			return p, p.restart()
 		case "Status":
 			return p, p.status()
+		case "History":
+			return p, p.history()
 		}
 	}
 	return p, nil
+}
+
+// history opens the revision list drill-in.
+func (p *rolloutPage) history() tea.Cmd {
+	page := newRolloutHistoryPage(p.sess, p.theme, p.kind, p.namespace, p.name, p.readOnly)
+	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
 // restart asks for confirmation, then triggers a rolling restart.
