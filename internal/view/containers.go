@@ -22,6 +22,7 @@ type containerInfo struct {
 	Ready    bool
 	Restarts int
 	State    string
+	kind     string // "" (regular) | "init" | "ephemeral"
 	class    columns.StatusClass
 }
 
@@ -47,20 +48,39 @@ func newContainersPage(sess *k8s.Session, theme style.Theme, pod *corev1.Pod) *c
 	}
 }
 
+// extractContainers lists a pod's init, regular, and ephemeral containers (in that
+// order) so logs/exec can target any of them. Ephemeral containers are how you get
+// a shell into a distroless pod (see the debug action).
 func extractContainers(pod *corev1.Pod) []containerInfo {
-	statusByName := map[string]corev1.ContainerStatus{}
-	for _, cs := range pod.Status.ContainerStatuses {
-		statusByName[cs.Name] = cs
+	byName := func(sts []corev1.ContainerStatus) map[string]corev1.ContainerStatus {
+		m := map[string]corev1.ContainerStatus{}
+		for _, cs := range sts {
+			m[cs.Name] = cs
+		}
+		return m
 	}
-	out := make([]containerInfo, 0, len(pod.Spec.Containers))
-	for _, c := range pod.Spec.Containers {
-		ci := containerInfo{Name: c.Name, Image: c.Image, State: "Unknown", class: columns.StatusMuted}
-		if cs, ok := statusByName[c.Name]; ok {
+	regular := byName(pod.Status.ContainerStatuses)
+	initSt := byName(pod.Status.InitContainerStatuses)
+	ephSt := byName(pod.Status.EphemeralContainerStatuses)
+
+	var out []containerInfo
+	add := func(name, image, kind string, st map[string]corev1.ContainerStatus) {
+		ci := containerInfo{Name: name, Image: image, kind: kind, State: "Unknown", class: columns.StatusMuted}
+		if cs, ok := st[name]; ok {
 			ci.Ready = cs.Ready
 			ci.Restarts = int(cs.RestartCount)
 			ci.State, ci.class = containerState(cs)
 		}
 		out = append(out, ci)
+	}
+	for _, c := range pod.Spec.InitContainers {
+		add(c.Name, c.Image, "init", initSt)
+	}
+	for _, c := range pod.Spec.Containers {
+		add(c.Name, c.Image, "", regular)
+	}
+	for _, c := range pod.Spec.EphemeralContainers {
+		add(c.Name, c.Image, "ephemeral", ephSt)
 	}
 	return out
 }
@@ -161,12 +181,16 @@ func (p *containersPage) View(width, height int) string {
 			ready, readyColor = "true", t.Pal.OK
 		}
 		state := lipgloss.NewStyle().Foreground(t.StatusColor(c.class)).Render("● " + c.State)
+		badge := ""
+		if c.kind != "" {
+			badge = t.Faint.Render(" [" + c.kind + "]")
+		}
 		b.WriteString(marker +
 			nameStyle.Render(pad(c.Name, 22)) +
 			lipgloss.NewStyle().Foreground(readyColor).Render(pad(ready, 7)) +
 			t.Dim.Render(pad(strconv.Itoa(c.Restarts), 10)) +
 			pad(state, 22) +
-			t.Faint.Render(trunc(c.Image, width-64)) + "\n")
+			t.Faint.Render(trunc(c.Image, width-72)) + badge + "\n")
 	}
 	b.WriteString("\n" + t.Faint.Render("  l logs · p previous · s shell · esc back"))
 	return b.String()
