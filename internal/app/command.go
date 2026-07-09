@@ -29,7 +29,14 @@ func parseCommand(s string) command {
 		return c
 	case "apply", "create":
 		return command{verb: "apply"}
+	case "crds", "crd":
+		return command{verb: "crds"}
 	default:
+		// A dotted token with no space is a fully-qualified resource: <plural>.<group>
+		// (e.g. certificates.cert-manager.io) — open it via the Table-protocol browser.
+		if strings.Contains(head, ".") {
+			return command{verb: "crdopen", arg: head}
+		}
 		c := command{verb: "nav", kind: head}
 		if len(fields) > 1 {
 			c.namespace = fields[1]
