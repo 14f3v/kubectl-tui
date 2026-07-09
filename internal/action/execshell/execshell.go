@@ -6,9 +6,13 @@ package execshell
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime/debug"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/httpstream"
@@ -51,8 +55,18 @@ func (c *Cmd) SetStdin(r io.Reader)  { c.in = r }
 func (c *Cmd) SetStdout(w io.Writer) { c.out = w }
 func (c *Cmd) SetStderr(w io.Writer) { c.err = w }
 
-// Run performs the interactive exec, blocking until the shell exits.
-func (c *Cmd) Run() error {
+// Run performs the interactive exec, blocking until the shell exits. A pod exec
+// hands the whole terminal to a remote process over the network; a panic in the
+// resize plumbing, transport, or auth-plugin path must never take down the parent
+// TUI (Bubble Tea would print a stack trace and exit). Any panic in this
+// goroutine is recovered into an error and the stack is persisted for diagnosis.
+func (c *Cmd) Run() (retErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("shell crashed: %v (details written to %s)", r, saveCrashStack(c, r))
+		}
+	}()
+
 	req := c.cs.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Namespace(c.namespace).
@@ -81,10 +95,16 @@ func (c *Cmd) Run() error {
 		out = os.Stdout
 	}
 
-	tty := term.TTY{In: in, Out: out, Raw: true}
+	// TryDev lets Safe fall back to /dev/tty for raw mode when the passed input is
+	// not itself a terminal fd. Only wrap a non-nil size queue: MonitorSize returns
+	// nil when the output is not a terminal, and sizeBridge{nil}.Next() — polled
+	// from a goroutine inside remotecommand — would otherwise panic.
+	tty := term.TTY{In: in, Out: out, Raw: true, TryDev: true}
 	var sizeQueue remotecommand.TerminalSizeQueue
 	if tty.IsTerminalIn() {
-		sizeQueue = sizeBridge{tty.MonitorSize(tty.GetSize())}
+		if q := tty.MonitorSize(tty.GetSize()); q != nil {
+			sizeQueue = sizeBridge{q}
+		}
 	}
 
 	return tty.Safe(func() error {
@@ -95,6 +115,22 @@ func (c *Cmd) Run() error {
 			TerminalSizeQueue: sizeQueue,
 		})
 	})
+}
+
+// saveCrashStack appends the recovered panic and its stack to a temp log file and
+// returns the path (or a short note if it could not be written) so the operator
+// can share it. Kept out of the terminal, which the failing exec may have left in
+// an odd state.
+func saveCrashStack(c *Cmd, r any) string {
+	path := filepath.Join(os.TempDir(), "kubetui-shell-crash.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "stack unavailable: " + err.Error()
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "\n=== %s exec %s/%s container=%q ===\npanic: %v\n%s\n",
+		time.Now().UTC().Format(time.RFC3339), c.namespace, c.pod, c.container, r, debug.Stack())
+	return path
 }
 
 // newFallbackExecutor builds a WebSocket-primary, SPDY-secondary executor,
@@ -117,10 +153,21 @@ func newFallbackExecutor(cfg *rest.Config, u *url.URL) (remotecommand.Executor, 
 // (identical-but-distinct TerminalSize types).
 type sizeBridge struct{ q term.TerminalSizeQueue }
 
-func (b sizeBridge) Next() *remotecommand.TerminalSize {
-	ts := b.q.Next()
-	if ts == nil {
+// Next is polled from a goroutine inside remotecommand, outside Run's recover, so
+// it guards itself: a nil inner queue or a panic in it stops resizing (returns
+// nil) rather than crashing the whole program.
+func (b sizeBridge) Next() (ts *remotecommand.TerminalSize) {
+	defer func() {
+		if recover() != nil {
+			ts = nil
+		}
+	}()
+	if b.q == nil {
 		return nil
 	}
-	return &remotecommand.TerminalSize{Width: ts.Width, Height: ts.Height}
+	s := b.q.Next()
+	if s == nil {
+		return nil
+	}
+	return &remotecommand.TerminalSize{Width: s.Width, Height: s.Height}
 }
