@@ -35,6 +35,7 @@ func newNodeOpsPage(sess *k8s.Session, theme style.Theme, node string, readOnly 
 			{"Cordon", "mark unschedulable (no new pods land here)"},
 			{"Uncordon", "mark schedulable again"},
 			{"Drain", "cordon, then evict pods (skips DaemonSet & mirror pods)"},
+			{"Taint", "add/remove a taint (key=value:Effect, or key- to remove)"},
 			{"Debug", "launch a privileged host shell on this node"},
 		},
 	}
@@ -80,11 +81,46 @@ func (p *nodeOpsPage) Update(m tea.Msg) (Page, tea.Cmd) {
 			return p, p.cordon(false)
 		case "Drain":
 			return p, p.drain()
+		case "Taint":
+			return p, p.taint()
 		case "Debug":
 			return p, p.debug()
 		}
 	}
 	return p, nil
+}
+
+// taint prompts for a taint spec and adds or removes it on the node.
+func (p *nodeOpsPage) taint() tea.Cmd {
+	if p.readOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	sess, node := p.sess, p.node
+	return func() tea.Msg {
+		return PromptRequest{
+			Title: "Taint " + node,
+			Label: "key=value:Effect (or key:Effect- / key- to remove)",
+			Action: func(v string) tea.Msg {
+				t, remove, err := nodeops.ParseTaint(strings.TrimSpace(v))
+				if err != nil {
+					return msg.Toast{Text: err.Error(), Level: msg.LevelError}
+				}
+				if remove {
+					err = nodeops.Untaint(sess.Context(), sess.CS, node, t.Key, t.Effect)
+				} else {
+					err = nodeops.Taint(sess.Context(), sess.CS, node, t)
+				}
+				if err != nil {
+					return msg.Toast{Text: "taint " + node + ": " + err.Error(), Level: msg.LevelError}
+				}
+				verb := "tainted"
+				if remove {
+					verb = "untainted"
+				}
+				return msg.Toast{Text: node + " " + verb, Level: msg.LevelSuccess}
+			},
+		}
+	}
 }
 
 // debug launches a privileged host-namespace pod on the node and execs into it —
