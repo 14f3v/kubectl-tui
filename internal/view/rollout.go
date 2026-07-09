@@ -34,6 +34,18 @@ type rolloutPage struct {
 }
 
 func newRolloutPage(sess *k8s.Session, theme style.Theme, kind, namespace, name string, readOnly bool) *rolloutPage {
+	items := []rolloutItem{
+		{"Restart", "roll all pods with a fresh restartedAt stamp"},
+		{"Status", "show how far the current rollout has progressed"},
+		{"History", "list revisions and roll back to one"},
+	}
+	// Pause/Resume only apply to Deployments (only they have spec.paused).
+	if rollout.Pausable(kind) {
+		items = append(items,
+			rolloutItem{"Pause", "hold the rollout (spec.paused=true)"},
+			rolloutItem{"Resume", "continue a paused rollout"},
+		)
+	}
 	return &rolloutPage{
 		sess:      sess,
 		theme:     theme,
@@ -41,11 +53,7 @@ func newRolloutPage(sess *k8s.Session, theme style.Theme, kind, namespace, name 
 		namespace: namespace,
 		name:      name,
 		readOnly:  readOnly,
-		items: []rolloutItem{
-			{"Restart", "roll all pods with a fresh restartedAt stamp"},
-			{"Status", "show how far the current rollout has progressed"},
-			{"History", "list revisions and roll back to one"},
-		},
+		items:     items,
 	}
 }
 
@@ -89,9 +97,31 @@ func (p *rolloutPage) Update(m tea.Msg) (Page, tea.Cmd) {
 			return p, p.status()
 		case "History":
 			return p, p.history()
+		case "Pause":
+			return p, p.setPaused(true)
+		case "Resume":
+			return p, p.setPaused(false)
 		}
 	}
 	return p, nil
+}
+
+// setPaused pauses or resumes the deployment's rollout.
+func (p *rolloutPage) setPaused(paused bool) tea.Cmd {
+	if p.readOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	sess, ns, name := p.sess, p.namespace, p.name
+	verb := "paused"
+	if !paused {
+		verb = "resumed"
+	}
+	return func() tea.Msg {
+		if err := rollout.SetPaused(sess.Context(), sess.CS, ns, name, paused); err != nil {
+			return msg.Toast{Text: "rollout " + name + ": " + err.Error(), Level: msg.LevelError}
+		}
+		return msg.Toast{Text: name + " rollout " + verb, Level: msg.LevelSuccess}
+	}
 }
 
 // history opens the revision list drill-in.
