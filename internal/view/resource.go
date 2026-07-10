@@ -12,6 +12,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/14f3v/kubectl-tui/internal/action/csr"
 	"github.com/14f3v/kubectl-tui/internal/action/debug"
@@ -53,6 +54,10 @@ type resourcePage struct {
 	cpuCol    int                         // CPU column index, or -1
 	memCol    int                         // MEM column index, or -1
 	colTitles []string                    // column headers, for "col:" filter scoping
+
+	// podSelector, when set, scopes a pods page to only the pods it matches — used
+	// to drill from a workload into the pods it owns (deployment → pods).
+	podSelector labels.Selector
 }
 
 // deps mirrors Deps but lets resourcePage store the session without re-importing.
@@ -65,6 +70,12 @@ type Option func(*resourcePage)
 // newest-first) instead of the default NAME-ascending.
 func WithInitialSort(col int, desc bool) Option {
 	return func(p *resourcePage) { p.table.SetSortState(col, desc) }
+}
+
+// WithPodSelector scopes a pods page to only the pods matching sel — used to drill
+// from a workload into the pods it owns.
+func WithPodSelector(sel labels.Selector) Option {
+	return func(p *resourcePage) { p.podSelector = sel }
 }
 
 // newResourcePage builds a generic page for a kind.
@@ -379,20 +390,52 @@ func (p *resourcePage) labelAction() tea.Cmd {
 // (masked) data keys. For other kinds enter is a no-op for now (their detail
 // views can be added later).
 func (p *resourcePage) enterAction() tea.Cmd {
-	switch p.kind {
-	case "pods":
+	switch {
+	case p.kind == "pods":
 		return p.enterPod()
-	case "secrets":
+	case p.kind == "secrets":
 		return p.enterSecret()
-	case "namespaces":
+	case p.kind == "namespaces":
 		return p.enterNamespace()
-	case "nodes":
+	case p.kind == "nodes":
 		return p.enterNode()
-	case "cronjobs":
+	case p.kind == "cronjobs":
 		return p.enterCronJob()
+	case logsWorkload(p.kind):
+		return p.enterWorkload()
 	default:
 		return nil
 	}
+}
+
+// enterWorkload drills into a workload's pods, scoped to the pods its selector
+// matches (k9s-style deployment → pods → containers). esc backs out to the list.
+func (p *resourcePage) enterWorkload() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	vs := p.sess.Session.Engine.Get(p.kind)
+	if vs == nil {
+		return toast("no live data for "+p.kind, msg.LevelError)
+	}
+	obj, ok := vs.Get(row.Namespace, row.Name)
+	if !ok {
+		return toast(row.Name+" is no longer in the cache", msg.LevelWarn)
+	}
+	ls := workloadSelector(obj)
+	if ls == nil {
+		return toast(row.Name+" has no pod selector", msg.LevelWarn)
+	}
+	selector, err := metav1.LabelSelectorAsSelector(ls)
+	if err != nil || selector.Empty() {
+		return toast(row.Name+" has no usable pod selector", msg.LevelWarn)
+	}
+	deps := p.sess
+	deps.Namespace = row.Namespace
+	title := singularKind(p.kind) + "/" + row.Name + " · pods"
+	page := newResourcePage("pods", title, deps, WithPodSelector(selector))
+	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
 // enterCronJob opens the cronjob actions menu (trigger / suspend / resume).
@@ -978,11 +1021,50 @@ func (p *resourcePage) View(width, height int) string {
 	return p.table.Header() + "\n" + p.table.Body()
 }
 
-// apply stores a new snapshot and refreshes the filtered view.
+// apply stores a new snapshot and refreshes the filtered view. When the page is
+// scoped to a workload's pods, the snapshot is first narrowed to the matching
+// pods so both the table and the header counts reflect only those.
 func (p *resourcePage) apply(snap engine.Remote[columns.Row]) {
 	p.remote = snap
 	p.allRows = snap.Rows
+	if p.podSelector != nil {
+		p.allRows = p.selectorRows(snap.Rows)
+	}
 	p.reapplyFilter()
+}
+
+// selectorRows keeps only the pod rows whose cached object's labels match
+// podSelector, looking each pod up in the live cache.
+func (p *resourcePage) selectorRows(rows []columns.Row) []columns.Row {
+	vs := p.sess.Session.Engine.Get("pods")
+	if vs == nil {
+		return nil
+	}
+	return filterPodRows(rows, p.podSelector, func(ns, name string) (*corev1.Pod, bool) {
+		obj, ok := vs.Get(ns, name)
+		if !ok {
+			return nil, false
+		}
+		pod, ok := obj.(*corev1.Pod)
+		return pod, ok
+	})
+}
+
+// filterPodRows keeps only the rows whose looked-up pod matches selector. Rows
+// whose pod is absent from the cache are dropped. Pure (lookup is injected) so it
+// can be unit-tested without a live engine.
+func filterPodRows(rows []columns.Row, selector labels.Selector, lookup func(ns, name string) (*corev1.Pod, bool)) []columns.Row {
+	out := make([]columns.Row, 0, len(rows))
+	for _, r := range rows {
+		pod, ok := lookup(r.Namespace, r.Name)
+		if !ok {
+			continue
+		}
+		if selector.Matches(labels.Set(pod.Labels)) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func (p *resourcePage) reapplyFilter() {
