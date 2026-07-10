@@ -1,6 +1,7 @@
 package view
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/14f3v/kubectl-tui/internal/action/editor"
 	"github.com/14f3v/kubectl-tui/internal/action/execshell"
 	"github.com/14f3v/kubectl-tui/internal/action/inspect"
+	pfres "github.com/14f3v/kubectl-tui/internal/action/portforward"
 	"github.com/14f3v/kubectl-tui/internal/action/rollout"
 	"github.com/14f3v/kubectl-tui/internal/action/scale"
 	"github.com/14f3v/kubectl-tui/internal/action/write"
@@ -140,7 +142,7 @@ func (p *resourcePage) Summary() Summary {
 func (p *resourcePage) Keys() []key.Binding {
 	keys := []key.Binding{
 		keyEnter, keyDescribe, keyLogs, keyShell, keyYAML,
-		keyEdit, keyLabel, keyDelete, keyKill, keyPortFwd, keySortNext, keySortDir,
+		keyEdit, keyLabel, keyDelete, keyKill, keyPortFwd, keySelect, keySortNext, keySortDir,
 	}
 	// Workload-only actions are advertised only where they apply.
 	if scale.Scalable(p.kind) {
@@ -153,7 +155,7 @@ func (p *resourcePage) Keys() []key.Binding {
 		keys = append(keys, keySet)
 	}
 	if p.kind == "pods" {
-		keys = append(keys, keyDebug)
+		keys = append(keys, keyDebug, keyCopy)
 	}
 	if p.kind == "certificatesigningrequests" {
 		keys = append(keys, keyApprove, keyDeny)
@@ -218,6 +220,11 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		return p, p.editAction()
 	case key.Matches(k, keyPortFwd):
 		return p, p.portForwardAction()
+	case key.Matches(k, keySelect):
+		p.table.ToggleMark()
+		p.table.MoveDown()
+	case key.Matches(k, keyCopy):
+		return p, p.copyAction()
 	case key.Matches(k, keyScale):
 		return p, p.scaleAction()
 	case key.Matches(k, keyRollout):
@@ -452,12 +459,25 @@ func (p *resourcePage) enterSecret() tea.Cmd {
 	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
-// portForwardAction forwards the selected pod's declared container ports to
-// ephemeral local ports. Open ":pf" to see the resolved local ports.
+// portForwardAction starts a port-forward for the selected object. A pod forwards
+// its own declared container ports; a service or workload (deployment/statefulset/
+// replicaset/daemonset) is first resolved to a ready backing pod, whose ports are
+// then forwarded. Open ":pf" to see the resolved local ports.
 func (p *resourcePage) portForwardAction() tea.Cmd {
-	if p.kind != "pods" {
-		return toast("port-forward: select a pod", msg.LevelInfo)
+	switch {
+	case p.kind == "pods":
+		return p.forwardPod()
+	case p.kind == "services":
+		return p.forwardService()
+	case forwardableWorkload(p.kind):
+		return p.forwardWorkload()
+	default:
+		return toast("port-forward: select a pod, service, or workload", msg.LevelInfo)
 	}
+}
+
+// forwardPod forwards the selected pod's ports, reading it from the live cache.
+func (p *resourcePage) forwardPod() tea.Cmd {
 	row, ok := p.table.Selected()
 	if !ok {
 		return nil
@@ -480,6 +500,95 @@ func (p *resourcePage) portForwardAction() tea.Cmd {
 	}
 	p.sess.Session.Forwards.Start(row.Namespace, row.Name, ports)
 	return toast("port-forward starting — open :pf to view", msg.LevelSuccess)
+}
+
+// forwardService resolves a ready pod behind the selected service and forwards
+// that pod's ports. Pod resolution is a live API call, so it runs off the UI
+// thread and reports the outcome as a toast.
+func (p *resourcePage) forwardService() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	sess := p.sess.Session
+	ns, name := row.Namespace, row.Name
+	return func() tea.Msg {
+		pod, err := pfres.PodForService(sess.Context(), sess.CS, ns, name)
+		if err != nil {
+			return msg.Toast{Text: "port-forward " + name + ": " + err.Error(), Level: msg.LevelWarn}
+		}
+		return startForwardTo(sess, ns, pod, "service/"+name)
+	}
+}
+
+// forwardWorkload resolves a ready pod from the selected workload's selector and
+// forwards that pod's ports.
+func (p *resourcePage) forwardWorkload() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	vs := p.sess.Session.Engine.Get(p.kind)
+	if vs == nil {
+		return toast("no live data for "+p.kind, msg.LevelError)
+	}
+	obj, ok := vs.Get(row.Namespace, row.Name)
+	if !ok {
+		return toast(row.Name+" is no longer in the cache", msg.LevelWarn)
+	}
+	sel := workloadSelector(obj)
+	if sel == nil || len(sel.MatchLabels) == 0 {
+		return toast(row.Name+" has no pod selector to forward", msg.LevelWarn)
+	}
+	sess := p.sess.Session
+	ns, name := row.Namespace, row.Name
+	labels := sel.MatchLabels
+	return func() tea.Msg {
+		pod, err := pfres.PodForSelector(sess.Context(), sess.CS, ns, labels)
+		if err != nil {
+			return msg.Toast{Text: "port-forward " + name + ": " + err.Error(), Level: msg.LevelWarn}
+		}
+		return startForwardTo(sess, ns, pod, singularKind(p.kind)+"/"+name)
+	}
+}
+
+// startForwardTo fetches the resolved pod's declared ports and starts a forward,
+// returning the toast to show. Shared by the service and workload paths; runs on
+// the caller's (off-UI) goroutine.
+func startForwardTo(sess *k8s.Session, ns, pod, via string) tea.Msg {
+	p, err := sess.CS.CoreV1().Pods(ns).Get(sess.Context(), pod, metav1.GetOptions{})
+	if err != nil {
+		return msg.Toast{Text: "port-forward: " + err.Error(), Level: msg.LevelError}
+	}
+	ports := podForwardPorts(p)
+	if len(ports) == 0 {
+		return msg.Toast{Text: pod + " declares no container ports", Level: msg.LevelWarn}
+	}
+	sess.Forwards.Start(ns, pod, ports)
+	return msg.Toast{Text: "port-forward starting " + via + " → " + pod + " — open :pf", Level: msg.LevelSuccess}
+}
+
+// forwardableWorkload reports whether a kind can be port-forwarded by resolving to
+// a backing pod.
+func forwardableWorkload(kind string) bool {
+	switch kind {
+	case "deployments", "statefulsets", "replicasets", "daemonsets":
+		return true
+	}
+	return false
+}
+
+// copyAction opens the file copy (kubectl cp) menu for the selected pod.
+func (p *resourcePage) copyAction() tea.Cmd {
+	if p.kind != "pods" {
+		return toast("copy: select a pod", msg.LevelInfo)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	page := newCpMenuPage(p.sess.Session, p.theme, row.Namespace, row.Name, "")
+	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
 // podForwardPorts collects the pod's distinct container ports as ":remote"
@@ -589,39 +698,73 @@ func (p *resourcePage) deleteAction(force bool) tea.Cmd {
 	if p.sess.ReadOnly {
 		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
 	}
-	row, ok := p.table.Selected()
-	if !ok {
-		return nil
-	}
 	info, ok := k8s.ResourceFor(p.kind)
 	if !ok {
 		return toast("delete not supported for "+p.kind, msg.LevelError)
 	}
 
-	sess := p.sess.Session
-	ns, name := row.Namespace, row.Name
-	verb := "delete"
-	act := func() tea.Msg {
-		err := write.Delete(sess.Context(), sess.Dyn, info.GVR, info.Namespaced, ns, name, force)
-		if err != nil {
-			return msg.Toast{Text: "delete " + name + ": " + err.Error(), Level: msg.LevelError}
+	// Bulk-delete every multi-selected row; fall back to the cursor row when the
+	// selection is empty. Targets are snapshotted now so the async confirm acts on
+	// what the user saw.
+	type target struct{ ns, name string }
+	var targets []target
+	if marked := p.table.MarkedRows(); len(marked) > 0 {
+		for _, r := range marked {
+			targets = append(targets, target{r.Namespace, r.Name})
 		}
-		what := "deleted"
-		if force {
-			what = "killed"
-		}
-		return msg.Toast{Text: name + " " + what, Level: msg.LevelSuccess}
+	} else if row, ok := p.table.Selected(); ok {
+		targets = append(targets, target{row.Namespace, row.Name})
+	}
+	if len(targets) == 0 {
+		return nil
 	}
 
-	title := "Delete " + info.Kind
-	prompt := "Delete " + name + "?"
+	sess := p.sess.Session
+	what := "deleted"
 	if force {
-		title = "Kill (force-delete) " + info.Kind
-		prompt = "Force-delete " + name + " now with grace period 0?"
+		what = "killed"
 	}
-	// Preflight the permission so the dialog can warn early (best-effort).
-	if allowed, err := write.CanI(sess.Context(), sess.CS, verb, info.GVR, ns); err == nil && !allowed {
-		prompt += "  (your account may not be permitted to " + verb + ")"
+	act := func() tea.Msg {
+		var okN int
+		var firstErr string
+		for _, tg := range targets {
+			if err := write.Delete(sess.Context(), sess.Dyn, info.GVR, info.Namespaced, tg.ns, tg.name, force); err != nil {
+				if firstErr == "" {
+					firstErr = err.Error()
+				}
+				continue
+			}
+			okN++
+		}
+		failN := len(targets) - okN
+		switch {
+		case okN == 0:
+			return msg.Toast{Text: "delete failed: " + firstErr, Level: msg.LevelError}
+		case failN > 0:
+			return msg.Toast{Text: fmt.Sprintf("%s %d/%d, %d failed: %s", what, okN, len(targets), failN, firstErr), Level: msg.LevelWarn}
+		case len(targets) == 1:
+			return msg.Toast{Text: targets[0].name + " " + what, Level: msg.LevelSuccess}
+		default:
+			return msg.Toast{Text: fmt.Sprintf("%s %d %s", what, okN, info.Kind), Level: msg.LevelSuccess}
+		}
+	}
+
+	// Title/prompt read naturally for one object and by count for a bulk selection.
+	subject := info.Kind
+	if len(targets) == 1 {
+		subject = targets[0].name
+	} else {
+		subject = fmt.Sprintf("%d selected %s", len(targets), info.Kind)
+	}
+	title := "Delete " + subject
+	prompt := "Delete " + subject + "?"
+	if force {
+		title = "Kill (force-delete) " + subject
+		prompt = "Force-delete " + subject + " now with grace period 0?"
+	}
+	// Preflight the permission so the dialog can warn early (best-effort, first target).
+	if allowed, err := write.CanI(sess.Context(), sess.CS, "delete", info.GVR, targets[0].ns); err == nil && !allowed {
+		prompt += "  (your account may not be permitted to delete)"
 	}
 
 	return func() tea.Msg {
