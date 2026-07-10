@@ -46,11 +46,10 @@ changelog:
       - "^test:"
       - "^chore:"
 
-# Publish a Homebrew formula to the private tap on release. The tap push uses
+# Publish a Homebrew formula to the tap on release. The tap push uses
 # HOMEBREW_TAP_TOKEN (a PAT with write access to 14f3v/homebrew-tap), supplied by
 # the release workflow — the default GITHUB_TOKEN can't push to another repo.
-# Because kubectl-tui is private, installers need a GitHub token with repo access:
-#   export HOMEBREW_GITHUB_API_TOKEN=<token>
+# Both repos are public, so installing needs no token:
 #   brew install 14f3v/tap/kubetui
 brews:
   - repository:
