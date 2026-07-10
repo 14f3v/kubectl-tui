@@ -60,6 +60,20 @@ var resources = map[string]ResourceInfo{
 	"runtimeclasses":  {GVR: schema.GroupVersionResource{Group: "node.k8s.io", Version: "v1", Resource: "runtimeclasses"}, Namespaced: false, Kind: "RuntimeClass"},
 	"ingressclasses":  {GVR: schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingressclasses"}, Namespaced: false, Kind: "IngressClass"},
 	"leases":          {GVR: schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}, Namespaced: true, Kind: "Lease"},
+
+	// Remaining built-in kinds (#27): admission, flow-control, storage internals.
+	"validatingwebhookconfigurations":   {GVR: schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingwebhookconfigurations"}, Namespaced: false, Kind: "ValidatingWebhookConfiguration"},
+	"mutatingwebhookconfigurations":     {GVR: schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingwebhookconfigurations"}, Namespaced: false, Kind: "MutatingWebhookConfiguration"},
+	"validatingadmissionpolicies":       {GVR: schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"}, Namespaced: false, Kind: "ValidatingAdmissionPolicy"},
+	"validatingadmissionpolicybindings": {GVR: schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicybindings"}, Namespaced: false, Kind: "ValidatingAdmissionPolicyBinding"},
+	"mutatingadmissionpolicies":         {GVR: schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingadmissionpolicies"}, Namespaced: false, Kind: "MutatingAdmissionPolicy"},
+	"mutatingadmissionpolicybindings":   {GVR: schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingadmissionpolicybindings"}, Namespaced: false, Kind: "MutatingAdmissionPolicyBinding"},
+	"flowschemas":                       {GVR: schema.GroupVersionResource{Group: "flowcontrol.apiserver.k8s.io", Version: "v1", Resource: "flowschemas"}, Namespaced: false, Kind: "FlowSchema"},
+	"prioritylevelconfigurations":       {GVR: schema.GroupVersionResource{Group: "flowcontrol.apiserver.k8s.io", Version: "v1", Resource: "prioritylevelconfigurations"}, Namespaced: false, Kind: "PriorityLevelConfiguration"},
+	"csidrivers":                        {GVR: schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "csidrivers"}, Namespaced: false, Kind: "CSIDriver"},
+	"csinodes":                          {GVR: schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "csinodes"}, Namespaced: false, Kind: "CSINode"},
+	"volumeattachments":                 {GVR: schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "volumeattachments"}, Namespaced: false, Kind: "VolumeAttachment"},
+	"csistoragecapacities":              {GVR: schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "csistoragecapacities"}, Namespaced: true, Kind: "CSIStorageCapacity"},
 }
 
 // ResourceFor returns the ResourceInfo for a kind key, or ok=false if unknown.

@@ -20,6 +20,7 @@ import (
 	"github.com/14f3v/kubectl-tui/internal/action/apply"
 	"github.com/14f3v/kubectl-tui/internal/action/dynbrowse"
 	"github.com/14f3v/kubectl-tui/internal/action/editor"
+	"github.com/14f3v/kubectl-tui/internal/action/explain"
 	"github.com/14f3v/kubectl-tui/internal/config"
 	"github.com/14f3v/kubectl-tui/internal/engine"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
@@ -635,6 +636,8 @@ func (m *Model) runCommand(buf string) (tea.Model, tea.Cmd) {
 		return m.switchContext(cmd.arg)
 	case "apply":
 		return m.applyCommand()
+	case "explain":
+		return m.explainCommand(cmd.arg)
 	case "crds":
 		if m.sess == nil {
 			return m, nil
@@ -677,6 +680,26 @@ func (m *Model) openResource(plural, namespace string) (tea.Model, tea.Cmd) {
 			title = info.Kind + " (" + info.Group + ")"
 		}
 		return view.PushMsg{Page: view.NewCRDBrowse(sess, theme, title, info.GVR(), info.Namespaced, ns, ro)}
+	}
+}
+
+// explainCommand renders OpenAPI field documentation for :explain <kind[.field.path]>
+// (e.g. :explain pod.spec.containers) in a scrollable text page. The schema fetch
+// is a live discovery/OpenAPI call, so it runs off the UI thread.
+func (m *Model) explainCommand(expr string) (tea.Model, tea.Cmd) {
+	if m.sess == nil {
+		return m, nil
+	}
+	if expr == "" {
+		return m, toastCmd("usage: :explain <kind[.field.path]> (e.g. pod.spec.containers)", msg.LevelInfo)
+	}
+	sess, theme := m.sess, m.theme
+	return m, func() tea.Msg {
+		text, err := explain.Explain(sess.Context(), sess.Disco, expr)
+		if err != nil {
+			return msg.Toast{Text: "explain: " + err.Error(), Level: msg.LevelError}
+		}
+		return view.PushMsg{Page: view.NewTextView("explain "+expr, text, theme)}
 	}
 }
 

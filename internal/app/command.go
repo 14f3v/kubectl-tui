@@ -29,6 +29,12 @@ func parseCommand(s string) command {
 		return c
 	case "apply", "create":
 		return command{verb: "apply"}
+	case "explain", "exp":
+		c := command{verb: "explain"}
+		if len(fields) > 1 {
+			c.arg = fields[1] // preserve case: field paths are camelCase (e.g. securityContext)
+		}
+		return c
 	case "crds", "crd":
 		return command{verb: "crds"}
 	default:

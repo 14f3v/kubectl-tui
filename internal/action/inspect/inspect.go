@@ -63,6 +63,20 @@ var groupKinds = map[string]schema.GroupKind{
 	"runtimeclasses":  {Group: "node.k8s.io", Kind: "RuntimeClass"},
 	"ingressclasses":  {Group: "networking.k8s.io", Kind: "IngressClass"},
 	"leases":          {Group: "coordination.k8s.io", Kind: "Lease"},
+
+	// Remaining built-in kinds (#27).
+	"validatingwebhookconfigurations":   {Group: "admissionregistration.k8s.io", Kind: "ValidatingWebhookConfiguration"},
+	"mutatingwebhookconfigurations":     {Group: "admissionregistration.k8s.io", Kind: "MutatingWebhookConfiguration"},
+	"validatingadmissionpolicies":       {Group: "admissionregistration.k8s.io", Kind: "ValidatingAdmissionPolicy"},
+	"validatingadmissionpolicybindings": {Group: "admissionregistration.k8s.io", Kind: "ValidatingAdmissionPolicyBinding"},
+	"mutatingadmissionpolicies":         {Group: "admissionregistration.k8s.io", Kind: "MutatingAdmissionPolicy"},
+	"mutatingadmissionpolicybindings":   {Group: "admissionregistration.k8s.io", Kind: "MutatingAdmissionPolicyBinding"},
+	"flowschemas":                       {Group: "flowcontrol.apiserver.k8s.io", Kind: "FlowSchema"},
+	"prioritylevelconfigurations":       {Group: "flowcontrol.apiserver.k8s.io", Kind: "PriorityLevelConfiguration"},
+	"csidrivers":                        {Group: "storage.k8s.io", Kind: "CSIDriver"},
+	"csinodes":                          {Group: "storage.k8s.io", Kind: "CSINode"},
+	"volumeattachments":                 {Group: "storage.k8s.io", Kind: "VolumeAttachment"},
+	"csistoragecapacities":              {Group: "storage.k8s.io", Kind: "CSIStorageCapacity"},
 }
 
 // GroupKindFor returns the GroupKind for a kind key.
