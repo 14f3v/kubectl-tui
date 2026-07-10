@@ -30,3 +30,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with write access to 14f3v/homebrew-tap, used by the brews block to
+          # push the formula (the default GITHUB_TOKEN can't reach another repo).
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
