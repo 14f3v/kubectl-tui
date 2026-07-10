@@ -56,6 +56,9 @@ brews:
       owner: 14f3v
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    # Name the formula after the tool/binary, not the repo — so the install command
+    # is `brew install 14f3v/tap/kubetui` (default would be the repo name kubectl-tui).
+    name: kubetui
     directory: Formula
     homepage: "https://github.com/14f3v/kubectl-tui"
     description: "A terminal UI for managing and monitoring Kubernetes clusters"
