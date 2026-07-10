@@ -60,7 +60,7 @@ brews:
     directory: Formula
     homepage: "https://github.com/14f3v/kubectl-tui"
     description: "A terminal UI for managing and monitoring Kubernetes clusters"
-    # license intentionally omitted for now (repo is private, undecided).
+    license: "Apache-2.0"
     install: |
       bin.install "kubetui"
     test: |
