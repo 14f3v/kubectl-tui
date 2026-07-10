@@ -46,11 +46,22 @@ changelog:
       - "^test:"
       - "^chore:"
 
-# Uncomment and set the tap repo to publish a Homebrew formula on release.
-# brews:
-#   - repository:
-#       owner: 14f3v
-#       name: homebrew-tap
-#     homepage: "https://github.com/14f3v/kubectl-tui"
-#     description: "A terminal UI for managing and monitoring Kubernetes clusters"
-#     license: "TBD"
+# Publish a Homebrew formula to the private tap on release. The tap push uses
+# HOMEBREW_TAP_TOKEN (a PAT with write access to 14f3v/homebrew-tap), supplied by
+# the release workflow — the default GITHUB_TOKEN can't push to another repo.
+# Because kubectl-tui is private, installers need a GitHub token with repo access:
+#   export HOMEBREW_GITHUB_API_TOKEN=<token>
+#   brew install 14f3v/tap/kubetui
+brews:
+  - repository:
+      owner: 14f3v
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/14f3v/kubectl-tui"
+    description: "A terminal UI for managing and monitoring Kubernetes clusters"
+    # license intentionally omitted for now (repo is private, undecided).
+    install: |
+      bin.install "kubetui"
+    test: |
+      system "#{bin}/kubetui", "--version"
