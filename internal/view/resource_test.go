@@ -133,6 +133,39 @@ func TestFilterRowsMulti(t *testing.T) {
 	}
 }
 
+func TestCompleteFilter(t *testing.T) {
+	titles := []string{"NAME", "STATUS", "IMAGE"}
+	rows := []columns.Row{
+		nsRow("prod", "microservice-api", "Running", "img:1"),
+		nsRow("prod", "microservice-worker", "Running", "img:2"),
+		nsRow("kube-system", "coredns", "Running", "img:3"),
+		nsRow("prod", "payments", "Pending", "img:4"),
+	}
+	cases := []struct {
+		in          string
+		want        string
+		wantChanged bool
+	}{
+		{"micro", "microservice-", true},           // extend to the shared prefix of two names
+		{"pay", "payments", true},                  // single match completes fully
+		{"zzz", "zzz", false},                       // no candidate
+		{"", "", false},                             // nothing to complete
+		{"prod micro", "prod microservice-", true},  // only the last term is completed
+		{"ns:kube", "ns:kube-system", true},         // namespace scope, single match
+		{"name:micro", "name:microservice-", true},  // name scope
+		{"status:Run", "status:Running", true},      // column scope, case-insensitive
+		{"microservice-", "microservice-", false},   // already at the shared prefix
+		{"~micro", "~micro", false},                 // regex is not completed
+		{"!micro", "!microservice-", true},          // negation is preserved
+	}
+	for _, c := range cases {
+		got, changed := completeFilter(c.in, rows, titles)
+		if got != c.want || changed != c.wantChanged {
+			t.Errorf("completeFilter(%q) = (%q, %v), want (%q, %v)", c.in, got, changed, c.want, c.wantChanged)
+		}
+	}
+}
+
 // newBarePage constructs a resourcePage without a Session, for rendering tests
 // (View does not touch the Session — only OnEnter does).
 func newBarePage(kind string) *resourcePage {

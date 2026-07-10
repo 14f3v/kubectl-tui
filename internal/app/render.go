@@ -193,7 +193,7 @@ func (m *Model) renderCommandBar() string {
 		left = t.PinkText.Render("/") + " " + t.Base.Render(m.inputBuf) + t.AccentText.Render("▊")
 		if m.inputBuf == "" {
 			// Teach the filter grammar as placeholder text until the user types.
-			left += "  " + t.Faint.Render("terms AND · col:val · ~regex · !not")
+			left += "  " + t.Faint.Render("terms AND · col:val · ~regex · !not · ⇥ complete")
 		}
 	default:
 		cmdText := ":"
