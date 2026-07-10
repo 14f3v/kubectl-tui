@@ -12,6 +12,7 @@ import (
 	"sort"
 	"time"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
@@ -19,6 +20,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	flowcontrolv1 "k8s.io/api/flowcontrol/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	nodev1 "k8s.io/api/node/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -201,6 +203,8 @@ func (s *Session) registerFactories() {
 	scheduling := s.CS.SchedulingV1().RESTClient()
 	node := s.CS.NodeV1().RESTClient()
 	coordination := s.CS.CoordinationV1().RESTClient()
+	admission := s.CS.AdmissionregistrationV1().RESTClient()
+	flow := s.CS.FlowcontrolV1().RESTClient()
 
 	reg := func(kind, resource string, warm bool, getter cache.Getter, example runtime.Object, clusterScoped bool) {
 		s.Engine.Register(kind, warm, func(sink engine.Sink, ns string) *engine.ViewStore {
@@ -260,6 +264,23 @@ func (s *Session) registerFactories() {
 	reg("runtimeclasses", "runtimeclasses", true, node, &nodev1.RuntimeClass{}, true)
 	reg("ingressclasses", "ingressclasses", true, net, &networkingv1.IngressClass{}, true)
 	reg("leases", "leases", true, coordination, &coordinationv1.Lease{}, false)
+
+	// Remaining built-in kinds (#27) — admission, flow-control, storage internals.
+	// All cluster-scoped except csistoragecapacities. Some (e.g. mutatingadmission*)
+	// are only served by newer clusters; the informer surfaces a clean error banner
+	// where a kind is not served rather than failing at startup.
+	reg("validatingwebhookconfigurations", "validatingwebhookconfigurations", false, admission, &admissionregistrationv1.ValidatingWebhookConfiguration{}, true)
+	reg("mutatingwebhookconfigurations", "mutatingwebhookconfigurations", false, admission, &admissionregistrationv1.MutatingWebhookConfiguration{}, true)
+	reg("validatingadmissionpolicies", "validatingadmissionpolicies", false, admission, &admissionregistrationv1.ValidatingAdmissionPolicy{}, true)
+	reg("validatingadmissionpolicybindings", "validatingadmissionpolicybindings", false, admission, &admissionregistrationv1.ValidatingAdmissionPolicyBinding{}, true)
+	reg("mutatingadmissionpolicies", "mutatingadmissionpolicies", false, admission, &admissionregistrationv1.MutatingAdmissionPolicy{}, true)
+	reg("mutatingadmissionpolicybindings", "mutatingadmissionpolicybindings", false, admission, &admissionregistrationv1.MutatingAdmissionPolicyBinding{}, true)
+	reg("flowschemas", "flowschemas", false, flow, &flowcontrolv1.FlowSchema{}, true)
+	reg("prioritylevelconfigurations", "prioritylevelconfigurations", false, flow, &flowcontrolv1.PriorityLevelConfiguration{}, true)
+	reg("csidrivers", "csidrivers", false, storage, &storagev1.CSIDriver{}, true)
+	reg("csinodes", "csinodes", false, storage, &storagev1.CSINode{}, true)
+	reg("volumeattachments", "volumeattachments", false, storage, &storagev1.VolumeAttachment{}, true)
+	reg("csistoragecapacities", "csistoragecapacities", false, storage, &storagev1.CSIStorageCapacity{}, false)
 }
 
 // nsOrAll maps an empty namespace to the all-namespaces sentinel.

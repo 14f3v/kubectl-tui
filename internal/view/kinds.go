@@ -61,6 +61,20 @@ func init() {
 	registerKind("runtimeclasses", []string{"runtimeclass", "runtimeclasses"}, "runtime classes")
 	registerKind("ingressclasses", []string{"ingressclass", "ingressclasses"}, "ingress classes")
 	registerKind("leases", []string{"lease", "leases"}, "coordination leases")
+
+	// Remaining built-in kinds (#27): admission, flow-control, storage internals.
+	registerKind("validatingwebhookconfigurations", []string{"vwc", "validatingwebhookconfiguration", "validatingwebhookconfigurations"}, "validating webhook configs")
+	registerKind("mutatingwebhookconfigurations", []string{"mwc", "mutatingwebhookconfiguration", "mutatingwebhookconfigurations"}, "mutating webhook configs")
+	registerKind("validatingadmissionpolicies", []string{"vap", "validatingadmissionpolicy", "validatingadmissionpolicies"}, "validating admission policies")
+	registerKind("validatingadmissionpolicybindings", []string{"vapb", "validatingadmissionpolicybinding", "validatingadmissionpolicybindings"}, "validating admission policy bindings")
+	registerKind("mutatingadmissionpolicies", []string{"mutatingadmissionpolicy", "mutatingadmissionpolicies"}, "mutating admission policies")
+	registerKind("mutatingadmissionpolicybindings", []string{"mutatingadmissionpolicybinding", "mutatingadmissionpolicybindings"}, "mutating admission policy bindings")
+	registerKind("flowschemas", []string{"fs", "flowschema", "flowschemas"}, "flow schemas (APF)")
+	registerKind("prioritylevelconfigurations", []string{"plc", "prioritylevelconfiguration", "prioritylevelconfigurations"}, "priority level configs (APF)")
+	registerKind("csidrivers", []string{"csidriver", "csidrivers"}, "CSI drivers")
+	registerKind("csinodes", []string{"csinode", "csinodes"}, "CSI nodes")
+	registerKind("volumeattachments", []string{"volumeattachment", "volumeattachments"}, "volume attachments")
+	registerKind("csistoragecapacities", []string{"csistoragecapacity", "csistoragecapacities"}, "CSI storage capacities")
 }
 
 // registerKind wires a generic resource page (title == kind) for kinds whose
