@@ -50,12 +50,13 @@ type crdBrowsePage struct {
 	readOnly   bool
 	token      int
 
-	table   *component.Table
-	allRows []columns.Row
-	filter  string
-	loaded  bool
-	errMsg  string
-	lastAt  time.Time
+	table     *component.Table
+	allRows   []columns.Row
+	colTitles []string // server column headers, for "col:" filter scoping
+	filter    string
+	loaded    bool
+	errMsg    string
+	lastAt    time.Time
 }
 
 // NewCRDBrowse builds a Table-protocol browse page for a resource kind.
@@ -127,6 +128,7 @@ func (p *crdBrowsePage) Update(m tea.Msg) (Page, tea.Cmd) {
 		}
 		p.errMsg = ""
 		p.table.SetColumns(t.cols)
+		p.colTitles = colTitlesOf(t.cols)
 		p.allRows = t.rows
 		p.reapply()
 		return p, nil
@@ -173,7 +175,7 @@ func (p *crdBrowsePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 }
 
 func (p *crdBrowsePage) reapply() {
-	p.table.SetRows(filterRows(p.allRows, p.filter))
+	p.table.SetRows(filterRows(p.allRows, p.filter, p.colTitles))
 }
 
 // yamlAction fetches the selected object via the dynamic client and shows its YAML.
