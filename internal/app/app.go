@@ -526,8 +526,10 @@ func (m *Model) handlePromptKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.prompt.errMsg = ""
 		return m, nil
 	default:
-		if s := k.String(); len([]rune(s)) == 1 {
-			m.prompt.buf += s
+		// k.Text carries the printable character(s), including " " for space, so a
+		// prompt can accept spaces (e.g. cp's "localPath remotePath").
+		if k.Text != "" {
+			m.prompt.buf += k.Text
 			m.prompt.errMsg = ""
 		}
 		return m, nil
@@ -613,8 +615,12 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	default:
-		if s := k.String(); len([]rune(s)) == 1 {
-			m.inputBuf += s
+		// k.Text is the printable text the key produced (" " for space, "" for
+		// non-text keys like arrows). Using it rather than String() — which renders
+		// space as "space" — lets the command/filter line accept spaces, which
+		// multi-term filters and "kind namespace" commands need.
+		if k.Text != "" {
+			m.inputBuf += k.Text
 			m.cmdSel = 0
 			if m.mode == modeFilter {
 				if p := m.active(); p != nil {
