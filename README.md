@@ -1,22 +1,31 @@
 # kubetui
 
-A full-screen **terminal UI for managing and monitoring Kubernetes clusters** — in the spirit of [k9s](https://k9scli.io/), written in Go with [Bubble Tea](https://charm.land). Browse ~30 built-in resource kinds **plus any CRD your cluster has**, tail logs, exec into pods, scale/rollout/restart, drain nodes, apply YAML, and more — all from the keyboard.
+A full-screen **terminal UI for managing and monitoring Kubernetes clusters** — in the spirit of [k9s](https://k9scli.io/), written in Go with [Bubble Tea](https://charm.land). Browse **~45 built-in resource kinds plus any CRD**, tail logs, exec/debug into pods, scale/rollout/restart, drain nodes, `cp` files, port-forward, diff-and-apply YAML, and more — all from the keyboard.
 
 **Plug-and-play:** point it at a kubeconfig and go. No cluster-side install, no operator, no sidecar, no extra binaries — kubetui speaks the standard Kubernetes API your cluster already exposes.
+
+![kubetui](docs/screenshots/demo.gif)
+
+<!-- Generate this GIF (and the stills) with: vhs docs/demo.tape  (see "Screenshots" below) -->
 
 ---
 
 ## Features
 
-- **Live resource tables** — pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, services, ingresses, network policies, endpoint slices, configmaps, secrets, PVCs/PVs, storage classes, service accounts, RBAC (roles/bindings, cluster roles/bindings), HPAs, PDBs, resource quotas, limit ranges, nodes, namespaces, events — driven by watch and coalesced for a smooth UI.
-- **Generic CRD browser** — `:crds` lists CustomResourceDefinitions; open any of them (or `:<plural>.<group>`) and browse its instances with **kubectl-identical columns** via the server-side Table protocol. No per-CRD code.
+- **Live resource tables** — workloads (pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs), services/ingresses/network-policies/endpoint-slices, config & storage (configmaps, secrets, PVCs/PVs, storage classes, CSI drivers/nodes, volume attachments, CSI storage capacities), RBAC (roles/bindings, cluster roles/bindings, service accounts), scheduling & flow-control (priority classes, runtime classes, priority-level configs, flow schemas, leases), admission (validating/mutating webhook configs and admission policies + bindings), certificate signing requests, HPAs, PDBs, quotas, limit ranges, nodes, namespaces, events — driven by watch and coalesced for a smooth UI.
+- **Generic CRD browser** — `:crds` lists CustomResourceDefinitions; open any of them (or `:<plural>.<group>`, or a bare `:<plural>` resolved via discovery) and browse its instances with **kubectl-identical columns** via the server-side Table protocol. No per-CRD code.
 - **Logs** — follow a single pod/container or **every pod of a workload merged** with color-coded `[pod]` tags. Toggle wrap, save to file, view previous (terminated) logs, pick a container, set tail count.
-- **Exec shell** — `s` drops you into an interactive shell in a pod (WebSocket→SPDY, raw-terminal handoff, resize).
-- **Workload actions** — scale replicas, rolling restart, rollout status, and **rollout history + undo**.
-- **Node operations** — cordon, uncordon, and drain (evict pods, skipping DaemonSet/mirror pods).
-- **Inspect & mutate** — YAML view, kubectl-style describe, `$EDITOR` edit (server-side apply), delete / force-kill, port-forward.
-- **Apply from YAML** — `:apply` opens `$EDITOR` and server-side applies any manifest (multi-doc, any kind including CRDs).
-- **Navigation** — command palette (`:`), context picker, namespace drill-in, runtime **sort** and **regex filter**.
+- **Exec & debug** — `s` opens an interactive shell in a pod (WebSocket→SPDY, raw-terminal handoff, resize); `D` attaches an **ephemeral debug container** (great for distroless) or a privileged **node debug** pod.
+- **File copy** — `C` copies files to/from a pod (`kubectl cp` parity, tar over exec).
+- **Workload actions** — scale, rolling restart, rollout status, **rollout history + undo**, **pause/resume**, and **`kubectl set`** (image / env / resources / service-account) + raw patch (`=`).
+- **CronJobs** — trigger a run now (`kubectl create job --from` parity) and suspend/resume (`enter`).
+- **Node operations** — cordon, uncordon, drain (skips DaemonSet/mirror pods), **taint** add/remove, and **`:nodetop`** CPU/MEM usage.
+- **Port-forward** — `p` on a pod, **service, or workload** (resolves a ready backing pod).
+- **Inspect & mutate** — YAML view, kubectl-style describe, `$EDITOR` edit (server-side apply), **label/annotate** (`L`), delete / force-kill, and **bulk multi-select** (`space`) for batch delete.
+- **Apply from YAML** — `:apply` opens `$EDITOR` and **previews a server-side dry-run diff** before applying (multi-doc, any kind including CRDs).
+- **CSR approve/deny** — `a` / `x` on a CertificateSigningRequest.
+- **API discovery & docs** — `:explain <kind[.field.path]>` renders OpenAPI field docs; `:api-resources` / `:api-versions` list what the cluster serves.
+- **Navigation** — command palette (`:`), context picker, namespace + **workload → pods** drill-in, runtime **sort**, and a **multi-term filter** (`/`) with column scoping, regex, and a suggestion dropdown.
 - **Secrets are safe** — values are hidden in the table and redacted in YAML; `enter` reveals a chosen key on demand.
 - **`:whoami`** — resolved identity + a `can-i` access-review grid.
 - **Capsule dashboard** — `:tenants` renders a [Capsule](https://projectcapsule.dev/) multi-tenancy view (tier, quota bars, owner, status) when the operator is installed.
@@ -30,6 +39,25 @@ A full-screen **terminal UI for managing and monitoring Kubernetes clusters** �
 - **Fire-and-observe writes** — a mutation never edits the local cache; the resulting watch event does. A failed write shows a toast and leaves the read state untouched.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
+
+---
+
+## Screenshots
+
+| Pods | Deployments |
+|---|---|
+| ![pods](docs/screenshots/pods.png) | ![deployments](docs/screenshots/deployments.png) |
+| **Multi-term filter** | **Demo** |
+| ![filter](docs/screenshots/filter.png) | ![demo](docs/screenshots/demo.gif) |
+
+These are generated reproducibly with [VHS](https://github.com/charmbracelet/vhs) — no manual capture:
+
+```bash
+brew install vhs
+vhs docs/demo.tape     # → docs/screenshots/{pods,deployments,filter}.png + demo.gif
+```
+
+Point kubetui at a demo/dev cluster with representative resources first, then commit the generated images under `docs/screenshots/`.
 
 ---
 
@@ -121,16 +149,20 @@ Fully-qualified custom resources work too:
 
 ### Filtering (`/`)
 
-Press `/` and type to filter the current table live. Filters match the row name and any cell.
+Press `/` and filter the current table live. The filter is a set of **whitespace-separated terms combined with AND** — a row is kept only if it matches every term — so you can progressively narrow a list. A **suggestion dropdown** shows candidate values as you type; `↑`/`↓` and `Tab` cycle through them.
+
+Each term is `[!][col:][~]value`:
 
 | Syntax | Meaning |
 |---|---|
-| `web` | case-insensitive **substring** |
+| `web` | case-insensitive **substring** (matches namespace, name, or any cell) |
+| `web prod` | multiple terms → **AND** (contains `web` *and* `prod`) |
+| `ns:kube-system` | **column-scoped** — `ns:`/`name:` always, or any column title (`status:`, `image:`, …) |
 | `~^web-\d+$` | leading `~` → case-insensitive **regex** |
-| `!running` | leading `!` → **invert** the match |
-| `!~-(canary\|debug)$` | invert + regex combined |
+| `!running` | leading `!` → **invert** (must NOT match) |
+| `status:running ns:prod !error` | mix scopes, regex, and negation |
 
-`esc` clears the filter.
+An unknown `col:` is treated as literal text (so `nginx:1.25` matches that image tag). `esc` clears the filter.
 
 ### Sorting
 
@@ -151,16 +183,22 @@ Available on resource tables (gated by kind, and disabled in read-only mode):
 
 | Key | Action | Applies to |
 |---|---|---|
-| `enter` | drill in | pod→containers · secret→reveal · node→ops menu · namespace→pods |
+| `enter` | drill in | pod→containers · **workload→pods** · secret→reveal · cronjob→menu · node→ops · namespace→pods |
 | `d` | describe (kubectl-style) | most kinds |
 | `y` | YAML view (`/` to search) | all |
 | `l` | logs | pods · workloads (merged multi-pod) |
 | `s` | shell (exec) | pods |
+| `D` | debug — ephemeral container / node debug pod | pods · nodes |
+| `C` | copy files to/from (`kubectl cp`) | pods |
 | `e` | edit in `$EDITOR` (server-side apply) | all |
-| `p` | port-forward | pods |
+| `=` | set image/env/resources/service-account · raw patch | pods, workloads |
+| `L` | label / annotate | all |
+| `p` | port-forward (resolves a ready pod) | pods, services, workloads |
 | `S` | scale replicas | Deployments, StatefulSets, ReplicaSets |
-| `r` | rollout menu (restart / status / history+undo) | Deployments, StatefulSets, DaemonSets |
-| `ctrl+d` | delete | all |
+| `r` | rollout menu (restart / status / history+undo / pause·resume) | Deployments, StatefulSets, DaemonSets |
+| `a` · `x` | approve · deny | CertificateSigningRequests |
+| `space` | select row (for bulk actions) | all |
+| `ctrl+d` | delete (all selected, or the row) | all |
 | `ctrl+k` | kill (force delete, grace 0) | all |
 
 ### Logs
@@ -236,11 +274,17 @@ The secrets table only shows the type and data-key count. `enter` opens a reveal
 | `:portforwards` | `pf` | Active port-forwards |
 | `:crds` | `crd` | CustomResourceDefinitions |
 | `:<plural>.<group>` | — | Any resource by GVR (e.g. `certificates.cert-manager.io`) |
-| `:apply` | `create` | Apply YAML from `$EDITOR` |
+| `:certificatesigningrequests` | `csr` | CSRs (`a` approve / `x` deny) |
+| `:apply` | `create` | Apply YAML from `$EDITOR` (dry-run diff first) |
+| `:nodetop` | `topnodes` | Node CPU/memory usage |
+| `:explain <kind[.field]>` | `exp` | OpenAPI field docs (e.g. `:explain pod.spec.containers`) |
+| `:api-resources` · `:api-versions` | — | Served resources / group-versions |
 | `:ctx` | `context` | Context picker (or `:ctx <name>`) |
 | `:whoami` | `auth` | Identity + access review |
 | `:tenants` | `tnt` | Capsule tenant dashboard |
 | `:q` | `quit`, `exit` | Quit |
+
+> Every built-in kind has a command — beyond those above, that includes `:priorityclasses` (`pc`), `:runtimeclasses`, `:ingressclasses`, `:leases`, and the admission (`:vwc`, `:mwc`, `:vap`, …), flow-control (`:flowschemas`, `:prioritylevelconfigurations`), and CSI-internal (`:csidrivers`, `:csinodes`, `:volumeattachments`, `:csistoragecapacities`) kinds. Press `:` and start typing — the palette suggests matches.
 
 ### Global keys
 
@@ -308,7 +352,9 @@ internal/view/          pages (one per kind + drill-ins, pickers, menus)
 internal/engine/        watch/informer engine + coalescing; columns/ = per-kind projectors
 internal/component/     the table component (widths, sort, render)
 internal/action/        cluster actions: logstream, execshell, editor, write, scale,
-                        rollout, nodeops, apply, dynbrowse (CRD/Table), inspect, portfwd
+                        rollout, nodeops, apply (+dry-run diff), inspect, portfwd/portforward,
+                        cp, debug, setspec, metaedit, cronjob, csr, dynbrowse (CRD/Table),
+                        explain, apidisco
 internal/k8s/           session: kubeconfig, clients, factory registration
 internal/style/         theme (design tokens + prebuilt lipgloss styles)
 internal/config/        config file loading
