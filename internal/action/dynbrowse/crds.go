@@ -181,3 +181,55 @@ func ResolvePluralGroup(ctx context.Context, disco discovery.DiscoveryInterface,
 	}
 	return info, nil
 }
+
+// findResourceAny scans discovery for the first non-subresource matching a bare
+// plural in any group. Pure, for unit testing.
+func findResourceAny(lists []*metav1.APIResourceList, plural string) (CRDInfo, bool) {
+	for _, list := range lists {
+		if list == nil {
+			continue
+		}
+		gv, err := schema.ParseGroupVersion(list.GroupVersion)
+		if err != nil {
+			continue
+		}
+		for _, r := range list.APIResources {
+			if r.Name != plural {
+				continue
+			}
+			scope := "Cluster"
+			if r.Namespaced {
+				scope = "Namespaced"
+			}
+			name := plural
+			if gv.Group != "" {
+				name = plural + "." + gv.Group
+			}
+			return CRDInfo{
+				Name:       name,
+				Group:      gv.Group,
+				Version:    gv.Version,
+				Kind:       r.Kind,
+				Plural:     plural,
+				Namespaced: r.Namespaced,
+				Scope:      scope,
+			}, true
+		}
+	}
+	return CRDInfo{}, false
+}
+
+// ResolveResource resolves a bare plural (any group) to its served resource — for
+// opening core-group and other built-in kinds that have no first-class view
+// (e.g. :endpoints, :componentstatuses). Tolerates partial discovery failure.
+func ResolveResource(ctx context.Context, disco discovery.DiscoveryInterface, plural string) (CRDInfo, error) {
+	lists, err := disco.ServerPreferredResources()
+	if err != nil && len(lists) == 0 {
+		return CRDInfo{}, err
+	}
+	info, ok := findResourceAny(lists, plural)
+	if !ok {
+		return CRDInfo{}, fmt.Errorf("no served resource %q", plural)
+	}
+	return info, nil
+}

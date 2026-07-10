@@ -33,4 +33,5 @@ var (
 	keyDeny     = key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "deny"))
 	keyDebug    = key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "debug"))
 	keySet      = key.NewBinding(key.WithKeys("="), key.WithHelp("=", "set/patch"))
+	keyLabel    = key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "label/annotate"))
 )

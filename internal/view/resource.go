@@ -140,7 +140,7 @@ func (p *resourcePage) Summary() Summary {
 func (p *resourcePage) Keys() []key.Binding {
 	keys := []key.Binding{
 		keyEnter, keyDescribe, keyLogs, keyShell, keyYAML,
-		keyEdit, keyDelete, keyKill, keyPortFwd, keySortNext, keySortDir,
+		keyEdit, keyLabel, keyDelete, keyKill, keyPortFwd, keySortNext, keySortDir,
 	}
 	// Workload-only actions are advertised only where they apply.
 	if scale.Scalable(p.kind) {
@@ -224,6 +224,8 @@ func (p *resourcePage) handleKey(k tea.KeyPressMsg) (Page, tea.Cmd) {
 		return p, p.rolloutAction()
 	case key.Matches(k, keySet):
 		return p, p.setAction()
+	case key.Matches(k, keyLabel):
+		return p, p.labelAction()
 	case key.Matches(k, keyDebug):
 		return p, p.debugAction()
 	case key.Matches(k, keyApprove):
@@ -344,6 +346,19 @@ func (p *resourcePage) setAction() tea.Cmd {
 	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
+// labelAction opens the label/annotation menu for the selected resource.
+func (p *resourcePage) labelAction() tea.Cmd {
+	if p.sess.ReadOnly {
+		return toast("read-only mode: mutations are disabled", msg.LevelWarn)
+	}
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	page := newMetaMenuPage(p.sess.Session, p.theme, p.kind, row.Namespace, row.Name)
+	return func() tea.Msg { return PushMsg{Page: page} }
+}
+
 // enterAction drills into the selected row: a pod's containers, or a secret's
 // (masked) data keys. For other kinds enter is a no-op for now (their detail
 // views can be added later).
@@ -357,9 +372,21 @@ func (p *resourcePage) enterAction() tea.Cmd {
 		return p.enterNamespace()
 	case "nodes":
 		return p.enterNode()
+	case "cronjobs":
+		return p.enterCronJob()
 	default:
 		return nil
 	}
+}
+
+// enterCronJob opens the cronjob actions menu (trigger / suspend / resume).
+func (p *resourcePage) enterCronJob() tea.Cmd {
+	row, ok := p.table.Selected()
+	if !ok {
+		return nil
+	}
+	page := newCronJobMenuPage(p.sess.Session, p.theme, row.Namespace, row.Name, p.sess.ReadOnly)
+	return func() tea.Msg { return PushMsg{Page: page} }
 }
 
 // enterNamespace drills into a namespace by scoping the pods view to it (k9s-style

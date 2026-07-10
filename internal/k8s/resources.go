@@ -55,6 +55,11 @@ var resources = map[string]ResourceInfo{
 	"limitranges":              {GVR: schema.GroupVersionResource{Group: "", Version: "v1", Resource: "limitranges"}, Namespaced: true, Kind: "LimitRange"},
 
 	"certificatesigningrequests": {GVR: schema.GroupVersionResource{Group: "certificates.k8s.io", Version: "v1", Resource: "certificatesigningrequests"}, Namespaced: false, Kind: "CertificateSigningRequest"},
+
+	"priorityclasses": {GVR: schema.GroupVersionResource{Group: "scheduling.k8s.io", Version: "v1", Resource: "priorityclasses"}, Namespaced: false, Kind: "PriorityClass"},
+	"runtimeclasses":  {GVR: schema.GroupVersionResource{Group: "node.k8s.io", Version: "v1", Resource: "runtimeclasses"}, Namespaced: false, Kind: "RuntimeClass"},
+	"ingressclasses":  {GVR: schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingressclasses"}, Namespaced: false, Kind: "IngressClass"},
+	"leases":          {GVR: schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}, Namespaced: true, Kind: "Lease"},
 }
 
 // ResourceFor returns the ResourceInfo for a kind key, or ok=false if unknown.
