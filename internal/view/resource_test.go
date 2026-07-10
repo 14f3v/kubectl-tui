@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/14f3v/kubectl-tui/internal/component"
 	"github.com/14f3v/kubectl-tui/internal/engine"
 	"github.com/14f3v/kubectl-tui/internal/engine/columns"
@@ -175,6 +178,39 @@ func TestFilterMatches(t *testing.T) {
 			t.Errorf("filterMatches(%q) = (%q, %q, %v), want (%q, %q, %v)",
 				c.in, prefix, value, matches, c.wantPrefix, c.wantValue, c.wantMatch)
 		}
+	}
+}
+
+func TestFilterPodRows(t *testing.T) {
+	// A deployment's selector; its pods carry app=web (and other labels).
+	sel, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pods := map[string]*corev1.Pod{
+		"prod/web-a":   {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "web", "pod-template-hash": "1"}}},
+		"prod/web-b":   {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "web", "pod-template-hash": "2"}}},
+		"prod/other-c": {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "api"}}},
+		"prod/nolabel": {ObjectMeta: metav1.ObjectMeta{}},
+	}
+	lookup := func(ns, name string) (*corev1.Pod, bool) {
+		p, ok := pods[ns+"/"+name]
+		return p, ok
+	}
+	rows := []columns.Row{
+		{Namespace: "prod", Name: "web-a"},
+		{Namespace: "prod", Name: "web-b"},
+		{Namespace: "prod", Name: "other-c"},
+		{Namespace: "prod", Name: "nolabel"},
+		{Namespace: "prod", Name: "evicted"}, // not in cache
+	}
+	got := filterPodRows(rows, sel, lookup)
+	if len(got) != 2 || got[0].Name != "web-a" || got[1].Name != "web-b" {
+		names := make([]string, len(got))
+		for i, r := range got {
+			names[i] = r.Name
+		}
+		t.Fatalf("filterPodRows = %v, want [web-a web-b]", names)
 	}
 }
 
