@@ -64,9 +64,9 @@ func (p *crdListPage) SetFilter(f string) {
 	p.table.SetRows(filterRows(p.allRows, p.filter, crdListTitles))
 }
 
-// CompleteFilter Tab-completes the filter's last term against the current rows.
-func (p *crdListPage) CompleteFilter(buf string) (string, bool) {
-	return completeFilter(buf, p.allRows, crdListTitles)
+// FilterMatches returns completion candidates for the filter's last term.
+func (p *crdListPage) FilterMatches(buf string) (string, string, []string) {
+	return filterMatches(buf, p.allRows, crdListTitles)
 }
 
 func (p *crdListPage) OnEnter() tea.Cmd {

@@ -133,35 +133,47 @@ func TestFilterRowsMulti(t *testing.T) {
 	}
 }
 
-func TestCompleteFilter(t *testing.T) {
+func TestFilterMatches(t *testing.T) {
 	titles := []string{"NAME", "STATUS", "IMAGE"}
 	rows := []columns.Row{
-		nsRow("prod", "microservice-api", "Running", "img:1"),
-		nsRow("prod", "microservice-worker", "Running", "img:2"),
-		nsRow("kube-system", "coredns", "Running", "img:3"),
-		nsRow("prod", "payments", "Pending", "img:4"),
+		nsRow("prod", "alpha", "Running", "img:1"),
+		nsRow("prod", "alpine", "Running", "img:2"),
+		nsRow("kube", "bravo", "Pending", "img:3"),
 	}
+	eq := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
 	cases := []struct {
-		in          string
-		want        string
-		wantChanged bool
+		in         string
+		wantPrefix string
+		wantValue  string
+		wantMatch  []string
 	}{
-		{"micro", "microservice-", true},           // extend to the shared prefix of two names
-		{"pay", "payments", true},                  // single match completes fully
-		{"zzz", "zzz", false},                       // no candidate
-		{"", "", false},                             // nothing to complete
-		{"prod micro", "prod microservice-", true},  // only the last term is completed
-		{"ns:kube", "ns:kube-system", true},         // namespace scope, single match
-		{"name:micro", "name:microservice-", true},  // name scope
-		{"status:Run", "status:Running", true},      // column scope, case-insensitive
-		{"microservice-", "microservice-", false},   // already at the shared prefix
-		{"~micro", "~micro", false},                 // regex is not completed
-		{"!micro", "!microservice-", true},          // negation is preserved
+		{"al", "", "al", []string{"alpha", "alpine"}},           // names by prefix
+		{"prod al", "prod ", "al", []string{"alpha", "alpine"}}, // only the last term
+		{"!al", "!", "al", []string{"alpha", "alpine"}},         // negation kept in prefix
+		{"ns:", "ns:", "", []string{"prod", "kube"}},            // distinct namespaces
+		{"name:al", "name:", "al", []string{"alpha", "alpine"}}, // name scope
+		{"status:Run", "status:", "Run", []string{"Running"}},   // column scope, deduped
+		{"zzz", "", "zzz", nil},                                 // no candidates
+		{"~al", "", "", nil},                                    // regex not suggested
+		{"", "", "", nil},                                       // empty
+		{"prod ", "", "", nil},                                  // trailing space => empty term
 	}
 	for _, c := range cases {
-		got, changed := completeFilter(c.in, rows, titles)
-		if got != c.want || changed != c.wantChanged {
-			t.Errorf("completeFilter(%q) = (%q, %v), want (%q, %v)", c.in, got, changed, c.want, c.wantChanged)
+		prefix, value, matches := filterMatches(c.in, rows, titles)
+		if prefix != c.wantPrefix || value != c.wantValue || !eq(matches, c.wantMatch) {
+			t.Errorf("filterMatches(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				c.in, prefix, value, matches, c.wantPrefix, c.wantValue, c.wantMatch)
 		}
 	}
 }

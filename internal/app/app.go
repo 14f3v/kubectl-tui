@@ -75,6 +75,11 @@ type Model struct {
 	inputBuf string
 	cmdSel   int // selected index in the command palette (command mode)
 
+	// Filter-mode suggestions (dropdown of candidate values for the last term).
+	suggest       []string // candidate values for the current term
+	suggestPrefix string   // head + !/col: affixes to re-prepend to a chosen value
+	suggestSel    int      // highlighted suggestion, or -1 for none
+
 	toast      *msg.Toast
 	toastToken int
 	showHelp   bool
@@ -453,6 +458,7 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(k, keyFilter):
 		m.mode = modeFilter
 		m.inputBuf = ""
+		m.recomputeSuggest()
 		return m, nil
 	case key.Matches(k, keyEsc):
 		// A drill-in pops; otherwise esc clears an active filter.
@@ -536,8 +542,48 @@ func (m *Model) handlePromptKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// recomputeSuggest refreshes the filter suggestion list for the current buffer's
+// last term and clears the highlight. Called whenever the filter text changes (a
+// typed character, backspace, or opening the filter) — but not on suggestion
+// navigation, which keeps the list stable while the highlight moves.
+func (m *Model) recomputeSuggest() {
+	m.suggest, m.suggestPrefix, m.suggestSel = nil, "", -1
+	if m.mode != modeFilter {
+		return
+	}
+	if p := m.active(); p != nil {
+		if fc, ok := p.(view.FilterCompleter); ok {
+			prefix, _, matches := fc.FilterMatches(m.inputBuf)
+			m.suggestPrefix, m.suggest = prefix, matches
+		}
+	}
+}
+
+// selectSuggest moves the suggestion highlight by delta (wrapping) and fills the
+// buffer with the highlighted value, re-applying the filter live. From no
+// selection, delta>0 highlights the first entry and delta<0 the last.
+func (m *Model) selectSuggest(delta int) {
+	n := len(m.suggest)
+	if n == 0 {
+		return
+	}
+	switch {
+	case m.suggestSel < 0 && delta > 0:
+		m.suggestSel = 0
+	case m.suggestSel < 0:
+		m.suggestSel = n - 1
+	default:
+		m.suggestSel = (m.suggestSel + delta + n) % n
+	}
+	m.inputBuf = m.suggestPrefix + m.suggest[m.suggestSel]
+	if p := m.active(); p != nil {
+		p.SetFilter(m.inputBuf)
+	}
+}
+
 // handleInputKey drives the command line while typing after ":" or "/". In
-// command mode it also drives the command palette (↑/↓ select, Tab complete).
+// command mode it also drives the command palette (↑/↓ select, Tab complete);
+// in filter mode ↑/↓/Tab move through the suggestion dropdown.
 func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Palette navigation is only meaningful in command mode.
 	if m.mode == modeCommand {
@@ -561,20 +607,20 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	switch k.String() {
-	case "tab":
-		// Tab-complete the filter's last term against the page's rows.
-		if m.mode == modeFilter {
-			if p := m.active(); p != nil {
-				if fc, ok := p.(view.FilterCompleter); ok {
-					if completed, changed := fc.CompleteFilter(m.inputBuf); changed {
-						m.inputBuf = completed
-						p.SetFilter(m.inputBuf)
-					}
-				}
-			}
+	// Suggestion navigation in filter mode: ↑/↓ and Tab move through the candidate
+	// values, filling the buffer with the highlighted one.
+	if m.mode == modeFilter {
+		switch k.String() {
+		case "up", "ctrl+p":
+			m.selectSuggest(-1)
+			return m, nil
+		case "down", "ctrl+n", "tab":
+			m.selectSuggest(1)
+			return m, nil
 		}
-		return m, nil
+	}
+
+	switch k.String() {
 	case "esc":
 		if m.mode == modeFilter {
 			if p := m.active(); p != nil {
@@ -612,6 +658,7 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if p := m.active(); p != nil {
 				p.SetFilter(m.inputBuf)
 			}
+			m.recomputeSuggest()
 		}
 		return m, nil
 	default:
@@ -626,6 +673,7 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				if p := m.active(); p != nil {
 					p.SetFilter(m.inputBuf)
 				}
+				m.recomputeSuggest()
 			}
 		}
 		return m, nil

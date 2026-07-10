@@ -74,9 +74,12 @@ func (m *Model) render() string {
 	frame := strings.Join([]string{cmd, header, crumb, content, footer}, "\n")
 
 	// In command mode, overlay the palette dropdown just under the prompt (row 0),
-	// leaving the command bar and footer visible.
+	// leaving the command bar and footer visible; in filter mode, overlay the
+	// suggestion dropdown when there are candidates for the current term.
 	if m.mode == modeCommand {
 		frame = m.overlayPalette(frame)
+	} else if m.mode == modeFilter && len(m.suggest) > 0 {
+		frame = m.overlayFilterSuggest(frame)
 	}
 	return frame
 }
@@ -181,6 +184,92 @@ func (m *Model) renderPalette(width int) []string {
 	return strings.Split(box, "\n")
 }
 
+// overlayFilterSuggest splices the filter suggestion box under the command bar,
+// mirroring overlayPalette.
+func (m *Model) overlayFilterSuggest(frame string) string {
+	lines := strings.Split(frame, "\n")
+	box := m.renderFilterSuggest(m.width)
+	for i, bl := range box {
+		row := 1 + i
+		if row >= len(lines)-1 { // keep the footer intact
+			break
+		}
+		lines[row] = fitLine(bl, m.width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderFilterSuggest builds the filter suggestion dropdown: a header with the
+// controls and position, then one row per candidate value for the current term,
+// the highlighted one accented. It scrolls to keep the highlight visible.
+func (m *Model) renderFilterSuggest(width int) []string {
+	t := m.theme
+	matches := m.suggest
+
+	boxW := 52
+	if boxW > width-4 {
+		boxW = width - 4
+	}
+	if boxW < 20 {
+		boxW = 20
+	}
+	inner := boxW - 4
+
+	maxRows := 8
+	if m.height > 0 {
+		if fit := m.height - 5; fit < maxRows {
+			maxRows = fit
+		}
+	}
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	sel := m.suggestSel
+	if sel < 0 {
+		sel = 0
+	}
+	start, end := paletteWindow(sel, len(matches), maxRows)
+
+	head := t.AccentText.Bold(true).Render("SUGGESTIONS") + "  " +
+		t.Faint.Render("↑↓ pick · tab next · enter apply · esc close")
+	pos := fmt.Sprintf("   %d", len(matches))
+	if m.suggestSel >= 0 {
+		pos = fmt.Sprintf("   %d/%d", m.suggestSel+1, len(matches))
+	}
+	if start > 0 {
+		pos += " ↑"
+	}
+	if end < len(matches) {
+		pos += " ↓"
+	}
+	head += t.Faint.Render(pos)
+
+	rows := []string{head}
+	for i := start; i < end; i++ {
+		val := ansi.Truncate(matches[i], inner-2, "…")
+		selected := i == m.suggestSel
+		marker := "  "
+		valStyle := t.Dim
+		if selected {
+			marker = t.AccentText.Render("▶ ")
+			valStyle = t.Base.Bold(true)
+		}
+		row := marker + valStyle.Render(val)
+		if selected {
+			row = lipgloss.NewStyle().Background(lipgloss.Color("#1a1d2e")).Render(fitLine(row, inner))
+		}
+		rows = append(rows, row)
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Pal.Accent).
+		Padding(0, 1).
+		Width(boxW).
+		Render(strings.Join(rows, "\n"))
+	return strings.Split(box, "\n")
+}
+
 // ---- command bar ----
 
 func (m *Model) renderCommandBar() string {
@@ -193,7 +282,7 @@ func (m *Model) renderCommandBar() string {
 		left = t.PinkText.Render("/") + " " + t.Base.Render(m.inputBuf) + t.AccentText.Render("▊")
 		if m.inputBuf == "" {
 			// Teach the filter grammar as placeholder text until the user types.
-			left += "  " + t.Faint.Render("terms AND · col:val · ~regex · !not · ⇥ complete")
+			left += "  " + t.Faint.Render("terms AND · col:val · ~regex · !not · ⇥↑↓ suggest")
 		}
 	default:
 		cmdText := ":"
