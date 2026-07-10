@@ -92,7 +92,7 @@ func (p *rolloutHistoryPage) Update(m tea.Msg) (Page, tea.Cmd) {
 			if p.cursor > 0 {
 				p.cursor--
 			}
-		case "enter", " ":
+		case "enter", "space":
 			return p, p.undo()
 		}
 	}

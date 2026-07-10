@@ -67,7 +67,7 @@ func (p *contextPickerPage) Update(m tea.Msg) (Page, tea.Cmd) {
 		if p.cursor > 0 {
 			p.cursor--
 		}
-	case "enter", " ":
+	case "enter", "space":
 		if p.cursor < 0 || p.cursor >= len(p.contexts) {
 			return p, nil
 		}

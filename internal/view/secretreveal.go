@@ -70,7 +70,7 @@ func (p *secretRevealPage) Summary() Summary  { return Summary{Total: len(p.item
 func (p *secretRevealPage) Keys() []key.Binding {
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("j", "k"), key.WithHelp("j/k", "move")),
-		key.NewBinding(key.WithKeys("enter", " "), key.WithHelp("enter", "reveal/hide")),
+		key.NewBinding(key.WithKeys("enter", "space"), key.WithHelp("enter", "reveal/hide")),
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 	}
 }
@@ -89,7 +89,7 @@ func (p *secretRevealPage) Update(m tea.Msg) (Page, tea.Cmd) {
 		if p.cursor > 0 {
 			p.cursor--
 		}
-	case "enter", " ":
+	case "enter", "space":
 		if p.cursor >= 0 && p.cursor < len(p.items) {
 			p.items[p.cursor].revealed = !p.items[p.cursor].revealed
 		}

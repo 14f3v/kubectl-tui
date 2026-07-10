@@ -35,5 +35,5 @@ var (
 	keySet      = key.NewBinding(key.WithKeys("="), key.WithHelp("=", "set/patch"))
 	keyLabel    = key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "label/annotate"))
 	keyCopy     = key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "copy files"))
-	keySelect   = key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "select"))
+	keySelect   = key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "select"))
 )
