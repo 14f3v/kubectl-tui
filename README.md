@@ -327,4 +327,4 @@ Adding a new **built-in** kind is a `columns/<kind>.go` projector plus a line in
 
 ## License
 
-TBD — add a `LICENSE` before any public release.
+Licensed under the [Apache License 2.0](LICENSE).
