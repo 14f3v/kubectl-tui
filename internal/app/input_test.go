@@ -50,3 +50,45 @@ func promptBuf(m *Model) string {
 	}
 	return m.prompt.buf
 }
+
+// TestSelectSuggest exercises filter suggestion navigation: down/Tab advance and
+// wrap, up wraps backwards, the buffer is rebuilt from prefix + value, and an
+// empty list is a no-op.
+func TestSelectSuggest(t *testing.T) {
+	m := &Model{suggest: []string{"alpha", "alpine", "bravo"}, suggestPrefix: "prod ", suggestSel: -1}
+
+	// Down from no selection highlights the first and fills the buffer.
+	m.selectSuggest(1)
+	if m.suggestSel != 0 || m.inputBuf != "prod alpha" {
+		t.Fatalf("first down: sel=%d buf=%q", m.suggestSel, m.inputBuf)
+	}
+	// Advancing steps through and wraps to the start.
+	for _, want := range []struct {
+		sel int
+		buf string
+	}{{1, "prod alpine"}, {2, "prod bravo"}, {0, "prod alpha"}} {
+		m.selectSuggest(1)
+		if m.suggestSel != want.sel || m.inputBuf != want.buf {
+			t.Fatalf("advance: sel=%d buf=%q, want %d/%q", m.suggestSel, m.inputBuf, want.sel, want.buf)
+		}
+	}
+	// Up from the first wraps to the last.
+	m.selectSuggest(-1)
+	if m.suggestSel != 2 || m.inputBuf != "prod bravo" {
+		t.Fatalf("up wrap: sel=%d buf=%q", m.suggestSel, m.inputBuf)
+	}
+
+	// Up from no selection highlights the last.
+	m2 := &Model{suggest: []string{"a", "b"}, suggestSel: -1}
+	m2.selectSuggest(-1)
+	if m2.suggestSel != 1 || m2.inputBuf != "b" {
+		t.Fatalf("up from none: sel=%d buf=%q", m2.suggestSel, m2.inputBuf)
+	}
+
+	// No candidates: navigation is a no-op.
+	m3 := &Model{suggest: nil, suggestSel: -1}
+	m3.selectSuggest(1)
+	if m3.suggestSel != -1 || m3.inputBuf != "" {
+		t.Fatalf("empty list: sel=%d buf=%q", m3.suggestSel, m3.inputBuf)
+	}
+}

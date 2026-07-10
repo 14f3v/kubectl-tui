@@ -130,9 +130,9 @@ func (p *resourcePage) SetFilter(f string) {
 	p.reapplyFilter()
 }
 
-// CompleteFilter Tab-completes the filter's last term against the current rows.
-func (p *resourcePage) CompleteFilter(buf string) (string, bool) {
-	return completeFilter(buf, p.allRows, p.colTitles)
+// FilterMatches returns completion candidates for the filter's last term.
+func (p *resourcePage) FilterMatches(buf string) (string, string, []string) {
+	return filterMatches(buf, p.allRows, p.colTitles)
 }
 
 func (p *resourcePage) Summary() Summary {

@@ -84,9 +84,9 @@ func (p *crdBrowsePage) SetFilter(f string) {
 	p.reapply()
 }
 
-// CompleteFilter Tab-completes the filter's last term against the current rows.
-func (p *crdBrowsePage) CompleteFilter(buf string) (string, bool) {
-	return completeFilter(buf, p.allRows, p.colTitles)
+// FilterMatches returns completion candidates for the filter's last term.
+func (p *crdBrowsePage) FilterMatches(buf string) (string, string, []string) {
+	return filterMatches(buf, p.allRows, p.colTitles)
 }
 
 // OnEnter kicks off the first fetch and the refresh tick.
