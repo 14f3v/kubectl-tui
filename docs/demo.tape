@@ -1,8 +1,23 @@
 # docs/demo.tape — reproducible kubetui screenshots + demo GIF via VHS.
 #
 #   brew install vhs
-#   vhs docs/demo.tape        # run from the repo root, with KUBECONFIG pointed
-#                             # at a demo/dev cluster that has real resources
+#   vhs docs/demo.tape        # run from the repo root
+#
+# CLUSTER: kubetui connects to your CURRENT kube-context, and VHS runs in its own
+# shell — so it needs a REACHABLE cluster with data. Easiest for a public README is
+# a throwaway local cluster seeded with generic workloads (see docs/demo-fixtures.yaml):
+#
+#   brew install kind
+#   kind create cluster --name kubetui-demo
+#   kubectl apply -f docs/demo-fixtures.yaml
+#   kubectl -n demo rollout status deploy/web
+#   vhs docs/demo.tape
+#   kind delete cluster --name kubetui-demo
+#
+# To record against another cluster instead, export its kubeconfig when invoking vhs:
+#   KUBECONFIG=/path/to/kubeconfig vhs docs/demo.tape
+# or add flags to the launch line below (kept out of git):
+#   Type "./kubetui -kubeconfig /path/to/kubeconfig -context my-cluster"
 #
 # The tape builds kubetui from source (hidden) and runs the local ./kubetui, so
 # it does NOT need to be installed on your PATH. If you'd rather use an installed
@@ -36,8 +51,9 @@ Enter
 Sleep 4s
 Show
 
-# Pods.
-Sleep 1s
+# Pods across all namespaces (press 0) so the table has content.
+Type "0"
+Sleep 1500ms
 Screenshot docs/screenshots/pods.png
 
 # Deployments.
