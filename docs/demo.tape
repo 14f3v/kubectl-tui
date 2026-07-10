@@ -1,18 +1,17 @@
 # docs/demo.tape — reproducible kubetui screenshots + demo GIF via VHS.
 #
 #   brew install vhs
-#   vhs docs/demo.tape        # point kubetui at a demo/dev cluster with real data
+#   vhs docs/demo.tape        # run from the repo root, with KUBECONFIG pointed
+#                             # at a demo/dev cluster that has real resources
 #
-# Produces:
-#   docs/screenshots/pods.png
-#   docs/screenshots/deployments.png
-#   docs/screenshots/filter.png
-#   docs/screenshots/demo.gif   (the whole session)
+# The tape builds kubetui from source (hidden) and runs the local ./kubetui, so
+# it does NOT need to be installed on your PATH. If you'd rather use an installed
+# binary (e.g. `brew install 14f3v/tap/kubetui`), replace the two build lines
+# below with a single:  Type "kubetui"
 #
-# Tweak the terminal size/theme and the keystrokes below to taste. Use a demo or
-# dev cluster so no real resource names end up in the images.
+# Produces docs/screenshots/{pods,deployments,filter}.png and demo.gif.
 
-Require kubetui
+Require go
 
 Output docs/screenshots/demo.gif
 
@@ -23,9 +22,16 @@ Set Height 720
 Set Padding 24
 Set Theme "Catppuccin Mocha"
 
-# Launch kubetui and let it connect + paint (hide the typing of the command).
+# Build from source and launch — hidden, so the GIF starts on the running UI.
+# Incremental builds take a few seconds; bump the Sleep if your first build is cold.
 Hide
-Type "kubetui"
+Type "go build -o kubetui ./cmd/kubetui"
+Enter
+Sleep 20s
+Type "clear"
+Enter
+Sleep 500ms
+Type "./kubetui"
 Enter
 Sleep 4s
 Show
@@ -48,4 +54,6 @@ Sleep 1500ms
 Screenshot docs/screenshots/filter.png
 Escape
 
+# Quit cleanly.
 Sleep 1s
+Type "q"
