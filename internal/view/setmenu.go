@@ -76,7 +76,7 @@ func (p *setMenuPage) Update(m tea.Msg) (Page, tea.Cmd) {
 		if p.cursor > 0 {
 			p.cursor--
 		}
-	case "enter", " ":
+	case "enter", "space":
 		it := p.items[p.cursor]
 		switch it.label {
 		case "Set image":

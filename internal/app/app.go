@@ -560,6 +560,19 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch k.String() {
+	case "tab":
+		// Tab-complete the filter's last term against the page's rows.
+		if m.mode == modeFilter {
+			if p := m.active(); p != nil {
+				if fc, ok := p.(view.FilterCompleter); ok {
+					if completed, changed := fc.CompleteFilter(m.inputBuf); changed {
+						m.inputBuf = completed
+						p.SetFilter(m.inputBuf)
+					}
+				}
+			}
+		}
+		return m, nil
 	case "esc":
 		if m.mode == modeFilter {
 			if p := m.active(); p != nil {

@@ -32,16 +32,22 @@ type crdListPage struct {
 	errMsg  string
 }
 
+// crdListCols is the CRD index's fixed column layout; crdListTitles mirrors its
+// headers for "col:" filter scoping.
+var crdListCols = []columns.Column{
+	{Title: "NAME", MinWidth: 30, Grow: 3, Align: columns.AlignLeft},
+	{Title: "GROUP", MinWidth: 20, Grow: 1, Align: columns.AlignLeft},
+	{Title: "KIND", MinWidth: 18, Align: columns.AlignLeft},
+	{Title: "SCOPE", MinWidth: 11, Align: columns.AlignLeft},
+	{Title: "AGE", MinWidth: 5, Align: columns.AlignRight},
+}
+
+var crdListTitles = colTitlesOf(crdListCols)
+
 // NewCRDList builds the CRD index page.
 func NewCRDList(sess *k8s.Session, theme style.Theme, namespace string, readOnly bool) *crdListPage {
 	t := component.NewTable(theme)
-	t.SetColumns([]columns.Column{
-		{Title: "NAME", MinWidth: 30, Grow: 3, Align: columns.AlignLeft},
-		{Title: "GROUP", MinWidth: 20, Grow: 1, Align: columns.AlignLeft},
-		{Title: "KIND", MinWidth: 18, Align: columns.AlignLeft},
-		{Title: "SCOPE", MinWidth: 11, Align: columns.AlignLeft},
-		{Title: "AGE", MinWidth: 5, Align: columns.AlignRight},
-	})
+	t.SetColumns(crdListCols)
 	return &crdListPage{sess: sess, theme: theme, namespace: namespace, readOnly: readOnly, table: t, byName: map[string]dynbrowse.CRDInfo{}}
 }
 
@@ -55,7 +61,12 @@ func (p *crdListPage) Summary() Summary  { return Summary{Total: p.table.RowCoun
 
 func (p *crdListPage) SetFilter(f string) {
 	p.filter = f
-	p.table.SetRows(filterRows(p.allRows, p.filter))
+	p.table.SetRows(filterRows(p.allRows, p.filter, crdListTitles))
+}
+
+// CompleteFilter Tab-completes the filter's last term against the current rows.
+func (p *crdListPage) CompleteFilter(buf string) (string, bool) {
+	return completeFilter(buf, p.allRows, crdListTitles)
 }
 
 func (p *crdListPage) OnEnter() tea.Cmd {
@@ -104,7 +115,7 @@ func (p *crdListPage) Update(m tea.Msg) (Page, tea.Cmd) {
 			})
 		}
 		p.allRows = rows
-		p.table.SetRows(filterRows(p.allRows, p.filter))
+		p.table.SetRows(filterRows(p.allRows, p.filter, crdListTitles))
 		return p, nil
 	case tea.KeyPressMsg:
 		return p.handleKey(t)

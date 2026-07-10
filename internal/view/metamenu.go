@@ -70,7 +70,7 @@ func (p *metaMenuPage) Update(m tea.Msg) (Page, tea.Cmd) {
 		if p.cursor > 0 {
 			p.cursor--
 		}
-	case "enter", " ":
+	case "enter", "space":
 		switch p.items[p.cursor].label {
 		case "Label":
 			return p, p.prompt("Label", false)

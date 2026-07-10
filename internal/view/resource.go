@@ -49,9 +49,10 @@ type resourcePage struct {
 	allRows []columns.Row
 	filter  string
 
-	metrics map[string]metrics.PodUsage // pod usage keyed by ns/name (pods only)
-	cpuCol  int                         // CPU column index, or -1
-	memCol  int                         // MEM column index, or -1
+	metrics   map[string]metrics.PodUsage // pod usage keyed by ns/name (pods only)
+	cpuCol    int                         // CPU column index, or -1
+	memCol    int                         // MEM column index, or -1
+	colTitles []string                    // column headers, for "col:" filter scoping
 }
 
 // deps mirrors Deps but lets resourcePage store the session without re-importing.
@@ -83,7 +84,10 @@ func newResourcePage(kind, title string, d Deps, opts ...Option) *resourcePage {
 		memCol:    -1,
 	}
 	if proj := columns.For(kind); proj != nil {
-		for i, c := range proj.Columns() {
+		cols := proj.Columns()
+		p.colTitles = make([]string, len(cols))
+		for i, c := range cols {
+			p.colTitles[i] = c.Title
 			switch c.Title {
 			case "CPU":
 				p.cpuCol = i
@@ -124,6 +128,11 @@ func (p *resourcePage) OnLeave() {
 func (p *resourcePage) SetFilter(f string) {
 	p.filter = f
 	p.reapplyFilter()
+}
+
+// CompleteFilter Tab-completes the filter's last term against the current rows.
+func (p *resourcePage) CompleteFilter(buf string) (string, bool) {
+	return completeFilter(buf, p.allRows, p.colTitles)
 }
 
 func (p *resourcePage) Summary() Summary {
@@ -977,7 +986,7 @@ func (p *resourcePage) apply(snap engine.Remote[columns.Row]) {
 }
 
 func (p *resourcePage) reapplyFilter() {
-	rows := filterRows(p.allRows, p.filter)
+	rows := filterRows(p.allRows, p.filter, p.colTitles)
 	p.overlayMetrics(rows)
 	p.table.SetRows(rows)
 }
@@ -1005,64 +1014,154 @@ func (p *resourcePage) overlayMetrics(rows []columns.Row) {
 	}
 }
 
-// filterRows applies the live filter over the row's name and cell text. A leading
-// "!" inverts the match. By default the term is a case-insensitive substring; a
-// leading "~" switches to a case-insensitive regular expression. An unparseable
-// regex filters nothing (all rows pass) until it becomes valid.
-func filterRows(rows []columns.Row, filter string) []columns.Row {
-	if filter == "" {
+// filterRows applies the live filter, which is a set of whitespace-separated
+// terms combined with AND: a row is kept only when it satisfies every term.
+// Each term is "[!][col:][~]value": "!" inverts (the term must NOT match), "col:"
+// scopes the term to a column (ns/namespace and name always, or any column title
+// case-insensitively; an unknown col: is treated as literal text), and "~" makes
+// the value a case-insensitive regex instead of a substring. Empty and
+// in-progress-invalid-regex terms are ignored so typing stays forgiving.
+// colTitles are the current column headers, used to resolve "col:" scoping.
+func filterRows(rows []columns.Row, filter string, colTitles []string) []columns.Row {
+	terms := parseFilter(filter, colTitles)
+	if len(terms) == 0 {
 		return rows
 	}
-	invert := false
-	term := filter
-	if strings.HasPrefix(term, "!") {
-		invert = true
-		term = term[1:]
-	}
-	if term == "" {
-		return rows
-	}
-	var re *regexp.Regexp
-	if strings.HasPrefix(term, "~") {
-		compiled, err := regexp.Compile("(?i)" + term[1:])
-		if err != nil {
-			return rows
-		}
-		re = compiled
-	}
-	lower := strings.ToLower(term)
 	out := make([]columns.Row, 0, len(rows))
 	for _, r := range rows {
-		if rowMatches(r, lower, re) != invert {
+		if matchesAll(r, terms) {
 			out = append(out, r)
 		}
 	}
 	return out
 }
 
-// rowMatches reports whether a row matches the filter: regex when re != nil,
-// otherwise case-insensitive substring on term.
-func rowMatches(r columns.Row, term string, re *regexp.Regexp) bool {
-	if re != nil {
-		if re.MatchString(r.Name) {
+// colTitlesOf extracts the column headers from a column set, for "col:" filter
+// scoping on pages whose columns come from a server Table rather than a projector.
+func colTitlesOf(cols []columns.Column) []string {
+	titles := make([]string, len(cols))
+	for i, c := range cols {
+		titles[i] = c.Title
+	}
+	return titles
+}
+
+// filterScope selects what part of a row a term matches against.
+type filterScope int
+
+const (
+	scopeAny       filterScope = iota // name + every cell
+	scopeName                         // the object name
+	scopeNamespace                    // the object namespace
+	scopeCell                         // a specific column (cellIdx)
+)
+
+// filterTerm is one AND-combined clause of a filter.
+type filterTerm struct {
+	invert  bool
+	scope   filterScope
+	cellIdx int            // valid when scope == scopeCell
+	re      *regexp.Regexp // regex when non-nil; otherwise a substring
+	needle  string         // lowercased substring when re == nil
+}
+
+// parseFilter splits a filter into AND-combined terms, resolving "col:" scopes
+// against colTitles. Order within a term is [!][col:][~]value.
+func parseFilter(filter string, colTitles []string) []filterTerm {
+	var terms []filterTerm
+	for _, tok := range strings.Fields(filter) {
+		invert := strings.HasPrefix(tok, "!")
+		if invert {
+			tok = tok[1:]
+		}
+		if tok == "" {
+			continue
+		}
+		scope, cellIdx := scopeAny, -1
+		value := tok
+		if col, val, ok := strings.Cut(tok, ":"); ok {
+			if s, idx, matched := resolveScope(col, colTitles); matched {
+				scope, cellIdx, value = s, idx, val
+			}
+		}
+		if value == "" {
+			continue
+		}
+		term := filterTerm{invert: invert, scope: scope, cellIdx: cellIdx}
+		if strings.HasPrefix(value, "~") {
+			re, err := regexp.Compile("(?i)" + value[1:])
+			if err != nil {
+				continue // forgiving: skip a half-typed regex rather than match nothing
+			}
+			term.re = re
+		} else {
+			term.needle = strings.ToLower(value)
+		}
+		terms = append(terms, term)
+	}
+	return terms
+}
+
+// resolveScope maps a "col:" prefix to a scope. ns/namespace and name are always
+// available; any other name must match a column title (case-insensitive). A
+// non-match reports false so the caller keeps the token as literal text.
+func resolveScope(col string, colTitles []string) (filterScope, int, bool) {
+	switch strings.ToLower(col) {
+	case "ns", "namespace":
+		return scopeNamespace, -1, true
+	case "name":
+		return scopeName, -1, true
+	}
+	for i, t := range colTitles {
+		if strings.EqualFold(t, col) {
+			return scopeCell, i, true
+		}
+	}
+	return scopeAny, -1, false
+}
+
+// matchesAll reports whether a row satisfies every term (AND).
+func matchesAll(r columns.Row, terms []filterTerm) bool {
+	for _, term := range terms {
+		if term.found(r) == term.invert {
+			return false
+		}
+	}
+	return true
+}
+
+// found reports whether the term's needle/regex appears in its scope, before
+// inversion is applied.
+func (term filterTerm) found(r columns.Row) bool {
+	switch term.scope {
+	case scopeName:
+		return term.hit(r.Name)
+	case scopeNamespace:
+		return term.hit(r.Namespace)
+	case scopeCell:
+		if term.cellIdx >= 0 && term.cellIdx < len(r.Cells) {
+			return term.hit(r.Cells[term.cellIdx].Text)
+		}
+		return false
+	default: // scopeAny: namespace + name + every cell
+		if term.hit(r.Namespace) || term.hit(r.Name) {
 			return true
 		}
 		for _, c := range r.Cells {
-			if re.MatchString(c.Text) {
+			if term.hit(c.Text) {
 				return true
 			}
 		}
 		return false
 	}
-	if strings.Contains(strings.ToLower(r.Name), term) {
-		return true
+}
+
+// hit matches the term's needle/regex against a single string.
+func (term filterTerm) hit(s string) bool {
+	if term.re != nil {
+		return term.re.MatchString(s)
 	}
-	for _, c := range r.Cells {
-		if strings.Contains(strings.ToLower(c.Text), term) {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(strings.ToLower(s), term.needle)
 }
 
 // statusCounts tallies rows by their health class, for the header count line.
