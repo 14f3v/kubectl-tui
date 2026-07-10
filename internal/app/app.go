@@ -720,7 +720,7 @@ func (m *Model) applyCommand() (tea.Model, tea.Cmd) {
 	if err != nil {
 		return m, toastCmd("apply: "+err.Error(), msg.LevelError)
 	}
-	sess := m.sess
+	sess, theme, ro := m.sess, m.theme, m.cfg.Config.ReadOnly
 	after := func(execErr error) tea.Msg {
 		defer os.Remove(path)
 		if execErr != nil {
@@ -730,8 +730,15 @@ func (m *Model) applyCommand() (tea.Model, tea.Cmd) {
 		if rerr != nil {
 			return msg.Toast{Text: "apply: " + rerr.Error(), Level: msg.LevelError}
 		}
+		// Preview the change with a read-only dry-run before applying: compute the
+		// diff and open the preview page, where `a` confirms the apply. If nothing
+		// would change, skip the page and say so.
 		mapper := apply.NewMapper(sess.Disco)
-		return applyToast(apply.Apply(sess.Context(), sess.Dyn, mapper, data, "kubetui", ns))
+		results := apply.Diff(sess.Context(), sess.Dyn, mapper, data, "kubetui", ns)
+		if !diffHasContent(results) {
+			return msg.Toast{Text: "no changes to apply", Level: msg.LevelInfo}
+		}
+		return view.PushMsg{Page: view.NewDiffApply(sess, theme, ns, data, results, ro)}
 	}
 	return m, func() tea.Msg {
 		return view.ExecRequest{Label: "apply", Process: editor.Process(path), After: after}
@@ -756,27 +763,16 @@ func applyTemplate(ns string) string {
 		"#   key: value\n"
 }
 
-// applyToast summarizes an apply result set into a single toast.
-func applyToast(results []apply.Result) msg.Toast {
-	if len(results) == 0 {
-		return msg.Toast{Text: "nothing to apply", Level: msg.LevelInfo}
-	}
-	var okc, failed int
-	firstErr := ""
+// diffHasContent reports whether a dry-run diff is worth previewing: any document
+// that would change or that failed to diff. All-empty, all-nil-error means the
+// apply is a no-op, so the caller can skip the preview page.
+func diffHasContent(results []apply.DiffResult) bool {
 	for _, r := range results {
-		if r.Err != nil {
-			failed++
-			if firstErr == "" {
-				firstErr = r.Name + ": " + r.Err.Error()
-			}
-			continue
+		if r.Err != nil || strings.TrimSpace(r.Diff) != "" {
+			return true
 		}
-		okc++
 	}
-	if failed == 0 {
-		return msg.Toast{Text: fmt.Sprintf("applied %d object(s)", okc), Level: msg.LevelSuccess}
-	}
-	return msg.Toast{Text: fmt.Sprintf("applied %d, %d failed — %s", okc, failed, firstErr), Level: msg.LevelError}
+	return false
 }
 
 // toastCmd is a small helper for returning a toast as a command.
