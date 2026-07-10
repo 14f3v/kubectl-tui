@@ -164,6 +164,62 @@ func TestNavigateThroughArray(t *testing.T) {
 	}
 }
 
+// TestNavigateThroughAllOf replicates how Kubernetes wraps object-typed fields:
+// `spec: {allOf: [{$ref: PodSpec}], default: {}}` rather than a bare $ref. That is
+// the real-world shape that broke `explain pod.spec.containers` against a live
+// cluster — the allOf node had no "properties", so descent stopped at spec.
+func TestNavigateThroughAllOf(t *testing.T) {
+	const k8sDoc = `{
+  "components": {"schemas": {
+    "Pod": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [{"group": "", "version": "v1", "kind": "Pod"}],
+      "properties": {
+        "spec": {"default": {}, "allOf": [{"$ref": "#/components/schemas/PodSpec"}]}
+      }
+    },
+    "PodSpec": {
+      "type": "object",
+      "properties": {
+        "containers": {
+          "type": "array",
+          "description": "List of containers.",
+          "items": {"$ref": "#/components/schemas/Container"}
+        }
+      }
+    },
+    "Container": {
+      "type": "object",
+      "properties": {"name": {"type": "string"}, "image": {"type": "string"}}
+    }
+  }}
+}`
+	d, err := parseDoc([]byte(k8sDoc))
+	if err != nil {
+		t.Fatalf("parseDoc: %v", err)
+	}
+	root, ok := d.schemaForGVK(schema.GroupVersionKind{Version: "v1", Kind: "Pod"})
+	if !ok {
+		t.Fatal("Pod schema not found")
+	}
+	// spec is allOf-wrapped; navigation must resolve through it to reach Container.
+	node, err := d.navigate(root, []string{"spec", "containers", "name"})
+	if err != nil {
+		t.Fatalf("navigate spec.containers.name: %v", err)
+	}
+	if typeString(node) != "string" {
+		t.Errorf("name type = %q, want string", typeString(node))
+	}
+	// resolveRef must dereference an allOf-wrapped node directly.
+	specNode := map[string]any{
+		"default": map[string]any{},
+		"allOf":   []any{map[string]any{"$ref": "#/components/schemas/PodSpec"}},
+	}
+	if got := d.resolveRef(specNode); got["properties"] == nil {
+		t.Errorf("resolveRef did not resolve allOf-wrapped node: %+v", got)
+	}
+}
+
 // TestNavigateUnknownField confirms an unknown segment is a clear error naming
 // the field.
 func TestNavigateUnknownField(t *testing.T) {
