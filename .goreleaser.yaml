@@ -29,6 +29,12 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# `goreleaser release` (run by .github/workflows/release.yml on a v* tag) creates a
+# GitHub Release for the repo. Tags with a pre-release suffix (e.g. v1.0.0-rc1) are
+# marked as prereleases automatically.
+release:
+  prerelease: auto
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
