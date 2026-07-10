@@ -71,6 +71,51 @@ func TestTableSelectionAndNav(t *testing.T) {
 	}
 }
 
+func TestTableMultiSelect(t *testing.T) {
+	tbl := newTestTable()
+	tbl.SetRows(testRows(3)) // a-pod, b-pod, c-pod
+
+	if tbl.MarkedCount() != 0 || tbl.MarkedRows() != nil {
+		t.Fatalf("fresh table should have no marks")
+	}
+	tbl.ToggleMark() // mark a-pod
+	tbl.MoveDown()   // cursor to b-pod
+	tbl.MoveDown()   // cursor to c-pod
+	tbl.ToggleMark() // mark c-pod
+	if tbl.MarkedCount() != 2 {
+		t.Fatalf("MarkedCount = %d, want 2", tbl.MarkedCount())
+	}
+	got := tbl.MarkedRows()
+	if len(got) != 2 || got[0].Name != "a-pod" || got[1].Name != "c-pod" {
+		t.Fatalf("MarkedRows = %v, want [a-pod c-pod] in display order", got)
+	}
+
+	// Toggling a marked row clears just that one.
+	tbl.ToggleMark() // c-pod is under the cursor -> unmark
+	if tbl.MarkedCount() != 1 {
+		t.Fatalf("after unmark, MarkedCount = %d, want 1", tbl.MarkedCount())
+	}
+
+	// A mark on a since-removed object is pruned by MarkedRows.
+	tbl.Home()
+	tbl.ToggleMark() // re-mark a-pod (count now 1: a-pod)
+	tbl.SetRows(testRows(0))
+	if rows := tbl.MarkedRows(); rows != nil {
+		t.Fatalf("marks should prune when rows vanish, got %v", rows)
+	}
+	if tbl.MarkedCount() != 0 {
+		t.Fatalf("pruned MarkedCount = %d, want 0", tbl.MarkedCount())
+	}
+
+	// ClearMarks drops everything.
+	tbl.SetRows(testRows(3))
+	tbl.ToggleMark()
+	tbl.ClearMarks()
+	if tbl.MarkedCount() != 0 {
+		t.Fatalf("ClearMarks left %d marks", tbl.MarkedCount())
+	}
+}
+
 func TestTableSelectionPreservedAcrossSetRows(t *testing.T) {
 	tbl := newTestTable()
 	tbl.SetRows(testRows(3))

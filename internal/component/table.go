@@ -40,11 +40,16 @@ type Table struct {
 
 	widths []int
 	cache  map[string]string
+
+	// marked is the multi-select set, keyed by row UID so a selection survives
+	// re-sorts and row refreshes (like the cursor). Empty means "no bulk
+	// selection"; actions then target the cursor row alone.
+	marked map[string]bool
 }
 
 // NewTable returns an empty table with the given theme.
 func NewTable(theme style.Theme) *Table {
-	return &Table{theme: theme, cache: map[string]string{}}
+	return &Table{theme: theme, cache: map[string]string{}, marked: map[string]bool{}}
 }
 
 // SetTheme swaps the theme and invalidates the render cache.
@@ -160,6 +165,52 @@ func (t *Table) Selected() (columns.Row, bool) {
 	return t.rows[t.cursor], true
 }
 
+// ToggleMark flips the multi-select mark on the cursor row. No-op on an empty
+// table. Marks are keyed by UID so they follow the object across re-sorts.
+func (t *Table) ToggleMark() {
+	r, ok := t.Selected()
+	if !ok {
+		return
+	}
+	if t.marked == nil {
+		t.marked = map[string]bool{}
+	}
+	if t.marked[r.UID] {
+		delete(t.marked, r.UID)
+	} else {
+		t.marked[r.UID] = true
+	}
+}
+
+// ClearMarks drops the whole multi-select set.
+func (t *Table) ClearMarks() { t.marked = map[string]bool{} }
+
+// MarkedCount is how many rows are marked.
+func (t *Table) MarkedCount() int { return len(t.marked) }
+
+// MarkedRows returns the currently-marked rows in display order. Only rows still
+// present in the table are returned, so a mark on a since-removed object is
+// silently dropped from the result (the map entry is pruned).
+func (t *Table) MarkedRows() []columns.Row {
+	if len(t.marked) == 0 {
+		return nil
+	}
+	out := make([]columns.Row, 0, len(t.marked))
+	present := map[string]bool{}
+	for _, r := range t.rows {
+		if t.marked[r.UID] {
+			out = append(out, r)
+			present[r.UID] = true
+		}
+	}
+	for uid := range t.marked {
+		if !present[uid] {
+			delete(t.marked, uid)
+		}
+	}
+	return out
+}
+
 // MoveUp/MoveDown/PageUp/PageDown/Home/End move the cursor and keep it visible.
 func (t *Table) MoveUp()   { t.cursor--; t.clampCursor(); t.ensureVisible() }
 func (t *Table) MoveDown() { t.cursor++; t.clampCursor(); t.ensureVisible() }
@@ -244,7 +295,8 @@ func (t *Table) Body() string {
 }
 
 func (t *Table) renderRow(row columns.Row, selected bool) string {
-	key := row.UID + "|" + row.Version + "|" + strconv.Itoa(t.width) + "|" + boolStr(selected) + "|" + strconv.Itoa(t.sortCol)
+	marked := t.marked[row.UID]
+	key := row.UID + "|" + row.Version + "|" + strconv.Itoa(t.width) + "|" + boolStr(selected) + "|" + boolStr(marked) + "|" + strconv.Itoa(t.sortCol)
 	if cached, ok := t.cache[key]; ok {
 		return cached
 	}
@@ -260,14 +312,23 @@ func (t *Table) renderRow(row columns.Row, selected bool) string {
 	}
 
 	var b strings.Builder
-	// Marker column: accent ▶ on the selected row.
-	markerStyle := t.theme.Base
-	marker := "  "
+	// Marker column (2 cells): the cursor arrow ("▶") in the first, the
+	// multi-select mark ("✓") in the second — so a marked row under the cursor
+	// reads "▶✓", marked-but-not-cursor reads " ✓", and cursor-only reads "▶ ".
+	arrow, arrowStyle := " ", t.theme.Base
 	if selected {
-		marker = "▶ "
-		markerStyle = t.theme.AccentText.Background(selBg)
+		arrow, arrowStyle = "▶", t.theme.AccentText
 	}
-	b.WriteString(markerStyle.Render(marker))
+	mark, markStyle := " ", t.theme.Base
+	if marked {
+		mark = "✓"
+		markStyle = lipgloss.NewStyle().Foreground(t.theme.Pal.Warn)
+	}
+	if selected {
+		arrowStyle = arrowStyle.Background(selBg)
+		markStyle = markStyle.Background(selBg)
+	}
+	b.WriteString(arrowStyle.Render(arrow) + markStyle.Render(mark))
 
 	for i, c := range t.cols {
 		var s string
