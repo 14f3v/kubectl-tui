@@ -35,18 +35,17 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 
 ## Install
 
-Requires **Go 1.26+**.
-
-### Build from source
+### Homebrew
 
 ```bash
-git clone https://github.com/14f3v/kubectl-tui.git
-cd kubectl-tui
-go build -o kubetui ./cmd/kubetui
-./kubetui
+brew install 14f3v/tap/kubetui
 ```
 
-Optionally put it on your `PATH`:
+The formula lives in [`14f3v/homebrew-tap`](https://github.com/14f3v/homebrew-tap) and is published automatically on each release.
+
+### Download a binary
+
+Grab the archive for your OS/arch from [Releases](https://github.com/14f3v/kubectl-tui/releases), extract it, and put `kubetui` on your `PATH`:
 
 ```bash
 install -m 0755 kubetui /usr/local/bin/kubetui
@@ -58,7 +57,16 @@ install -m 0755 kubetui /usr/local/bin/kubetui
 go install github.com/14f3v/kubectl-tui/cmd/kubetui@latest
 ```
 
-> The repository is private — `go install` needs access (e.g. `GOPRIVATE=github.com/14f3v/*` and a working git credential). Building from source is the simplest path.
+### Build from source
+
+Requires **Go 1.26+**.
+
+```bash
+git clone https://github.com/14f3v/kubectl-tui.git
+cd kubectl-tui
+go build -o kubetui ./cmd/kubetui
+./kubetui
+```
 
 ---
 
