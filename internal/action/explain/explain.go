@@ -255,17 +255,29 @@ func schemaHasGVK(obj map[string]any, gvk schema.GroupVersionKind) bool {
 // returning the referenced schema. A node without a "$ref", or one whose target
 // is absent, is returned unchanged so callers can treat resolution as idempotent.
 func (d doc) resolveRef(node map[string]any) map[string]any {
-	ref, ok := node["$ref"].(string)
-	if !ok {
+	if ref, ok := node["$ref"].(string); ok {
+		const prefix = "#/components/schemas/"
+		name := strings.TrimPrefix(ref, prefix)
+		if name == ref { // not a local components ref we can resolve
+			return node
+		}
+		if target, ok := d.schemas[name].(map[string]any); ok {
+			return target
+		}
 		return node
 	}
-	const prefix = "#/components/schemas/"
-	name := strings.TrimPrefix(ref, prefix)
-	if name == ref { // not a local components ref we can resolve
-		return node
-	}
-	if target, ok := d.schemas[name].(map[string]any); ok {
-		return target
+	// Kubernetes wraps an object-typed field as `allOf: [{$ref: ...}]` (usually with
+	// a sibling default/description), rather than a bare $ref. Resolve the first
+	// $ref inside allOf so navigation can descend into the referenced type's
+	// properties — without this, `explain pod.spec.containers` stops at `spec`.
+	if allOf, ok := node["allOf"].([]any); ok {
+		for _, e := range allOf {
+			if em, ok := e.(map[string]any); ok {
+				if _, hasRef := em["$ref"]; hasRef {
+					return d.resolveRef(em)
+				}
+			}
+		}
 	}
 	return node
 }
