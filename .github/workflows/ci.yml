@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+
+# Cancel superseded PR runs (a new push to the same PR cancels the old run); never
+# cancel a main push, so every merge is still validated.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
