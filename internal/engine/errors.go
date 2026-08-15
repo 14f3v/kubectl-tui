@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"net"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -29,6 +30,19 @@ const (
 	// ClassTransient is a network error or 5xx; retrying may recover.
 	ClassTransient
 )
+
+// allClasses enumerates the taxonomy. ErrClass is a bare int, so callers that
+// must reason about every class — recovery planning, exhaustiveness tests —
+// have no other way to walk it. Keep it in sync when adding a class.
+var allClasses = []ErrClass{
+	ClassNone,
+	ClassAuth,
+	ClassForbidden,
+	ClassTLS,
+	ClassNotFound,
+	ClassConflict,
+	ClassTransient,
+}
 
 // EngineErr is a classified error with the operation that produced it and a
 // human-readable detail.
@@ -81,6 +95,10 @@ func Classify(op string, err error) *EngineErr {
 		return &EngineErr{Class: ClassConflict, Op: op, Detail: detail}
 	case isTLSError(err):
 		return &EngineErr{Class: ClassTLS, Op: op, Detail: detail}
+	case isExecPluginError(err):
+		// An exec credential plugin that cannot mint a token is an auth failure,
+		// not a blip — retrying just runs the same broken command again.
+		return &EngineErr{Class: ClassAuth, Op: op, Detail: detail}
 	case apierrors.IsServerTimeout(err), apierrors.IsTimeout(err), apierrors.IsTooManyRequests(err), apierrors.IsInternalError(err), apierrors.IsServiceUnavailable(err):
 		return &EngineErr{Class: ClassTransient, Op: op, Detail: detail}
 	default:
@@ -91,6 +109,34 @@ func Classify(op string, err error) *EngineErr {
 		}
 		return &EngineErr{Class: ClassTransient, Op: op, Detail: detail}
 	}
+}
+
+// execPluginMarkers are the message fragments client-go emits when an exec
+// credential plugin fails. "getting credentials:" is the single funnel point in
+// the transport's RoundTrip; the "exec: executable " forms cover the paths that
+// surface a plugin failure without going through it.
+var execPluginMarkers = []string{
+	"getting credentials:",
+	"exec: executable ",
+}
+
+// isExecPluginError reports whether the error came from a client-go exec
+// credential plugin — Teleport's tsh, aws eks get-token, gke-gcloud-auth-plugin
+// — failing to produce credentials. This is the most likely auth failure for a
+// tool aimed at brokered clusters: the certificate simply expires mid-session.
+//
+// It matches on message text rather than the error chain because client-go
+// formats these with %v rather than %w (see
+// plugin/pkg/client/auth/exec.(*roundTripper).RoundTrip), which severs the chain
+// — errors.As cannot reach the underlying *exec.ExitError.
+func isExecPluginError(err error) bool {
+	msg := err.Error()
+	for _, marker := range execPluginMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // isTLSError reports whether the error chain contains a certificate or TLS
