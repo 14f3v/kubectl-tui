@@ -2,11 +2,16 @@ package debug
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestEphemeralSpec(t *testing.T) {
@@ -170,8 +175,131 @@ func TestAddEphemeralContainer(t *testing.T) {
 	}
 }
 
-// WaitRunning is not exercised against the fake clientset: the fake never flips
-// an ephemeral container's status to Running (there is no kubelet), so a happy
-// path would only ever hit the timeout. The Running/Terminated decision logic is
-// straightforward status inspection; it is verified against a live cluster
-// rather than the fake. See the verified-vs-deferred note in the task report.
+// podWithContainerState builds a pod whose regular container `container` is in
+// the given state, so the wait helpers can be exercised against the fake
+// clientset by seeding the status the kubelet would otherwise write.
+func podWithContainerState(ns, name, container string, state corev1.ContainerState) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{Name: container, State: state}},
+		},
+	}
+}
+
+func TestNodeDebugPodSetsActiveDeadline(t *testing.T) {
+	p := NodeDebugPod("node-1", "busybox")
+
+	// A privileged host-namespace pod must carry a server-side deadline: the TUI
+	// can be quit or killed while the create is still in flight, and then no
+	// client-side cleanup path runs at all.
+	if p.Spec.ActiveDeadlineSeconds == nil {
+		t.Fatal("ActiveDeadlineSeconds = nil, want a server-side backstop")
+	}
+	if got := *p.Spec.ActiveDeadlineSeconds; got <= 0 || got > 24*60*60 {
+		t.Errorf("ActiveDeadlineSeconds = %d, want positive and under 24h", got)
+	}
+}
+
+func TestWaitPodContainerRunningObservesRegularContainer(t *testing.T) {
+	// The node-debug container is a REGULAR container, so its status lands in
+	// Status.ContainerStatuses — not Status.EphemeralContainerStatuses.
+	cs := fake.NewClientset(podWithContainerState("default", "node-debugger-x", "debugger",
+		corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}))
+
+	if err := WaitPodContainerRunning(context.Background(), cs, "default", "node-debugger-x", "debugger", 2*time.Second); err != nil {
+		t.Fatalf("WaitPodContainerRunning = %v, want nil", err)
+	}
+}
+
+func TestWaitPodContainerRunningTimeoutIsNotTerminal(t *testing.T) {
+	// A slow image pull must report a timeout the caller can distinguish, so it
+	// keeps the pod alive instead of destroying a container that would have come
+	// up a moment later.
+	cs := fake.NewClientset(podWithContainerState("default", "p", "debugger",
+		corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}))
+
+	err := WaitPodContainerRunning(context.Background(), cs, "default", "p", "debugger", 50*time.Millisecond)
+	if !errors.Is(err, ErrWaitTimeout) {
+		t.Fatalf("err = %v, want ErrWaitTimeout", err)
+	}
+}
+
+func TestWaitPodContainerRunningTerminatedIsTerminal(t *testing.T) {
+	cs := fake.NewClientset(podWithContainerState("default", "p", "debugger",
+		corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1}}))
+
+	err := WaitPodContainerRunning(context.Background(), cs, "default", "p", "debugger", 2*time.Second)
+	if err == nil {
+		t.Fatal("err = nil, want a terminal error")
+	}
+	if errors.Is(err, ErrWaitTimeout) {
+		t.Fatalf("err = %v, want a terminal error distinct from ErrWaitTimeout", err)
+	}
+}
+
+// withGeneratedNames teaches the fake clientset to honor GenerateName the way a
+// real API server does. The fake's tracker stores the object verbatim, leaving
+// Name empty, which would make every generated-name assertion meaningless.
+func withGeneratedNames(cs *fake.Clientset) {
+	var n int
+	cs.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		p, ok := action.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		if !ok || p.GenerateName == "" || p.Name != "" {
+			return false, nil, nil
+		}
+		n++
+		p.Name = fmt.Sprintf("%s%d", p.GenerateName, n)
+		return false, nil, nil // fall through so the tracker still stores it
+	})
+}
+
+func TestCreateNodeDebugKeepsPodOnTimeout(t *testing.T) {
+	// The fake never starts containers, so the wait always times out here. A
+	// timeout must NOT delete: the pod may still be pulling and the operator can
+	// still attach to it once it comes up.
+	cs := fake.NewClientset()
+	withGeneratedNames(cs)
+
+	ns, pod, err := createNodeDebug(context.Background(), cs, "node-1", "busybox", 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("err = nil, want a timeout error")
+	}
+	if ns == "" || pod == "" {
+		t.Fatalf("ns/pod = %q/%q, want the real names so the caller can still act on the pod", ns, pod)
+	}
+
+	got, gerr := cs.CoreV1().Pods(ns).Get(context.Background(), pod, metav1.GetOptions{})
+	if gerr != nil || got == nil {
+		t.Fatalf("pod was deleted on a plain timeout (get: %v); a slow pull must survive", gerr)
+	}
+}
+
+func TestCreateNodeDebugDeletesPodOnTerminalFailure(t *testing.T) {
+	cs := fake.NewClientset()
+	withGeneratedNames(cs)
+	// Once created, report the debugger as terminated so the wait fails terminally.
+	cs.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		g := action.(k8stesting.GetAction)
+		return true, podWithContainerState(g.GetNamespace(), g.GetName(), "debugger",
+			corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1}}), nil
+	})
+
+	ns, pod, err := createNodeDebug(context.Background(), cs, "node-1", "busybox", 2*time.Second)
+	if err == nil {
+		t.Fatal("err = nil, want a terminal error")
+	}
+	if ns == "" || pod == "" {
+		t.Fatalf("ns/pod = %q/%q, want the real names even on failure", ns, pod)
+	}
+
+	var deleted bool
+	for _, a := range cs.Actions() {
+		if a.GetVerb() == "delete" && a.GetResource().Resource == "pods" {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Error("no delete issued; a terminally-failed privileged pod must be cleaned up")
+	}
+}
