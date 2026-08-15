@@ -136,6 +136,62 @@ func TestFilterRowsMulti(t *testing.T) {
 	}
 }
 
+func TestFilterAlternation(t *testing.T) {
+	titles := []string{"NAME", "STATUS", "IMAGE"}
+	rows := []columns.Row{
+		nsRow("prod", "checkout-api", "Running", "nginx:1.25"),
+		nsRow("prod", "payments-worker", "Running", "app:2.0"),
+		nsRow("staging", "checkout-api", "Error", "nginx:1.25"),
+		nsRow("kube-system", "coredns", "Running", "coredns:1.11"),
+	}
+	names := func(got []columns.Row) string {
+		var b strings.Builder
+		for _, r := range got {
+			b.WriteString(r.Namespace + "/" + r.Name + " ")
+		}
+		return strings.TrimSpace(b.String())
+	}
+
+	// A term may list alternatives with "|"; the term matches if ANY of them do.
+	if got := filterRows(rows, "ns:prod|staging", titles); len(got) != 3 {
+		t.Errorf("ns:prod|staging: got %q, want 3", names(got))
+	}
+	// Inversion applies to the whole term, so "!" means NOT(prod OR staging).
+	if got := filterRows(rows, "!ns:prod|staging", titles); len(got) != 1 || got[0].Namespace != "kube-system" {
+		t.Errorf("!ns:prod|staging: got %q, want kube-system/coredns", names(got))
+	}
+	// Terms are still AND-ed, so two separate ns: terms remain unsatisfiable —
+	// this is the behavior alternation exists to give users an alternative to.
+	if got := filterRows(rows, "ns:prod ns:staging", titles); len(got) != 0 {
+		t.Errorf("ns:prod ns:staging: got %q, want 0 (terms AND)", names(got))
+	}
+	// An empty alternative must be dropped, not treated as the empty substring
+	// (which matches everything). Otherwise the table resets while typing.
+	if got := filterRows(rows, "ns:prod|", titles); len(got) != 2 {
+		t.Errorf("ns:prod|: got %q, want 2", names(got))
+	}
+	if got := filterRows(rows, "ns:|", titles); len(got) != 4 {
+		t.Errorf("ns:| (no alternatives left): got %q, want all 4", names(got))
+	}
+	// A "~" value is a regex and must NOT be split: splitting "^(prod|staging)"
+	// would yield two uncompilable fragments, both dropped, matching everything.
+	if got := filterRows(rows, "ns:~^(prod|staging)$", titles); len(got) != 3 {
+		t.Errorf("ns:~^(prod|staging)$: got %q, want 3", names(got))
+	}
+	// "~" is only special at the start of a value, so "a|~b" is two literals.
+	if got := filterRows(rows, "ns:prod|~zzz", titles); len(got) != 2 {
+		t.Errorf("ns:prod|~zzz: got %q, want 2 (literal ~zzz matches nothing)", names(got))
+	}
+	// Comma is ordinary text: nine projectors join cell values with it.
+	if got := filterRows(rows, "image:nginx:1.25,app", titles); len(got) != 0 {
+		t.Errorf("comma stays literal: got %q, want 0", names(got))
+	}
+	// Alternation composes with unscoped terms and with AND across terms.
+	if got := filterRows(rows, "checkout ns:prod|staging", titles); len(got) != 2 {
+		t.Errorf("checkout ns:prod|staging: got %q, want 2", names(got))
+	}
+}
+
 func TestFilterMatches(t *testing.T) {
 	titles := []string{"NAME", "STATUS", "IMAGE"}
 	rows := []columns.Row{
@@ -171,6 +227,13 @@ func TestFilterMatches(t *testing.T) {
 		{"~al", "", "", nil},                                    // regex not suggested
 		{"", "", "", nil},                                       // empty
 		{"prod ", "", "", nil},                                  // trailing space => empty term
+		// Completion follows the last alternative, so the dropdown keeps working
+		// while the user types the second value of a "a|b" term.
+		{"ns:prod|ku", "ns:prod|", "ku", []string{"kube"}},
+		{"ns:prod|", "ns:prod|", "", []string{"prod", "kube"}},
+		{"al|alp", "al|", "alp", []string{"alpha", "alpine"}},
+		// A regex value is still not completable, even after a pipe.
+		{"ns:~prod|ku", "", "", nil},
 	}
 	for _, c := range cases {
 		prefix, value, matches := filterMatches(c.in, rows, titles)

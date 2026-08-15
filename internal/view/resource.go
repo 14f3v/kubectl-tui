@@ -1101,9 +1101,11 @@ func (p *resourcePage) overlayMetrics(rows []columns.Row) {
 // Each term is "[!][col:][~]value": "!" inverts (the term must NOT match), "col:"
 // scopes the term to a column (ns/namespace and name always, or any column title
 // case-insensitively; an unknown col: is treated as literal text), and "~" makes
-// the value a case-insensitive regex instead of a substring. Empty and
-// in-progress-invalid-regex terms are ignored so typing stays forgiving.
-// colTitles are the current column headers, used to resolve "col:" scoping.
+// the value a case-insensitive regex instead of a substring. A substring value
+// may list alternatives with "|" ("ns:prod|staging"), which the term ORs — the
+// AND is between terms, so alternation is the way to match several values of one
+// column. Empty and in-progress-invalid-regex terms are ignored so typing stays
+// forgiving. colTitles are the current column headers, used to resolve "col:".
 func filterRows(rows []columns.Row, filter string, colTitles []string) []columns.Row {
 	terms := parseFilter(filter, colTitles)
 	if len(terms) == 0 {
@@ -1143,12 +1145,14 @@ type filterTerm struct {
 	invert  bool
 	scope   filterScope
 	cellIdx int            // valid when scope == scopeCell
-	re      *regexp.Regexp // regex when non-nil; otherwise a substring
-	needle  string         // lowercased substring when re == nil
+	re      *regexp.Regexp // regex when non-nil; otherwise substring alternatives
+	needles []string       // lowercased substrings, OR-ed, when re == nil
 }
 
 // parseFilter splits a filter into AND-combined terms, resolving "col:" scopes
-// against colTitles. Order within a term is [!][col:][~]value.
+// against colTitles. Order within a term is [!][col:][~]value, where a non-regex
+// value may be "a|b|c". Note "~" is only honored at the start of the value, so
+// "a|~b" is two literal alternatives, the second being the text "~b".
 func parseFilter(filter string, colTitles []string) []filterTerm {
 	var terms []filterTerm
 	for _, tok := range strings.Fields(filter) {
@@ -1177,7 +1181,10 @@ func parseFilter(filter string, colTitles []string) []filterTerm {
 			}
 			term.re = re
 		} else {
-			term.needle = strings.ToLower(value)
+			term.needles = splitAlternatives(value)
+			if len(term.needles) == 0 {
+				continue // every alternative was empty, e.g. a lone "|"
+			}
 		}
 		terms = append(terms, term)
 	}
@@ -1212,8 +1219,8 @@ func matchesAll(r columns.Row, terms []filterTerm) bool {
 	return true
 }
 
-// found reports whether the term's needle/regex appears in its scope, before
-// inversion is applied.
+// found reports whether the term's regex, or any of its substring alternatives,
+// appears in its scope, before inversion is applied.
 func (term filterTerm) found(r columns.Row) bool {
 	switch term.scope {
 	case scopeName:
@@ -1238,12 +1245,38 @@ func (term filterTerm) found(r columns.Row) bool {
 	}
 }
 
-// hit matches the term's needle/regex against a single string.
+// splitAlternatives splits a term's value on "|" into lowercased substring
+// alternatives, dropping empty ones. Dropping them is load-bearing, not tidiness:
+// strings.Contains(s, "") is true, so a trailing "|" — which exists for a keystroke
+// every time someone types "prod|staging" — would otherwise make the term match
+// every row and the table would visibly reset under the user.
+func splitAlternatives(value string) []string {
+	if !strings.Contains(value, "|") {
+		return []string{strings.ToLower(value)}
+	}
+	parts := strings.Split(value, "|")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, strings.ToLower(p))
+		}
+	}
+	return out
+}
+
+// hit matches the term's regex, or any one of its substring alternatives,
+// against a single string.
 func (term filterTerm) hit(s string) bool {
 	if term.re != nil {
 		return term.re.MatchString(s)
 	}
-	return strings.Contains(strings.ToLower(s), term.needle)
+	lower := strings.ToLower(s)
+	for _, n := range term.needles {
+		if strings.Contains(lower, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // statusCounts tallies rows by their health class, for the header count line.
