@@ -133,9 +133,31 @@ func (p *nodeOpsPage) debug() tea.Cmd {
 	act := func() tea.Msg {
 		ns, pod, err := debug.CreateNodeDebug(sess.Context(), sess.CS, node, "busybox")
 		if err != nil {
-			return msg.Toast{Text: "node debug: " + err.Error(), Level: msg.LevelError}
+			// A terminal failure is already cleaned up by CreateNodeDebug; a timeout
+			// deliberately leaves the pod alive because it may still be pulling. Name
+			// it either way so the operator is never left guessing what is on the node.
+			text := "node debug: " + err.Error()
+			if pod != "" {
+				text += " (pod " + ns + "/" + pod + ")"
+			}
+			return msg.Toast{Text: text, Level: msg.LevelError}
 		}
-		return ExecRequest{Label: "node-debug", Command: execshell.New(sess.RestCfg, sess.CS, ns, pod, "debugger", nil)}
+		return ExecRequest{
+			Label:   "node-debug",
+			Command: execshell.New(sess.RestCfg, sess.CS, ns, pod, "debugger", nil),
+			// The pod is privileged and holds the host root, so it must not outlive
+			// the shell. After runs once the terminal is restored, on both the clean
+			// and the failed exit.
+			After: func(execErr error) tea.Msg {
+				if derr := debug.DeletePod(sess.Context(), sess.CS, ns, pod); derr != nil {
+					return msg.Toast{Text: "node debug: " + derr.Error(), Level: msg.LevelError}
+				}
+				if execErr != nil {
+					return msg.Toast{Text: "node debug: " + execErr.Error(), Level: msg.LevelWarn}
+				}
+				return msg.Toast{Text: "removed debug pod " + ns + "/" + pod, Level: msg.LevelSuccess}
+			},
+		}
 	}
 	return func() tea.Msg {
 		return ConfirmRequest{
