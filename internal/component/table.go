@@ -52,17 +52,31 @@ func NewTable(theme style.Theme) *Table {
 	return &Table{theme: theme, cache: map[string]string{}, marked: map[string]bool{}}
 }
 
+// resetCache drops every rendered row.
+//
+// The cache is keyed by object identity, which is only a valid proxy for
+// rendered content within a single row set: cell text also derives from the
+// projection time (the AGE column re-humanizes on every heartbeat flush) and
+// from the metrics overlay, both of which rewrite text while resourceVersion
+// holds still. Dropping the cache whenever the rows are replaced keeps identity
+// keying honest — and is also what bounds the map, which otherwise accumulates
+// an entry per churned object for the life of the page.
+func (t *Table) resetCache() { t.cache = map[string]string{} }
+
 // SetTheme swaps the theme and invalidates the render cache.
 func (t *Table) SetTheme(theme style.Theme) {
 	t.theme = theme
-	t.cache = map[string]string{}
+	// Density feeds CellPad, which feeds the width solver, so the resolved widths
+	// are stale too — not just the rendered lines.
+	t.widths = nil
+	t.resetCache()
 }
 
 // SetColumns sets the column layout and invalidates cached widths.
 func (t *Table) SetColumns(cols []columns.Column) {
 	t.cols = cols
 	t.widths = nil
-	t.cache = map[string]string{}
+	t.resetCache()
 	if t.sortCol >= len(cols) {
 		t.sortCol = 0
 	}
@@ -77,6 +91,9 @@ func (t *Table) SetRows(rows []columns.Row) {
 	}
 	t.rows = rows
 	t.applySort()
+	// A new row set may carry new text under the same identities, so the rendered
+	// lines cached for the old set are not reusable.
+	t.resetCache()
 	// Restore selection by identity.
 	t.cursor = 0
 	if selUID != "" {
@@ -95,7 +112,7 @@ func (t *Table) SetRows(rows []columns.Row) {
 func (t *Table) SetSize(width, bodyHeight int) {
 	if width != t.width {
 		t.widths = nil
-		t.cache = map[string]string{}
+		t.resetCache()
 	}
 	t.width = width
 	t.height = bodyHeight
@@ -118,7 +135,7 @@ func (t *Table) SetSortState(col int, desc bool) {
 	t.sortCol = col
 	t.sortDesc = desc
 	t.applySort()
-	t.cache = map[string]string{}
+	t.resetCache()
 }
 
 // SetSort selects a sort column; selecting the current column again toggles
@@ -134,7 +151,7 @@ func (t *Table) SetSort(col int) {
 		t.sortDesc = false
 	}
 	t.applySort()
-	t.cache = map[string]string{}
+	t.resetCache()
 }
 
 func (t *Table) applySort() {
@@ -296,9 +313,16 @@ func (t *Table) Body() string {
 
 func (t *Table) renderRow(row columns.Row, selected bool) string {
 	marked := t.marked[row.UID]
+	// A row with no UID cannot be cached by identity: every such row would share
+	// one key, and the first one's rendered line would be handed back for all of
+	// them. Server-side Table rows (the CRD browser) can arrive without a UID, so
+	// this is a real case, not a defensive hypothetical.
+	cacheable := row.UID != ""
 	key := row.UID + "|" + row.Version + "|" + strconv.Itoa(t.width) + "|" + boolStr(selected) + "|" + boolStr(marked) + "|" + strconv.Itoa(t.sortCol)
-	if cached, ok := t.cache[key]; ok {
-		return cached
+	if cacheable {
+		if cached, ok := t.cache[key]; ok {
+			return cached
+		}
 	}
 
 	pad := t.theme.Density.CellPad()
@@ -347,7 +371,9 @@ func (t *Table) renderRow(row columns.Row, selected bool) string {
 		}
 	}
 	out := b.String()
-	t.cache[key] = out
+	if cacheable {
+		t.cache[key] = out
+	}
 	return out
 }
 
