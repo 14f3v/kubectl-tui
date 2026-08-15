@@ -409,7 +409,66 @@ var (
 	keyFilter  = key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter"))
 	keyHelp    = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help"))
 	keyEsc     = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back"))
+	// keyRetry rebuilds a view that stopped on a terminal error. Both cases are
+	// accepted because the banner has always told the user to press "r" and the
+	// panic screen uses "r" too; "R" is kept for muscle memory from the uppercase
+	// action keys. There is no collision with the page's rollout binding: this only
+	// fires while a banner is up, and then the page is not rendered at all.
+	keyRetry = key.NewBinding(key.WithKeys("r", "R"), key.WithHelp("r", "retry"))
 )
+
+// bannerUp reports whether the active page is showing a terminal-error banner
+// instead of its content. Stale is deliberately excluded: a stale view still
+// renders its last-good rows and stays fully interactive.
+func (m *Model) bannerUp() bool {
+	p := m.active()
+	if p == nil {
+		return false
+	}
+	s := p.Summary()
+	return s.Phase == engine.PhaseTerminal && s.Error != nil
+}
+
+// retryActive rebuilds the failed view. For an auth failure the whole Session is
+// re-bootstrapped, because credentials are session-wide — every other kind is
+// just as dead, and the exec plugin (tsh and friends) needs to be re-run to mint
+// a fresh token. Anything else is scoped to the one kind that failed, so an
+// RBAC-forbidden resource does not tear down the working views around it.
+func (m *Model) retryActive() (tea.Model, tea.Cmd) {
+	p := m.active()
+	if p == nil || m.sess == nil {
+		return m, nil
+	}
+	if s := p.Summary(); s.Error != nil && s.Error.Class == engine.ClassAuth {
+		return m.reconnect()
+	}
+	if kind := p.Kind(); kind != "" {
+		m.sess.Engine.StopKind(kind)
+	}
+	return m, tea.Batch(p.OnEnter(), toastCmd("retrying "+p.Title(), msg.LevelInfo))
+}
+
+// reconnect disposes the Session and builds a fresh one for the same context,
+// which re-runs the exec credential plugin. The context name comes from the
+// configured override rather than Identity.Context: the latter is derived from
+// the merged kubeconfig and can name a different context than the one actually in
+// use, which would silently move the user to another cluster.
+func (m *Model) reconnect() (tea.Model, tea.Cmd) {
+	if m.sess == nil {
+		return m, nil
+	}
+	// Reconnecting tears down every port-forward with it, so say so first.
+	if n := m.sess.Forwards.Count(); n > 0 {
+		return m, func() tea.Msg {
+			return view.ConfirmRequest{
+				Title:  "reconnect",
+				Prompt: fmt.Sprintf("re-authenticate and rebuild the session? this closes %d active port-forward(s)", n),
+				Action: func() tea.Msg { return view.SwitchContextRequest{Name: m.cfg.ContextOverride} },
+			}
+		}
+	}
+	return m.switchContext(m.cfg.ContextOverride)
+}
 
 func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Panic screen and fatal error: only quit keys respond.
@@ -471,6 +530,12 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case isDigitKey(k):
 		return m.jumpNamespace(k.String())
+	case m.bannerUp() && key.Matches(k, keyRetry):
+		return m.retryActive()
+	case m.bannerUp():
+		// The page is not rendered behind a terminal banner, so forwarding keys to
+		// it would act on rows the user cannot see — including the destructive ones.
+		return m, nil
 	default:
 		return m, m.routeToPage(k)
 	}
