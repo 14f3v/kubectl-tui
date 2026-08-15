@@ -34,7 +34,7 @@ A full-screen **terminal UI for managing and monitoring Kubernetes clusters** �
 
 ### Under the hood
 
-- **Resilient reads** — the rendered table is never cleared on a network blip; it's marked *stale* and keeps rendering while the watch reconnects. Terminal errors (`401`/`403`/TLS) stop retrying and surface an actionable banner.
+- **Resilient reads** — the rendered table is never cleared on a network blip; it's marked *stale* and keeps rendering while the watch reconnects. Terminal errors (`401`/`403`/TLS, including a failed exec credential plugin) stop retrying and surface an actionable banner — press `r` on it to rebuild the view, or to re-run your credential plugin and rebuild the session after re-authenticating.
 - **Independently restartable views** — one informer per kind, so an RBAC `403` on one resource degrades only that view.
 - **Fire-and-observe writes** — a mutation never edits the local cache; the resulting watch event does. A failed write shows a toast and leaves the read state untouched.
 
