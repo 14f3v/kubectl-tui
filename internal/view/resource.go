@@ -1068,14 +1068,22 @@ func filterPodRows(rows []columns.Row, selector labels.Selector, lookup func(ns,
 }
 
 func (p *resourcePage) reapplyFilter() {
-	rows := filterRows(p.allRows, p.filter, p.colTitles)
-	p.overlayMetrics(rows)
-	p.table.SetRows(rows)
+	// Overlay BEFORE filtering. A "cpu:" or "mem:" term has to match what the user
+	// can see, and the filter reads cell text — so the join must already have
+	// happened. Overlaying afterwards also meant the term compared against the
+	// projector's "—" placeholder, which no visible row ever shows.
+	p.overlayMetrics(p.allRows)
+	p.table.SetRows(filterRows(p.allRows, p.filter, p.colTitles))
 }
 
-// overlayMetrics rewrites the CPU/MEM cells from the latest metrics snapshot.
-// It clones each modified row's cells so the shared projector output (allRows) is
-// not mutated. A no-op unless the kind has CPU/MEM columns and metrics are live.
+// overlayMetrics rewrites the CPU/MEM cells — and their sort keys — from the
+// latest metrics snapshot. It clones each modified row's cells and keys rather
+// than writing into the projector's slices, which are shared with the engine's
+// cache. A no-op unless the kind has CPU/MEM columns and metrics are live.
+//
+// Filling SortKeys is not optional: the projector emits a constant NumKey(0) for
+// both columns (it has no metrics client), so without this, sorting by CPU or MEM
+// compares zero against zero and silently does nothing.
 func (p *resourcePage) overlayMetrics(rows []columns.Row) {
 	if p.metrics == nil || (p.cpuCol < 0 && p.memCol < 0) {
 		return
@@ -1086,13 +1094,20 @@ func (p *resourcePage) overlayMetrics(rows []columns.Row) {
 			continue
 		}
 		cells := append([]columns.Cell(nil), rows[i].Cells...)
+		keys := append([]columns.SortKey(nil), rows[i].SortKeys...)
 		if p.cpuCol >= 0 && p.cpuCol < len(cells) {
 			cells[p.cpuCol] = columns.Cell{Text: metrics.FormatCPU(u.CPUMillis), Status: columns.StatusNeutral}
+			if p.cpuCol < len(keys) {
+				keys[p.cpuCol] = columns.NumKey(float64(u.CPUMillis))
+			}
 		}
 		if p.memCol >= 0 && p.memCol < len(cells) {
 			cells[p.memCol] = columns.Cell{Text: metrics.FormatMem(u.MemBytes), Status: columns.StatusNeutral}
+			if p.memCol < len(keys) {
+				keys[p.memCol] = columns.NumKey(float64(u.MemBytes))
+			}
 		}
-		rows[i].Cells = cells
+		rows[i].Cells, rows[i].SortKeys = cells, keys
 	}
 }
 
