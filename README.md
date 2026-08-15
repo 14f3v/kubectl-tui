@@ -158,9 +158,19 @@ Each term is `[!][col:][~]value`:
 | `web` | case-insensitive **substring** (matches namespace, name, or any cell) |
 | `web prod` | multiple terms → **AND** (contains `web` *and* `prod`) |
 | `ns:kube-system` | **column-scoped** — `ns:`/`name:` always, or any column title (`status:`, `image:`, …) |
+| `ns:prod\|staging` | `\|` → **alternatives within one term** (`prod` *or* `staging`) |
 | `~^web-\d+$` | leading `~` → case-insensitive **regex** |
 | `!running` | leading `!` → **invert** (must NOT match) |
 | `status:running ns:prod !error` | mix scopes, regex, and negation |
+
+Terms are AND-ed, so `ns:prod ns:staging` asks for one namespace containing *both*
+names and matches nothing. To match several values of the same column, use
+alternation inside a single term: `ns:prod|staging`. Inversion applies to the
+whole term, so `!ns:prod|staging` means "neither". Alternation is plain text —
+for anchored or pattern matching, the regex form still works
+(`ns:~^(prod|staging)$`), and a `~` value is never split. Note `~` is only
+recognized at the start of a value, so `a|~b` is two literal alternatives (the
+second being the literal text `~b`).
 
 An unknown `col:` is treated as literal text (so `nginx:1.25` matches that image tag). `esc` clears the filter.
 
