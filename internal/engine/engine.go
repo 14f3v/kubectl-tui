@@ -26,9 +26,14 @@ type Engine struct {
 	warm      map[string]bool
 	stores    map[string]*ViewStore
 	ns        map[string]string
-
-	viewSeq atomic.Uint64
 }
+
+// viewSeq is process-global rather than per-Engine on purpose. A Session switch
+// builds a fresh Engine, and onWatchError flushes a snapshot after stopping its
+// store — so a snapshot from the disposed Session can still be in the Bubble Tea
+// queue when the new one starts issuing ids. A per-Engine counter restarts at 0
+// and those ids collide, letting a dead view's rows land in a live page.
+var viewSeq atomic.Uint64
 
 // NewEngine creates an engine bound to a Session context and a snapshot sink.
 func NewEngine(ctx context.Context, sink Sink) *Engine {
@@ -53,7 +58,7 @@ func (e *Engine) Register(kind string, warm bool, f FactoryFn) {
 
 // NextViewID returns a fresh monotonic view id. A page takes one on entry and
 // stamps it on its store so late snapshots from a previous entry are dropped.
-func (e *Engine) NextViewID() uint64 { return e.viewSeq.Add(1) }
+func (e *Engine) NextViewID() uint64 { return viewSeq.Add(1) }
 
 // Sink returns the message sink (tea.Program.Send in production). Action
 // subsystems that deliver their own messages (logs, port-forward) use it.
@@ -72,7 +77,13 @@ func (e *Engine) Ensure(kind, namespace string) (*ViewStore, error) {
 	}
 
 	if vs, ok := e.stores[kind]; ok {
-		if e.ns[kind] == namespace {
+		// A terminal store is stopped for good — Stop is sync.Once-guarded and
+		// started is a one-way CAS, so it can never run again. Handing it back would
+		// leave the view dead for the rest of the session, which is exactly what
+		// happens to a warm kind after a 401/403/TLS error today (StopKind's only
+		// caller early-returns for warm kinds). Re-entering the view rebuilds it, so
+		// re-authenticating and coming back actually works.
+		if e.ns[kind] == namespace && vs.Phase() != PhaseTerminal {
 			return vs, nil
 		}
 		vs.Stop()
