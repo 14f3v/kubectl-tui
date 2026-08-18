@@ -136,7 +136,12 @@ func (p *whoamiPage) Update(m tea.Msg) (Page, tea.Cmd) {
 
 func (p *whoamiPage) View(width, height int) string {
 	t := p.theme
-	id := p.sess.Identity
+	// Same as pfPage: the only Session read during render, guarded so the page is
+	// testable and cannot take the frame down if it is ever reached while booting.
+	var id k8s.Identity
+	if p.sess != nil {
+		id = p.sess.Identity
+	}
 	var b strings.Builder
 
 	row := func(k, v string) {

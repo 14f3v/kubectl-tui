@@ -665,11 +665,16 @@ func kv(label, value string, labelW int, labelStyle, valueStyle lipgloss.Style) 
 	return labelStyle.Render(padRight(label, labelW)) + valueStyle.Render(value)
 }
 
+// padRight pads s to w display columns. It measures with lipgloss rather than
+// len() because byte length is not display width: a name with any non-ASCII rune
+// would be padded short, and this sits in the same layouts as fitLine, which is
+// x/ansi-based. docs/ARCHITECTURE.md states the rule — width math never uses len().
 func padRight(s string, w int) string {
-	if len(s) >= w {
+	pad := w - lipgloss.Width(s)
+	if pad <= 0 {
 		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", pad)
 }
 
 func orDash(s string) string {

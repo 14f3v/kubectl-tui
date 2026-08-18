@@ -966,7 +966,25 @@ func currentReplicas(obj any) string {
 }
 
 // singularKind maps a plural kind key to a short singular label for titles.
-func singularKind(kind string) string { return strings.TrimSuffix(kind, "s") }
+// singularKind turns a plural resource name into its singular for display, e.g.
+// the "deployment/web · logs" title. Trimming a trailing "s" is wrong for the
+// irregular plurals in the built-in kind set — it produced "ingresse/web" and
+// "networkpolicie/web" — so the two patterns Kubernetes actually uses are handled:
+// "...ies" from a "y" singular, and "...sses"/"...xes"/"...ches"/"...shes" from a
+// singular already ending in a sibilant.
+func singularKind(kind string) string {
+	switch {
+	case strings.HasSuffix(kind, "ies"):
+		return strings.TrimSuffix(kind, "ies") + "y"
+	case strings.HasSuffix(kind, "sses"),
+		strings.HasSuffix(kind, "xes"),
+		strings.HasSuffix(kind, "ches"),
+		strings.HasSuffix(kind, "shes"):
+		return strings.TrimSuffix(kind, "es")
+	default:
+		return strings.TrimSuffix(kind, "s")
+	}
+}
 
 // yamlAction reads the selected object from the informer cache and pushes a YAML
 // text page. It runs synchronously (the object is already cached).
