@@ -1018,7 +1018,26 @@ func (p *resourcePage) View(width, height int) string {
 		height = 2
 	}
 	p.table.SetSize(width, height-1) // one line for the column header
-	return p.table.Header() + "\n" + p.table.Body()
+	body := p.table.Body()
+	if p.filter != "" && p.table.RowCount() == 0 {
+		body = p.emptyFilterBody(width, height-1)
+	}
+	return p.table.Header() + "\n" + body
+}
+
+// emptyFilterBody replaces the blank table with an explanation. An empty result
+// is ambiguous on its own — "nothing matched" and "this query can never match"
+// look identical — so when the filter is unsatisfiable by construction we say so
+// and offer the alternation that does what the user meant.
+func (p *resourcePage) emptyFilterBody(width, height int) string {
+	lines := []string{"", "  " + p.theme.Faint.Render("no rows match "+p.filter)}
+	if hint := unsatisfiableHint(p.filter, p.colTitles); hint != "" {
+		lines = append(lines, "", "  "+p.theme.AccentText.Render(hint))
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:height], "\n")
 }
 
 // apply stores a new snapshot and refreshes the filtered view. When the page is
@@ -1243,6 +1262,58 @@ func (term filterTerm) found(r columns.Row) bool {
 		}
 		return false
 	}
+}
+
+// unsatisfiableHint explains an empty filter result that no amount of retyping
+// will fix. Two scoped terms on the same column are AND-ed against one string, so
+// "ns:demo ns:kube-system" asks for a namespace containing both names — the query
+// is empty by construction, not because nothing matched.
+//
+// It reads the raw filter rather than parsed terms so the suggestion keeps the
+// user's original casing. Callers must gate it on an actually-empty result:
+// same-column terms are legitimate when the values overlap in one value
+// ("ns:kube ns:system" does match kube-system), and there the hint would be wrong.
+func unsatisfiableHint(filter string, colTitles []string) string {
+	type group struct {
+		col    string
+		values []string
+	}
+	var groups []group
+	index := map[string]int{}
+
+	for _, tok := range strings.Fields(filter) {
+		// Negated terms AND on purpose: "!ns:a !ns:b" means neither, and joining
+		// them would turn it into "not both".
+		if strings.HasPrefix(tok, "!") {
+			continue
+		}
+		col, val, ok := strings.Cut(tok, ":")
+		if !ok {
+			continue // unscoped: each term may match a different cell, so AND is meaningful
+		}
+		scope, cellIdx, matched := resolveScope(col, colTitles)
+		if !matched {
+			continue // an unknown "col:" is literal text, not a scope
+		}
+		if val == "" || strings.HasPrefix(val, "~") {
+			continue // a regex is not a plain value we can join with "|"
+		}
+		key := fmt.Sprintf("%d/%d", scope, cellIdx)
+		if i, seen := index[key]; seen {
+			groups[i].values = append(groups[i].values, val)
+			continue
+		}
+		index[key] = len(groups)
+		groups = append(groups, group{col: col, values: []string{val}})
+	}
+
+	for _, g := range groups {
+		if len(g.values) >= 2 {
+			return fmt.Sprintf("%s: has %d AND-ed terms — try %s:%s",
+				g.col, len(g.values), g.col, strings.Join(g.values, "|"))
+		}
+	}
+	return ""
 }
 
 // splitAlternatives splits a term's value on "|" into lowercased substring

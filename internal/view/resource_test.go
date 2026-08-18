@@ -324,3 +324,73 @@ func TestStatusCounts(t *testing.T) {
 		t.Fatalf("counts = %d/%d/%d/%d, want 4/2/1/1", total, ok, warn, errc)
 	}
 }
+
+func TestUnsatisfiableHint(t *testing.T) {
+	titles := []string{"NAME", "STATUS", "IMAGE"}
+	cases := []struct {
+		filter string
+		want   string // "" means no hint
+	}{
+		// The reported case: two ns: terms can never both match one namespace.
+		{"ns:demo ns:kube-system", "ns: has 2 AND-ed terms — try ns:demo|kube-system"},
+		{"name:web name:api", "name: has 2 AND-ed terms — try name:web|api"},
+		{"status:Running status:Error", "status: has 2 AND-ed terms — try status:Running|Error"},
+		// Already using alternation: fold the extra term into it.
+		{"ns:a|b ns:c", "ns: has 2 AND-ed terms — try ns:a|b|c"},
+		// Three terms.
+		{"ns:a ns:b ns:c", "ns: has 3 AND-ed terms — try ns:a|b|c"},
+		// A single scoped term is fine.
+		{"ns:demo", ""},
+		// Different columns AND legitimately.
+		{"ns:demo status:Running", ""},
+		// Unscoped terms can each match a different cell, so AND is meaningful.
+		{"web running", ""},
+		// Negated terms legitimately AND: "!ns:a !ns:b" means neither.
+		{"!ns:a !ns:b", ""},
+		// A regex value is not a plain value to join with "|".
+		{"ns:~a ns:~b", ""},
+		// An unknown col: is literal text, not a scope.
+		{"nginx:1.25 nginx:1.26", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := unsatisfiableHint(c.filter, titles); got != c.want {
+			t.Errorf("unsatisfiableHint(%q) = %q, want %q", c.filter, got, c.want)
+		}
+	}
+}
+
+func TestViewExplainsEmptyFilter(t *testing.T) {
+	p := newBarePage("pods")
+	p.apply(engine.Remote[columns.Row]{Phase: engine.PhaseReady, Rows: []columns.Row{
+		nsRow("demo", "web", "Running", "nginx"),
+		nsRow("kube-system", "coredns", "Running", "coredns"),
+	}})
+
+	// A filter that can never match must say why, not just show an empty table.
+	p.SetFilter("ns:demo ns:kube-system")
+	out := p.View(120, 10)
+	if !strings.Contains(out, "AND-ed terms") || !strings.Contains(out, "ns:demo|kube-system") {
+		t.Errorf("empty unsatisfiable filter gave no explanation:\n%s", out)
+	}
+
+	// An ordinary empty result says so, but must not invent an alternation hint.
+	p.SetFilter("ns:nowhere")
+	out = p.View(120, 10)
+	if strings.Contains(out, "AND-ed terms") {
+		t.Errorf("ordinary empty result should not claim AND-ed terms:\n%s", out)
+	}
+	if !strings.Contains(out, "no rows match") {
+		t.Errorf("empty result gave no feedback at all:\n%s", out)
+	}
+
+	// A filter that matches must render the table, not a message.
+	p.SetFilter("ns:demo")
+	out = p.View(120, 10)
+	if strings.Contains(out, "no rows match") {
+		t.Errorf("matching filter rendered the empty-state message:\n%s", out)
+	}
+	if !strings.Contains(out, "web") {
+		t.Errorf("matching filter did not render its row:\n%s", out)
+	}
+}
