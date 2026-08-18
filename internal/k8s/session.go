@@ -167,7 +167,19 @@ func contextNames(cc clientcmd.ClientConfig) []string {
 }
 
 // Context returns the Session's context; it is cancelled on Dispose.
-func (s *Session) Context() context.Context { return s.ctx }
+//
+// A Session built by NewSession always has one. A zero-value Session does not,
+// and returning nil there is a landmine: callers pass this straight into
+// context.WithTimeout, which panics on a nil parent. Background is the honest
+// answer for a Session that was never given a lifetime — and it is what makes a
+// Session assembled from fake clients usable in tests, which is otherwise
+// impossible without exporting a test-only constructor.
+func (s *Session) Context() context.Context {
+	if s.ctx == nil {
+		return context.Background()
+	}
+	return s.ctx
+}
 
 // Dispose cancels the context and stops every engine store and port-forward.
 // After Dispose the Session must not be reused.
