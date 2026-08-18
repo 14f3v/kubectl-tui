@@ -69,6 +69,10 @@ func (p *tenantsPage) Summary() Summary {
 	return Summary{Total: total, OK: ok, Warn: warn, Err: errc}
 }
 
+// OnResume restarts the 30s refresh after a drill-in above this page is popped;
+// the chain ends while the page is buried because ticks reach only the top page.
+func (p *tenantsPage) OnResume() tea.Cmd { return p.refreshCmd() }
+
 func (p *tenantsPage) OnEnter() tea.Cmd { return p.refreshCmd() }
 
 func (p *tenantsPage) refreshCmd() tea.Cmd {

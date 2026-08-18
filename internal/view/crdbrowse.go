@@ -94,6 +94,15 @@ func (p *crdBrowsePage) OnEnter() tea.Cmd {
 	return tea.Batch(p.fetchCmd(), p.tickCmd())
 }
 
+// OnResume re-arms the refresh chain after a drill-in above this page is popped.
+// The token is bumped first so a tick still in flight from before the drill-in is
+// rejected rather than starting a second, parallel chain.
+func (p *crdBrowsePage) OnResume() tea.Cmd {
+	crdTokenSeq++
+	p.token = crdTokenSeq
+	return tea.Batch(p.fetchCmd(), p.tickCmd())
+}
+
 func (p *crdBrowsePage) tickCmd() tea.Cmd {
 	token := p.token
 	return tea.Tick(crdRefresh, func(time.Time) tea.Msg { return crdTickMsg{token: token} })

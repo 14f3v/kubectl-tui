@@ -46,7 +46,12 @@ type nodeTopMsg struct {
 // nodeTopTickMsg fires the periodic refresh.
 type nodeTopTickMsg struct{}
 
-func (p *nodeTopPage) Init() tea.Cmd     { return p.refresh() }
+func (p *nodeTopPage) Init() tea.Cmd { return p.refresh() }
+
+// OnResume restarts the 15s refresh after a drill-in above this page is popped;
+// the chain ends while the page is buried because ticks reach only the top page.
+func (p *nodeTopPage) OnResume() tea.Cmd { return p.refresh() }
+
 func (p *nodeTopPage) OnEnter() tea.Cmd  { return p.refresh() }
 func (p *nodeTopPage) Title() string     { return "node top" }
 func (p *nodeTopPage) Kind() string      { return "" }
