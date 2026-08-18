@@ -10,9 +10,10 @@ import (
 // suggestions and Tab/arrow completion of the last term against the page's rows.
 type FilterCompleter interface {
 	// FilterMatches parses buf's last term and returns the fixed prefix (the head
-	// plus any "!"/"col:" affixes) to re-prepend, the typed value, and the distinct
-	// candidate values the value is a case-insensitive prefix of. matches is nil
-	// when there is nothing to suggest: an empty term or a regex ("~") value.
+	// plus any "!"/"col:" affixes and any earlier "a|" alternatives) to re-prepend,
+	// the typed value, and the distinct candidate values the value is a
+	// case-insensitive prefix of. matches is nil for an empty last token or a regex
+	// ("~") value; a trailing "|" yields an empty value and therefore every candidate.
 	FilterMatches(buf string) (prefix, value string, matches []string)
 }
 
@@ -38,6 +39,21 @@ func filterMatches(buf string, rows []columns.Row, colTitles []string) (prefix, 
 	}
 	if strings.HasPrefix(rest, "~") {
 		return "", "", nil // a regex value isn't meaningfully completable
+	}
+	// Complete the LAST alternative of an "a|b" term, folding the earlier ones
+	// into the prefix so a chosen suggestion rebuilds the whole term. Without
+	// this the dropdown goes dark exactly while the user types the second value.
+	if i := strings.LastIndexByte(rest, '|'); i >= 0 {
+		rebuild, rest = rebuild+rest[:i+1], rest[i+1:]
+		// The parser tolerates a repeated "col:" inside an alternative, so completion
+		// has to as well — otherwise typing "ns:a|ns:de" offers nothing, which is the
+		// point at which a user concludes the feature is broken. Keep what they typed
+		// in the prefix and complete the value after it.
+		if col, val, ok := strings.Cut(rest, ":"); ok {
+			if s, idx, matched := resolveScope(col, colTitles); matched && s == scope && idx == cellIdx {
+				rebuild, rest = rebuild+col+":", val
+			}
+		}
 	}
 	value = rest
 	matches = prefixMatches(completionValues(rows, scope, cellIdx), value)

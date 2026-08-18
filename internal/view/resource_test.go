@@ -136,6 +136,62 @@ func TestFilterRowsMulti(t *testing.T) {
 	}
 }
 
+func TestFilterAlternation(t *testing.T) {
+	titles := []string{"NAME", "STATUS", "IMAGE"}
+	rows := []columns.Row{
+		nsRow("prod", "checkout-api", "Running", "nginx:1.25"),
+		nsRow("prod", "payments-worker", "Running", "app:2.0"),
+		nsRow("staging", "checkout-api", "Error", "nginx:1.25"),
+		nsRow("kube-system", "coredns", "Running", "coredns:1.11"),
+	}
+	names := func(got []columns.Row) string {
+		var b strings.Builder
+		for _, r := range got {
+			b.WriteString(r.Namespace + "/" + r.Name + " ")
+		}
+		return strings.TrimSpace(b.String())
+	}
+
+	// A term may list alternatives with "|"; the term matches if ANY of them do.
+	if got := filterRows(rows, "ns:prod|staging", titles); len(got) != 3 {
+		t.Errorf("ns:prod|staging: got %q, want 3", names(got))
+	}
+	// Inversion applies to the whole term, so "!" means NOT(prod OR staging).
+	if got := filterRows(rows, "!ns:prod|staging", titles); len(got) != 1 || got[0].Namespace != "kube-system" {
+		t.Errorf("!ns:prod|staging: got %q, want kube-system/coredns", names(got))
+	}
+	// Terms are still AND-ed, so two separate ns: terms remain unsatisfiable —
+	// this is the behavior alternation exists to give users an alternative to.
+	if got := filterRows(rows, "ns:prod ns:staging", titles); len(got) != 0 {
+		t.Errorf("ns:prod ns:staging: got %q, want 0 (terms AND)", names(got))
+	}
+	// An empty alternative must be dropped, not treated as the empty substring
+	// (which matches everything). Otherwise the table resets while typing.
+	if got := filterRows(rows, "ns:prod|", titles); len(got) != 2 {
+		t.Errorf("ns:prod|: got %q, want 2", names(got))
+	}
+	if got := filterRows(rows, "ns:|", titles); len(got) != 4 {
+		t.Errorf("ns:| (no alternatives left): got %q, want all 4", names(got))
+	}
+	// A "~" value is a regex and must NOT be split: splitting "^(prod|staging)"
+	// would yield two uncompilable fragments, both dropped, matching everything.
+	if got := filterRows(rows, "ns:~^(prod|staging)$", titles); len(got) != 3 {
+		t.Errorf("ns:~^(prod|staging)$: got %q, want 3", names(got))
+	}
+	// "~" is only special at the start of a value, so "a|~b" is two literals.
+	if got := filterRows(rows, "ns:prod|~zzz", titles); len(got) != 2 {
+		t.Errorf("ns:prod|~zzz: got %q, want 2 (literal ~zzz matches nothing)", names(got))
+	}
+	// Comma is ordinary text: nine projectors join cell values with it.
+	if got := filterRows(rows, "image:nginx:1.25,app", titles); len(got) != 0 {
+		t.Errorf("comma stays literal: got %q, want 0", names(got))
+	}
+	// Alternation composes with unscoped terms and with AND across terms.
+	if got := filterRows(rows, "checkout ns:prod|staging", titles); len(got) != 2 {
+		t.Errorf("checkout ns:prod|staging: got %q, want 2", names(got))
+	}
+}
+
 func TestFilterMatches(t *testing.T) {
 	titles := []string{"NAME", "STATUS", "IMAGE"}
 	rows := []columns.Row{
@@ -171,6 +227,13 @@ func TestFilterMatches(t *testing.T) {
 		{"~al", "", "", nil},                                    // regex not suggested
 		{"", "", "", nil},                                       // empty
 		{"prod ", "", "", nil},                                  // trailing space => empty term
+		// Completion follows the last alternative, so the dropdown keeps working
+		// while the user types the second value of a "a|b" term.
+		{"ns:prod|ku", "ns:prod|", "ku", []string{"kube"}},
+		{"ns:prod|", "ns:prod|", "", []string{"prod", "kube"}},
+		{"al|alp", "al|", "alp", []string{"alpha", "alpine"}},
+		// A regex value is still not completable, even after a pipe.
+		{"ns:~prod|ku", "", "", nil},
 	}
 	for _, c := range cases {
 		prefix, value, matches := filterMatches(c.in, rows, titles)
@@ -259,5 +322,126 @@ func TestStatusCounts(t *testing.T) {
 	total, ok, warn, errc := statusCounts(rows)
 	if total != 4 || ok != 2 || warn != 1 || errc != 1 {
 		t.Fatalf("counts = %d/%d/%d/%d, want 4/2/1/1", total, ok, warn, errc)
+	}
+}
+
+func TestUnsatisfiableHint(t *testing.T) {
+	titles := []string{"NAME", "STATUS", "IMAGE"}
+	cases := []struct {
+		filter string
+		want   string // "" means no hint
+	}{
+		// The reported case: two ns: terms can never both match one namespace.
+		{"ns:demo ns:kube-system", "ns: has 2 AND-ed terms — try ns:demo|kube-system"},
+		{"name:web name:api", "name: has 2 AND-ed terms — try name:web|api"},
+		{"status:Running status:Error", "status: has 2 AND-ed terms — try status:Running|Error"},
+		// Already using alternation: fold the extra term into it.
+		{"ns:a|b ns:c", "ns: has 2 AND-ed terms — try ns:a|b|c"},
+		// Three terms.
+		{"ns:a ns:b ns:c", "ns: has 3 AND-ed terms — try ns:a|b|c"},
+		// A single scoped term is fine.
+		{"ns:demo", ""},
+		// Different columns AND legitimately.
+		{"ns:demo status:Running", ""},
+		// Unscoped terms can each match a different cell, so AND is meaningful.
+		{"web running", ""},
+		// Negated terms legitimately AND: "!ns:a !ns:b" means neither.
+		{"!ns:a !ns:b", ""},
+		// A regex value is not a plain value to join with "|".
+		{"ns:~a ns:~b", ""},
+		// An unknown col: is literal text, not a scope.
+		{"nginx:1.25 nginx:1.26", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := unsatisfiableHint(c.filter, titles); got != c.want {
+			t.Errorf("unsatisfiableHint(%q) = %q, want %q", c.filter, got, c.want)
+		}
+	}
+}
+
+func TestViewExplainsEmptyFilter(t *testing.T) {
+	p := newBarePage("pods")
+	p.apply(engine.Remote[columns.Row]{Phase: engine.PhaseReady, Rows: []columns.Row{
+		nsRow("demo", "web", "Running", "nginx"),
+		nsRow("kube-system", "coredns", "Running", "coredns"),
+	}})
+
+	// A filter that can never match must say why, not just show an empty table.
+	p.SetFilter("ns:demo ns:kube-system")
+	out := p.View(120, 10)
+	if !strings.Contains(out, "AND-ed terms") || !strings.Contains(out, "ns:demo|kube-system") {
+		t.Errorf("empty unsatisfiable filter gave no explanation:\n%s", out)
+	}
+
+	// An ordinary empty result says so, but must not invent an alternation hint.
+	p.SetFilter("ns:nowhere")
+	out = p.View(120, 10)
+	if strings.Contains(out, "AND-ed terms") {
+		t.Errorf("ordinary empty result should not claim AND-ed terms:\n%s", out)
+	}
+	if !strings.Contains(out, "no rows match") {
+		t.Errorf("empty result gave no feedback at all:\n%s", out)
+	}
+
+	// A filter that matches must render the table, not a message.
+	p.SetFilter("ns:demo")
+	out = p.View(120, 10)
+	if strings.Contains(out, "no rows match") {
+		t.Errorf("matching filter rendered the empty-state message:\n%s", out)
+	}
+	if !strings.Contains(out, "web") {
+		t.Errorf("matching filter did not render its row:\n%s", out)
+	}
+}
+
+func TestAlternationToleratesRepeatedScope(t *testing.T) {
+	titles := []string{"NAME", "STATUS", "IMAGE"}
+	rows := []columns.Row{
+		nsRow("demo", "web", "Running", "nginx:1.25"),
+		nsRow("kube-system", "coredns", "Running", "coredns:1.11"),
+		nsRow("prod", "api", "Running", "redis:7"),
+	}
+
+	// Repeating the scope inside an alternative is redundant but is what people
+	// reach for: "either ns:a or ns:b". Accept it rather than silently matching the
+	// literal text "ns:b", which no namespace can contain.
+	if got := filterRows(rows, "ns:kube-system|ns:demo", titles); len(got) != 2 {
+		t.Errorf("ns:kube-system|ns:demo matched %d rows, want 2", len(got))
+	}
+	// Same thing on a column scope, where values legitimately contain colons.
+	if got := filterRows(rows, "image:nginx|image:redis", titles); len(got) != 2 {
+		t.Errorf("image:nginx|image:redis matched %d rows, want 2", len(got))
+	}
+	if got := filterRows(rows, "image:nginx:1.25|image:redis:7", titles); len(got) != 2 {
+		t.Errorf("colon-bearing values matched %d rows, want 2", len(got))
+	}
+	// The canonical form is unaffected.
+	if got := filterRows(rows, "ns:kube-system|demo", titles); len(got) != 2 {
+		t.Errorf("canonical form matched %d rows, want 2", len(got))
+	}
+	// A DIFFERENT column inside an alternative is not a scope change — a term has
+	// one scope — so it stays literal text and matches nothing here.
+	if got := filterRows(rows, "ns:demo|name:api", titles); len(got) != 1 {
+		t.Errorf("cross-scope alternative matched %d rows, want 1 (demo only)", len(got))
+	}
+	// An unscoped token whose value contains a colon is still literal.
+	if got := filterRows(rows, "nginx:1.25", titles); len(got) != 1 {
+		t.Errorf("unknown col as literal matched %d rows, want 1", len(got))
+	}
+}
+
+func TestFilterMatchesCompletesAfterRepeatedScope(t *testing.T) {
+	titles := []string{"NAME", "STATUS", "IMAGE"}
+	rows := []columns.Row{
+		nsRow("demo", "web", "Running", "nginx"),
+		nsRow("kube-system", "coredns", "Running", "coredns"),
+	}
+	prefix, value, matches := filterMatches("ns:kube-system|ns:de", rows, titles)
+	if prefix != "ns:kube-system|ns:" || value != "de" {
+		t.Errorf("prefix/value = %q/%q, want %q/%q", prefix, value, "ns:kube-system|ns:", "de")
+	}
+	if len(matches) != 1 || matches[0] != "demo" {
+		t.Errorf("matches = %v, want [demo]", matches)
 	}
 }
