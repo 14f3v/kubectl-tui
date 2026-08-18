@@ -272,6 +272,16 @@ func (m *Model) renderFilterSuggest(width int) []string {
 
 // ---- command bar ----
 
+// filterHelpText describes the filter for the active page. Only pages offering
+// filter completion support "col:a|b" alternation; the TextView-based pages run a
+// plain substring search, so the help must not promise them more than they do.
+func filterHelpText(p view.Page) string {
+	if _, ok := p.(view.FilterCompleter); ok {
+		return "filter rows (terms AND · col:a|b for either · ! to invert)"
+	}
+	return "filter rows (prefix ! to invert)"
+}
+
 func (m *Model) renderCommandBar() string {
 	t := m.theme
 	var left string
@@ -282,7 +292,15 @@ func (m *Model) renderCommandBar() string {
 		left = t.PinkText.Render("/") + " " + t.Base.Render(m.inputBuf) + t.AccentText.Render("▊")
 		if m.inputBuf == "" {
 			// Teach the filter grammar as placeholder text until the user types.
-			left += "  " + t.Faint.Render("terms AND · col:val · ~regex · !not · ⇥↑↓ suggest")
+			// Alternation is only advertised on pages that implement it: the
+			// TextView-based pages (yaml, describe, logs) route SetFilter to a plain
+			// substring search, and promising them "col:a|b" would be a lie. The
+			// pages that support it are exactly those offering filter completion.
+			hint := "terms AND · col:val · ~regex · !not · ⇥↑↓ suggest"
+			if _, ok := m.active().(view.FilterCompleter); ok {
+				hint = "terms AND · col:val · col:a|b OR · ~regex · !not · ⇥↑↓ suggest"
+			}
+			left += "  " + t.Faint.Render(hint)
 		}
 	default:
 		cmdText := ":"
@@ -572,7 +590,7 @@ func (m *Model) renderHelp(h int) string {
 	b.WriteString("\n\n")
 	globals := [][2]string{
 		{":", "command line (:pods, :ns, :q)"},
-		{"/", "filter rows (prefix ! to invert)"},
+		{"/", filterHelpText(m.active())},
 		{"j/k ↑/↓", "move cursor"},
 		{"g/G", "top / bottom"},
 		{"enter", "drill in"},
