@@ -152,6 +152,24 @@ func BenchmarkTableRender5k(b *testing.B) {
 	}
 }
 
+// BenchmarkTableRender5kRefresh is the shape the engine actually drives: a new
+// snapshot replaces the rows, which drops the render cache, and the visible
+// window is redrawn cold. This is the cost SetRows-invalidation adds over reusing
+// stale lines, and it must stay proportional to the window (40 rows), not to the
+// 5k rows behind it.
+func BenchmarkTableRender5kRefresh(b *testing.B) {
+	tbl := NewTable(style.Default())
+	tbl.SetColumns(testCols())
+	tbl.SetSize(120, 40)
+	rows := testRows5k()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tbl.SetRows(rows)
+		_ = tbl.Header()
+		_ = tbl.Body()
+	}
+}
+
 func testRows5k() []columns.Row {
 	out := make([]columns.Row, 5000)
 	for i := range out {
@@ -181,6 +199,71 @@ func itoaTest(n int) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+func TestTableRepaintsWhenCellTextChanges(t *testing.T) {
+	tbl := newTestTable()
+	rows := testRows(1)
+	tbl.SetRows(rows)
+	if body := tbl.Body(); !strings.Contains(body, "3h") {
+		t.Fatalf("initial body missing the AGE cell: %q", body)
+	}
+
+	// Same object identity (UID and resourceVersion unchanged), different rendered
+	// text. This is what an AGE tick and the metrics CPU/MEM overlay both do: the
+	// row's content changes while its resourceVersion holds still. Keying the
+	// render cache on identity alone freezes the old line on screen.
+	rows2 := testRows(1)
+	rows2[0].Cells[2].Text = "4h"
+	tbl.SetRows(rows2)
+
+	body := tbl.Body()
+	if !strings.Contains(body, "4h") {
+		t.Errorf("body did not repaint after cell text changed; got %q", body)
+	}
+	if strings.Contains(body, "3h") {
+		t.Errorf("body still shows the stale cached text; got %q", body)
+	}
+}
+
+func TestTableRendersRowsWithoutIdentity(t *testing.T) {
+	// Server-side Table rows (the CRD browser) can arrive with no UID and no
+	// resourceVersion. Under an identity-only cache key every such row shares one
+	// key, so the first row's rendered line is reused for all of them.
+	tbl := newTestTable()
+	mk := func(name string) columns.Row {
+		return columns.Row{
+			Cells: []columns.Cell{
+				{Text: name, Role: columns.RoleName},
+				{Text: "Running", Role: columns.RoleStatus, Status: columns.StatusOK},
+				{Text: "1h", Status: columns.StatusMuted},
+			},
+			SortKeys: []columns.SortKey{columns.StrKey(name), columns.StrKey("Running"), columns.NumKey(0)},
+		}
+	}
+	// Three rows, so at least two are simultaneously unselected and unmarked and
+	// therefore share every component of an identity-only key.
+	tbl.SetRows([]columns.Row{mk("alpha"), mk("bravo"), mk("charlie")})
+
+	body := tbl.Body()
+	for _, want := range []string{"alpha", "bravo", "charlie"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("row %q missing — identity-less rows collapsed to one cached line; got %q", want, body)
+		}
+	}
+}
+
+func TestSetThemeResetsResolvedWidths(t *testing.T) {
+	// Density feeds CellPad, which feeds the width solver. Swapping the theme
+	// without dropping the resolved widths leaves them stale for the page's life.
+	tbl := newTestTable()
+	tbl.SetRows(testRows(1))
+	_ = tbl.Body()
+
+	tbl.SetTheme(style.New(style.AccentPreset("green"), style.Compact))
+	if tbl.widths != nil {
+		t.Error("SetTheme left resolved widths in place; density changes column padding")
+	}
 }
 
 func TestTableSort(t *testing.T) {

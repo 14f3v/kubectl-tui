@@ -10,6 +10,7 @@ import (
 	"github.com/14f3v/kubectl-tui/internal/component"
 	"github.com/14f3v/kubectl-tui/internal/engine"
 	"github.com/14f3v/kubectl-tui/internal/engine/columns"
+	"github.com/14f3v/kubectl-tui/internal/metrics"
 	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
@@ -282,10 +283,98 @@ func TestFilterPodRows(t *testing.T) {
 func newBarePage(kind string) *resourcePage {
 	th := style.Default()
 	tbl := component.NewTable(th)
+	p := &resourcePage{kind: kind, title: kind, theme: th, table: tbl, cpuCol: -1, memCol: -1}
 	if proj := columns.For(kind); proj != nil {
-		tbl.SetColumns(proj.Columns())
+		cols := proj.Columns()
+		tbl.SetColumns(cols)
+		p.colTitles = make([]string, len(cols))
+		for i, c := range cols {
+			p.colTitles[i] = c.Title
+			switch c.Title {
+			case "CPU":
+				p.cpuCol = i
+			case "MEM":
+				p.memCol = i
+			}
+		}
 	}
-	return &resourcePage{kind: kind, title: kind, theme: th, table: tbl}
+	return p
+}
+
+// podRow builds a row shaped like the pods projector's output: nine cells, with
+// CPU and MEM carrying the "—" placeholder the metrics join is meant to replace.
+func podRow(ns, name string) columns.Row {
+	cells := []columns.Cell{
+		{Text: name, Role: columns.RoleName},
+		{Text: "1/1"},
+		{Text: "Running", Role: columns.RoleStatus, Status: columns.StatusOK},
+		{Text: "0"},
+		{Text: "10.0.0.1"},
+		{Text: "node-1"},
+		{Text: "—", Status: columns.StatusMuted}, // CPU
+		{Text: "—", Status: columns.StatusMuted}, // MEM
+		{Text: "5m"},
+	}
+	keys := make([]columns.SortKey, len(cells))
+	for i := range keys {
+		keys[i] = columns.StrKey(cells[i].Text)
+	}
+	keys[6], keys[7] = columns.NumKey(0), columns.NumKey(0)
+	return columns.Row{
+		UID: ns + "/" + name, Namespace: ns, Name: name, Version: "1",
+		Health: columns.StatusOK, Cells: cells, SortKeys: keys,
+	}
+}
+
+func TestMetricsOverlayIsFilterable(t *testing.T) {
+	p := newBarePage("pods")
+	p.apply(engine.Remote[columns.Row]{Phase: engine.PhaseReady, Rows: []columns.Row{
+		podRow("default", "web"),
+		podRow("default", "api"),
+	}})
+	// Set a filter FIRST. With a filter active, filterRows returns a fresh slice,
+	// so the overlay never writes back into allRows — which is the only reason a
+	// cpu: term appeared to work at all before this fix.
+	p.SetFilter("web")
+	p.Update(metrics.Snapshot{Available: true, Pods: map[string]metrics.PodUsage{
+		"default/web": {CPUMillis: 12, MemBytes: 48 * 1024 * 1024},
+	}})
+
+	// A cpu: term must match what the table displays. Filtering ran before the
+	// overlay, so it used to compare against the "—" placeholder instead.
+	p.SetFilter("cpu:12m")
+	if got := p.table.RowCount(); got != 1 {
+		t.Errorf("cpu:12m matched %d rows, want 1 (the overlaid value)", got)
+	}
+	p.SetFilter("mem:48Mi")
+	if got := p.table.RowCount(); got != 1 {
+		t.Errorf("mem:48Mi matched %d rows, want 1", got)
+	}
+}
+
+func TestMetricsOverlaySetsSortKeys(t *testing.T) {
+	p := newBarePage("pods")
+	// Insert the busy pod first, so a working sort has to reorder them.
+	p.apply(engine.Remote[columns.Row]{Phase: engine.PhaseReady, Rows: []columns.Row{
+		podRow("default", "aaa-busy"),
+		podRow("default", "zzz-idle"),
+	}})
+	p.Update(metrics.Snapshot{Available: true, Pods: map[string]metrics.PodUsage{
+		"default/aaa-busy": {CPUMillis: 500},
+		"default/zzz-idle": {CPUMillis: 5},
+	}})
+
+	// Sorting by the CPU column must order by actual usage. The projector emits a
+	// constant NumKey(0) for CPU, so without the overlay filling SortKeys the sort
+	// is a no-op and the rows keep their incoming order.
+	p.table.SetSortState(p.cpuCol, false)
+	first, ok := p.table.Selected()
+	if !ok {
+		t.Fatal("no rows after sort")
+	}
+	if first.Name != "zzz-idle" {
+		t.Errorf("ascending CPU sort put %q first, want zzz-idle (5m < 500m)", first.Name)
+	}
 }
 
 func TestResourcePageView(t *testing.T) {
