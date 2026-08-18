@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/14f3v/kubectl-tui/internal/engine/columns"
 	"github.com/14f3v/kubectl-tui/internal/style"
@@ -240,17 +241,18 @@ func pad(s string, w int) string {
 	return s + strings.Repeat(" ", w-lipgloss.Width(s))
 }
 
+// trunc cuts s to w display columns, appending an ellipsis when it had to cut.
+//
+// It measures with x/ansi rather than len(): byte length is not display width, so
+// the previous version both cut multi-byte text far too early and sliced through
+// the middle of a rune, emitting mojibake. That matters here because trunc is used
+// beside pad, which has always been width-aware — the two disagreeing is what
+// pulled columns out of alignment on any non-ASCII cell.
 func trunc(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	if len(s) <= w {
-		return s
-	}
-	if w == 1 {
-		return "…"
-	}
-	return s[:w-1] + "…"
+	return ansi.Truncate(s, w, "…")
 }
 
 func itoaSmall(n int) string { return fmt.Sprintf("%d", n) }
