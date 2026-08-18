@@ -69,6 +69,10 @@ func (p *tenantsPage) Summary() Summary {
 	return Summary{Total: total, OK: ok, Warn: warn, Err: errc}
 }
 
+// OnResume restarts the 30s refresh after a drill-in above this page is popped;
+// the chain ends while the page is buried because ticks reach only the top page.
+func (p *tenantsPage) OnResume() tea.Cmd { return p.refreshCmd() }
+
 func (p *tenantsPage) OnEnter() tea.Cmd { return p.refreshCmd() }
 
 func (p *tenantsPage) refreshCmd() tea.Cmd {
@@ -231,6 +235,19 @@ func miniBar(frac float64, width int, t style.Theme) string {
 	filled := lipgloss.NewStyle().Foreground(col).Render(strings.Repeat("█", n))
 	empty := t.Faint.Render(strings.Repeat("░", width-n))
 	return filled + empty
+}
+
+// emptyBody renders a table body that is empty for a known reason. Drawing a bare
+// column header over blank space reads as a broken page; saying so does not.
+func emptyBody(t style.Theme, message string, height int) string {
+	if height < 1 {
+		height = 1
+	}
+	lines := []string{"", "  " + t.Faint.Render(message)}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:height], "\n")
 }
 
 func pad(s string, w int) string {

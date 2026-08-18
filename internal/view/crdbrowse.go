@@ -94,6 +94,15 @@ func (p *crdBrowsePage) OnEnter() tea.Cmd {
 	return tea.Batch(p.fetchCmd(), p.tickCmd())
 }
 
+// OnResume re-arms the refresh chain after a drill-in above this page is popped.
+// The token is bumped first so a tick still in flight from before the drill-in is
+// rejected rather than starting a second, parallel chain.
+func (p *crdBrowsePage) OnResume() tea.Cmd {
+	crdTokenSeq++
+	p.token = crdTokenSeq
+	return tea.Batch(p.fetchCmd(), p.tickCmd())
+}
+
 func (p *crdBrowsePage) tickCmd() tea.Cmd {
 	token := p.token
 	return tea.Tick(crdRefresh, func(time.Time) tea.Msg { return crdTickMsg{token: token} })
@@ -239,7 +248,20 @@ func (p *crdBrowsePage) View(width, height int) string {
 		height = 2
 	}
 	p.table.SetSize(width, height-1)
-	return p.table.Header() + "\n" + p.table.Body()
+	body := p.table.Body()
+	if p.table.RowCount() == 0 {
+		msg := "no " + p.title
+		if p.namespaced && p.namespace != "" {
+			msg += " in namespace " + p.namespace
+		} else if p.namespaced {
+			msg += " in any namespace"
+		}
+		if p.filter != "" {
+			msg += " matching " + p.filter
+		}
+		body = emptyBody(p.theme, msg, height-1)
+	}
+	return p.table.Header() + "\n" + body
 }
 
 // cycleTableSort / toggleTableSortDir mirror the resource table's sort keys for
