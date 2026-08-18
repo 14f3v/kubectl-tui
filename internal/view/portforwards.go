@@ -39,6 +39,9 @@ func (p *pfPage) OnEnter() tea.Cmd  { return nil }
 func (p *pfPage) OnLeave()          {}
 
 func (p *pfPage) Summary() Summary {
+	if p.sess == nil {
+		return Summary{}
+	}
 	return Summary{Total: p.sess.Forwards.Count()}
 }
 
@@ -55,6 +58,9 @@ func (p *pfPage) Update(m tea.Msg) (Page, tea.Cmd) {
 	k, ok := m.(tea.KeyPressMsg)
 	if !ok {
 		return p, nil // PFChanged and others just trigger a re-render
+	}
+	if p.sess == nil {
+		return p, nil
 	}
 	list := p.sess.Forwards.List()
 	switch k.String() {
@@ -82,7 +88,14 @@ func (p *pfPage) Update(m tea.Msg) (Page, tea.Cmd) {
 
 func (p *pfPage) View(width, height int) string {
 	t := p.theme
-	list := p.sess.Forwards.List()
+	// This page reads live forward state at render time rather than caching it, so
+	// it is the one View that depends on the Session. Guard it: the root never
+	// renders a page without a Session, but the dependency is what kept this page
+	// out of every render test, and an empty list is the honest degraded answer.
+	var list []portfwd.Info
+	if p.sess != nil {
+		list = p.sess.Forwards.List()
+	}
 	if p.cursor >= len(list) {
 		p.cursor = len(list) - 1
 	}
