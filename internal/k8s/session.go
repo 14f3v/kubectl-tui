@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"time"
 
@@ -88,7 +89,10 @@ func (s *Session) Contexts() (names []string, current string) {
 // skip) wins; otherwise the KUBECONFIG environment variable (colon-separated
 // files are merged); otherwise ~/.kube/config. contextName overrides the
 // current-context when non-empty.
-func NewSession(parent context.Context, kubeconfigPath, contextName string, sink engine.Sink) (*Session, error) {
+// readOnly wraps every client's transport so mutating requests are refused
+// before they leave the process; see readonly.go for why the boundary lives
+// there rather than in the pages.
+func NewSession(parent context.Context, kubeconfigPath, contextName string, readOnly bool, sink engine.Sink) (*Session, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfigPath != "" {
 		loadingRules.ExplicitPath = kubeconfigPath
@@ -106,6 +110,15 @@ func NewSession(parent context.Context, kubeconfigPath, contextName string, sink
 	// Bound client-side timeouts keep the UI responsive; watches set their own.
 	restCfg.QPS = 50
 	restCfg.Burst = 100
+
+	// Install the read-only guard before any client is built, so every one of them
+	// inherits it — including the SPDY and WebSocket transports used by exec,
+	// attach and port-forward.
+	if readOnly {
+		restCfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+			return readOnlyRoundTripper{base: rt}
+		})
+	}
 
 	cs, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {

@@ -516,6 +516,10 @@ func (p *resourcePage) enterSecret() tea.Cmd {
 // replicaset/daemonset) is first resolved to a ready backing pod, whose ports are
 // then forwarded. Open ":pf" to see the resolved local ports.
 func (p *resourcePage) portForwardAction() tea.Cmd {
+	// pods/portforward is a create verb; a read-only account cannot open one.
+	if p.sess.ReadOnly {
+		return toast("read-only mode: port-forward is disabled", msg.LevelWarn)
+	}
 	switch {
 	case p.kind == "pods":
 		return p.forwardPod()
@@ -632,6 +636,11 @@ func forwardableWorkload(kind string) bool {
 
 // copyAction opens the file copy (kubectl cp) menu for the selected pod.
 func (p *resourcePage) copyAction() tea.Cmd {
+	// Both directions run tar through pods/exec, so both are create verbs — and
+	// the upload direction writes straight into the container.
+	if p.sess.ReadOnly {
+		return toast("read-only mode: file copy is disabled", msg.LevelWarn)
+	}
 	if p.kind != "pods" {
 		return toast("copy: select a pod", msg.LevelInfo)
 	}
@@ -677,6 +686,12 @@ func itoa32(n int32) string {
 // shellAction hands the terminal to an interactive shell in the selected pod
 // (pods only).
 func (p *resourcePage) shellAction() tea.Cmd {
+	// A shell can change anything inside the container, and RBAC treats it as
+	// create on pods/exec — so read-only refuses it, same as a read-only account
+	// would. The transport enforces this too; the check here is for the toast.
+	if p.sess.ReadOnly {
+		return toast("read-only mode: exec is disabled", msg.LevelWarn)
+	}
 	if p.kind != "pods" {
 		return toast("shell: select a pod", msg.LevelInfo)
 	}

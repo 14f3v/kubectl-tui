@@ -57,7 +57,12 @@ This is the "fire-and-observe" rule borrowed from the sibling Flutter app.
    keeps rendering; `Terminal` (401/403/TLS/exec-plugin failure) stops retrying and surfaces
    actionably.
 7. **Fire-and-observe writes.** Write commands never mutate read caches; the watch event does.
-   Failures emit an `ActionResultMsg` toast. `readOnly` config disables the write package.
+   Failures emit an `ActionResultMsg` toast. `readOnly` config installs a
+   `rest.Config` transport wrapper that refuses create/update/patch/delete before
+   the request leaves the process — so it covers every client built from that
+   config, including the SPDY and WebSocket transports behind exec, attach and
+   port-forward. Pages still check the flag, but only to raise a toast; the
+   transport is what makes it a boundary rather than a convention.
 8. **TerminalGate arbitrates all TTY handoffs.** One state machine
    (`TUIOwned → HandingOff → ChildOwned → Restoring`) wraps every `tea.Exec`/`tea.ExecProcess`;
    concurrent attempts are rejected with a toast; the engine coalescer pauses while a child owns

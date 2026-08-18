@@ -331,9 +331,25 @@ favorites:              # namespaces on digit keys 1-9
 |---|---|---|
 | `accent` | `indigo` | preset name or a hex color |
 | `density` | `comfortable` | `compact` removes inter-column padding |
-| `readOnly` | `false` | when `true`, scale/edit/delete/drain/apply/etc. are refused |
+| `readOnly` | `false` | when `true`, kubetui behaves as if your RBAC were read-only (see below) |
 | `tierLabel` | `tier` | tenant label key for the TIER column |
 | `favorites` | — | namespaces surfaced by the `1`–`9` keys |
+
+### Read-only mode
+
+`readOnly: true` makes kubetui behave exactly as a read-only ServiceAccount would:
+**create, update, patch and delete are refused**, and everything else works
+normally. Refusal happens in the client transport, before a request leaves the
+process, so it covers every client — including the SPDY/WebSocket transports
+behind exec and port-forward — rather than depending on each page remembering to
+check a flag.
+
+Practically, that means these are also disabled, because Kubernetes treats them
+as `create` on a pod subresource: **`s` exec/shell**, **`C` file copy** (a shell
+or an upload can change a container from the inside), and **`p` port-forward**.
+
+`:whoami` and its `can-i` grid keep working: `SelfSubjectReview` and
+`SelfSubjectAccessReview` are POSTs by API shape but only ever read.
 
 ---
 
