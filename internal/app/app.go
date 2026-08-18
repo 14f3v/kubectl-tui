@@ -284,6 +284,12 @@ func (m *Model) popPage() (tea.Model, tea.Cmd) {
 	top := m.pages[len(m.pages)-1]
 	top.OnLeave()
 	m.pages = m.pages[:len(m.pages)-1]
+	// A page that drives its own refresh tick lost that chain while it was buried:
+	// ticks go to the top page only, so its own message was delivered to the
+	// drill-in and dropped. Give it a chance to re-arm now that it is visible.
+	if r, ok := m.active().(view.Resumable); ok {
+		return m, r.OnResume()
+	}
 	return m, nil
 }
 

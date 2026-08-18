@@ -67,6 +67,22 @@ type Page interface {
 	OnLeave()
 }
 
+// Resumable is implemented by pages that drive their own refresh timer with a
+// self-perpetuating tea.Tick chain.
+//
+// Only the top page receives messages, so while something is drilled in on top of
+// one of these its next tick is delivered elsewhere, ignored, and the chain simply
+// ends — the page is then frozen for the rest of its life, because popping a
+// drill-in does not re-enter the page underneath. OnResume is called when the page
+// becomes visible again so it can re-arm.
+//
+// It is deliberately not part of Page and deliberately not OnEnter: OnEnter has
+// side effects some pages cannot safely repeat (logsPage would open a second log
+// stream), so pages opt in only when re-arming is what they actually need.
+type Resumable interface {
+	OnResume() tea.Cmd
+}
+
 // Factory builds a page from its dependencies.
 type Factory func(Deps) Page
 
