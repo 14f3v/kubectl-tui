@@ -394,3 +394,54 @@ func TestViewExplainsEmptyFilter(t *testing.T) {
 		t.Errorf("matching filter did not render its row:\n%s", out)
 	}
 }
+
+func TestAlternationToleratesRepeatedScope(t *testing.T) {
+	titles := []string{"NAME", "STATUS", "IMAGE"}
+	rows := []columns.Row{
+		nsRow("demo", "web", "Running", "nginx:1.25"),
+		nsRow("kube-system", "coredns", "Running", "coredns:1.11"),
+		nsRow("prod", "api", "Running", "redis:7"),
+	}
+
+	// Repeating the scope inside an alternative is redundant but is what people
+	// reach for: "either ns:a or ns:b". Accept it rather than silently matching the
+	// literal text "ns:b", which no namespace can contain.
+	if got := filterRows(rows, "ns:kube-system|ns:demo", titles); len(got) != 2 {
+		t.Errorf("ns:kube-system|ns:demo matched %d rows, want 2", len(got))
+	}
+	// Same thing on a column scope, where values legitimately contain colons.
+	if got := filterRows(rows, "image:nginx|image:redis", titles); len(got) != 2 {
+		t.Errorf("image:nginx|image:redis matched %d rows, want 2", len(got))
+	}
+	if got := filterRows(rows, "image:nginx:1.25|image:redis:7", titles); len(got) != 2 {
+		t.Errorf("colon-bearing values matched %d rows, want 2", len(got))
+	}
+	// The canonical form is unaffected.
+	if got := filterRows(rows, "ns:kube-system|demo", titles); len(got) != 2 {
+		t.Errorf("canonical form matched %d rows, want 2", len(got))
+	}
+	// A DIFFERENT column inside an alternative is not a scope change — a term has
+	// one scope — so it stays literal text and matches nothing here.
+	if got := filterRows(rows, "ns:demo|name:api", titles); len(got) != 1 {
+		t.Errorf("cross-scope alternative matched %d rows, want 1 (demo only)", len(got))
+	}
+	// An unscoped token whose value contains a colon is still literal.
+	if got := filterRows(rows, "nginx:1.25", titles); len(got) != 1 {
+		t.Errorf("unknown col as literal matched %d rows, want 1", len(got))
+	}
+}
+
+func TestFilterMatchesCompletesAfterRepeatedScope(t *testing.T) {
+	titles := []string{"NAME", "STATUS", "IMAGE"}
+	rows := []columns.Row{
+		nsRow("demo", "web", "Running", "nginx"),
+		nsRow("kube-system", "coredns", "Running", "coredns"),
+	}
+	prefix, value, matches := filterMatches("ns:kube-system|ns:de", rows, titles)
+	if prefix != "ns:kube-system|ns:" || value != "de" {
+		t.Errorf("prefix/value = %q/%q, want %q/%q", prefix, value, "ns:kube-system|ns:", "de")
+	}
+	if len(matches) != 1 || matches[0] != "demo" {
+		t.Errorf("matches = %v, want [demo]", matches)
+	}
+}

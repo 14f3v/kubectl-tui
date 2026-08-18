@@ -166,7 +166,10 @@ Each term is `[!][col:][~]value`:
 Terms are AND-ed, so `ns:prod ns:staging` asks for one namespace containing *both*
 names and matches nothing. To match several values of the same column, use
 alternation inside a single term: `ns:prod|staging`. Inversion applies to the
-whole term, so `!ns:prod|staging` means "neither". Alternation is plain text —
+whole term, so `!ns:prod|staging` means "neither". Repeating the column inside an
+alternative is accepted, so `ns:prod|ns:staging` works too and means the same
+thing — the scope belongs to the whole term, so `ns:prod|staging` is the canonical
+form. Alternation is plain text —
 for anchored or pattern matching, the regex form still works
 (`ns:~^(prod|staging)$`), and a `~` value is never split. Note `~` is only
 recognized at the start of a value, so `a|~b` is two literal alternatives (the

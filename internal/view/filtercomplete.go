@@ -45,6 +45,15 @@ func filterMatches(buf string, rows []columns.Row, colTitles []string) (prefix, 
 	// this the dropdown goes dark exactly while the user types the second value.
 	if i := strings.LastIndexByte(rest, '|'); i >= 0 {
 		rebuild, rest = rebuild+rest[:i+1], rest[i+1:]
+		// The parser tolerates a repeated "col:" inside an alternative, so completion
+		// has to as well — otherwise typing "ns:a|ns:de" offers nothing, which is the
+		// point at which a user concludes the feature is broken. Keep what they typed
+		// in the prefix and complete the value after it.
+		if col, val, ok := strings.Cut(rest, ":"); ok {
+			if s, idx, matched := resolveScope(col, colTitles); matched && s == scope && idx == cellIdx {
+				rebuild, rest = rebuild+col+":", val
+			}
+		}
 	}
 	value = rest
 	matches = prefixMatches(completionValues(rows, scope, cellIdx), value)

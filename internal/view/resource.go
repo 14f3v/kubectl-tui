@@ -1200,7 +1200,7 @@ func parseFilter(filter string, colTitles []string) []filterTerm {
 			}
 			term.re = re
 		} else {
-			term.needles = splitAlternatives(value)
+			term.needles = splitAlternatives(value, scope, cellIdx, colTitles)
 			if len(term.needles) == 0 {
 				continue // every alternative was empty, e.g. a lone "|"
 			}
@@ -1321,18 +1321,44 @@ func unsatisfiableHint(filter string, colTitles []string) string {
 // strings.Contains(s, "") is true, so a trailing "|" — which exists for a keystroke
 // every time someone types "prod|staging" — would otherwise make the term match
 // every row and the table would visibly reset under the user.
-func splitAlternatives(value string) []string {
+//
+// A repeated "col:" inside an alternative is stripped when it names the column the
+// term is already scoped to. The scope belongs to the whole term, so "ns:a|b" is
+// canonical — but "ns:a|ns:b" is what people reach for, and taken literally it asks
+// for a namespace containing the text "ns:b", which none can. Accepting it costs
+// nothing and matches this parser's existing forgiveness elsewhere.
+func splitAlternatives(value string, scope filterScope, cellIdx int, colTitles []string) []string {
 	if !strings.Contains(value, "|") {
 		return []string{strings.ToLower(value)}
 	}
 	parts := strings.Split(value, "|")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		if p != "" {
+		if p = stripRepeatedScope(p, scope, cellIdx, colTitles); p != "" {
 			out = append(out, strings.ToLower(p))
 		}
 	}
 	return out
+}
+
+// stripRepeatedScope removes a redundant "col:" prefix from one alternative when
+// col names the same column the term is already scoped to. A DIFFERENT column is
+// left alone: a term carries exactly one scope, so "ns:a|name:b" cannot mean two
+// scopes, and the text stays literal — consistent with how an unknown "col:" is
+// treated. Values that merely contain a colon ("nginx:1.25") are unaffected,
+// because their prefix does not resolve to this term's column.
+func stripRepeatedScope(alt string, scope filterScope, cellIdx int, colTitles []string) string {
+	if scope == scopeAny {
+		return alt
+	}
+	col, rest, ok := strings.Cut(alt, ":")
+	if !ok {
+		return alt
+	}
+	if s, idx, matched := resolveScope(col, colTitles); matched && s == scope && idx == cellIdx {
+		return rest
+	}
+	return alt
 }
 
 // hit matches the term's regex, or any one of its substring alternatives,
