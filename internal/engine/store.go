@@ -148,6 +148,18 @@ func (vs *ViewStore) loop(ctx context.Context) {
 // RowCount returns the number of objects currently in the informer cache.
 func (vs *ViewStore) RowCount() int { return len(vs.informer.GetStore().List()) }
 
+// Phase reports the store's current lifecycle state. It is the cheap way to ask
+// — Snapshot() answers the same question but projects the entire cache to do it,
+// which is far too expensive for a liveness check.
+func (vs *ViewStore) Phase() Phase {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	if vs.phase == PhaseLoading && vs.informer.HasSynced() {
+		return PhaseReady
+	}
+	return vs.phase
+}
+
 // onEvent records a successful watch delivery. Any event proves the watch is
 // healthy, so it clears a prior stale state — unless the store is terminal, which
 // is sticky until an explicit restart.

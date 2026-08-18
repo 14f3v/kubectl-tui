@@ -511,16 +511,20 @@ func (m *Model) renderContent(h int) string {
 func (m *Model) renderBanner(e *engine.EngineErr, h int) string {
 	t := m.theme
 	title := "cannot watch this resource"
+	// The hint has to stay true: r is only wired while this banner is showing.
+	hint := "press r to retry this view"
 	switch e.Class {
 	case engine.ClassForbidden:
 		title = "forbidden — your account cannot watch this resource"
 	case engine.ClassAuth:
-		title = "credentials expired — re-authenticate, then press r to retry"
+		title = "credentials expired — re-authenticate, then press r"
+		hint = "r rebuilds the session, re-running your credential plugin"
 	case engine.ClassTLS:
 		title = "TLS error connecting to the cluster"
 	}
 	body := lipgloss.NewStyle().Foreground(t.Pal.Err).Bold(true).Render(title) + "\n\n" +
-		t.Faint.Render(e.Detail)
+		t.Faint.Render(e.Detail) + "\n\n" +
+		t.Faint.Render(hint)
 	return m.renderCentered(body, t.Base)
 }
 
