@@ -237,6 +237,19 @@ func miniBar(frac float64, width int, t style.Theme) string {
 	return filled + empty
 }
 
+// emptyBody renders a table body that is empty for a known reason. Drawing a bare
+// column header over blank space reads as a broken page; saying so does not.
+func emptyBody(t style.Theme, message string, height int) string {
+	if height < 1 {
+		height = 1
+	}
+	lines := []string{"", "  " + t.Faint.Render(message)}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:height], "\n")
+}
+
 func pad(s string, w int) string {
 	if lipgloss.Width(s) >= w {
 		return s

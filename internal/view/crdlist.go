@@ -174,5 +174,15 @@ func (p *crdListPage) View(width, height int) string {
 		height = 2
 	}
 	p.table.SetSize(width, height-1)
-	return p.table.Header() + "\n" + p.table.Body()
+	body := p.table.Body()
+	if p.table.RowCount() == 0 {
+		// A successful fetch returning nothing looks exactly like a failed one if all
+		// we draw is a column header over blank space.
+		msg := "no CustomResourceDefinitions in this cluster"
+		if p.filter != "" {
+			msg = "no CustomResourceDefinitions match " + p.filter
+		}
+		body = emptyBody(p.theme, msg, height-1)
+	}
+	return p.table.Header() + "\n" + body
 }
