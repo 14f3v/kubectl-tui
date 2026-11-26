@@ -944,12 +944,14 @@ func (m *Model) applyCommand() (tea.Model, tea.Cmd) {
 	if p := m.active(); p != nil {
 		ns = p.Namespace()
 	}
-	path, _, err := editor.WriteTemp(applyTemplate(ns))
+	path, sum, err := editor.WriteTemp(applyTemplate(ns))
 	if err != nil {
 		return m, toastCmd("apply: "+err.Error(), msg.LevelError)
 	}
+	opened := time.Now() // the editor starts within a frame of this
 	sess, theme, ro := m.sess, m.theme, m.cfg.Config.ReadOnly
 	after := func(execErr error) tea.Msg {
+		elapsed := time.Since(opened)
 		defer os.Remove(path)
 		if execErr != nil {
 			return msg.Toast{Text: "editor: " + execErr.Error(), Level: msg.LevelError}
@@ -957,6 +959,11 @@ func (m *Model) applyCommand() (tea.Model, tea.Cmd) {
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
 			return msg.Toast{Text: "apply: " + rerr.Error(), Level: msg.LevelError}
+		}
+		// The template back untouched within a second means the editor never
+		// waited for the user; say so rather than "no changes to apply".
+		if hint := editor.QuickExitHint(elapsed); hint != "" && editor.Unchanged(data, sum) {
+			return msg.Toast{Text: hint, Level: msg.LevelWarn}
 		}
 		// Preview the change with a read-only dry-run before applying: compute the
 		// diff and open the preview page, where `a` confirms the apply. If nothing

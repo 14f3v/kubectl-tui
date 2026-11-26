@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -60,6 +61,25 @@ func digest(b []byte) [32]byte {
 func Process(path string) *exec.Cmd {
 	argv := command(os.Getenv, runtime.GOOS, isAbsProgram)
 	return exec.Command(argv[0], append(argv[1:], path)...)
+}
+
+// quickExit is how soon an editor must hand back an untouched file for kubetui to
+// conclude it never waited for the user.
+const quickExit = time.Second
+
+// QuickExitHint is the toast for an editor that handed the file back untouched
+// within quickExit of getting it, or "" if it took longer. Nobody reviews an
+// object and quits that fast. What happens instead is a GUI editor passing the
+// file to a window it already has open and exiting at once: code without --wait,
+// subl without -w, Notepad++ without -multiInst. kubetui then reads the file back
+// and removes it before the user has typed anything, and a bare "no changes"
+// would hide why the edit went nowhere. A fast :q! in vi earns the hint too,
+// which costs nothing.
+func QuickExitHint(elapsed time.Duration) string {
+	if elapsed >= quickExit {
+		return ""
+	}
+	return `editor exited at once without changes — GUI editors need a wait flag, e.g. EDITOR="code --wait"`
 }
 
 // Apply reads the edited file, and if it differs from the original applies it

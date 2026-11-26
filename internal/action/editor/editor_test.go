@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -129,5 +130,27 @@ func TestApplySendsACRLFEdit(t *testing.T) {
 	}
 	if !bytes.Contains(patch, []byte(`"script":"echo one\necho three\n"`)) || bytes.Contains(patch, []byte(`\r`)) {
 		t.Errorf("applied patch = %s, want the edited script with LF line breaks", patch)
+	}
+}
+
+func TestQuickExitHint(t *testing.T) {
+	cases := []struct {
+		elapsed time.Duration
+		hint    bool
+	}{
+		{elapsed: 0, hint: true},
+		{elapsed: 80 * time.Millisecond, hint: true}, // code without --wait
+		{elapsed: quickExit - time.Millisecond, hint: true},
+		{elapsed: quickExit, hint: false},
+		{elapsed: 30 * time.Second, hint: false}, // a real look, no edit
+	}
+	for _, c := range cases {
+		got := QuickExitHint(c.elapsed)
+		if (got != "") != c.hint {
+			t.Errorf("QuickExitHint(%v) = %q, want a hint: %v", c.elapsed, got, c.hint)
+		}
+		if c.hint && !strings.Contains(got, "--wait") {
+			t.Errorf("QuickExitHint(%v) = %q, want it to show a wait flag", c.elapsed, got)
+		}
 	}
 }
