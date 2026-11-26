@@ -414,6 +414,7 @@ kubetui is a native Windows console app for **Windows 10 1809+ and Windows Serve
 - **kubeconfig.** Found the same way kubectl finds it (normally `%USERPROFILE%\.kube\config`). `KUBECONFIG` takes a `;`-separated list on Windows, not `:`.
 - **Pasting a kubeconfig.** Windows Terminal hands a paste to the paste box in one piece. The classic console window types it in key by key instead, which is slow and not reliable for a whole kubeconfig: there, save it to a file and load it with `f` in the cluster picker, or use Windows Terminal.
 - **Config file.** `%XDG_CONFIG_HOME%\kubetui\config.yaml` if that variable is set, otherwise `%USERPROFILE%\.config\kubetui\config.yaml` — `%USERPROFILE%` even when `%HOME%` is set and kubectl reads its kubeconfig from there.
+- **Saved kubeconfigs.** The `clusters/` and `state.yaml` files live in the same folder as the config file, `%XDG_CONFIG_HOME%\kubetui\` if that variable is set, otherwise `%USERPROFILE%\.config\kubetui\`. Windows has no `0700`/`0600`: the files rely on the folder's inherited ACL, which under `%USERPROFILE%` is already limited to you. If `XDG_CONFIG_HOME` points outside your profile (say a shared drive), check who can read that folder, since kubetui does not change its ACL.
 - **Editor.** `e` and `:apply` open `KUBE_EDITOR`, else `EDITOR`, else Notepad. kubetui waits for the editor to exit, so a GUI editor needs its wait flag: `$env:EDITOR = 'code --wait'`. Quote a program path that has spaces: `$env:EDITOR = '"C:\Program Files\Notepad++\notepad++.exe" -multiInst'`.
 - **Paths in prompts.** The file-copy (`C`) and log-save prompts accept a quoted path, as Explorer's **Copy as path** produces. The log-save prompt suggests `%TEMP%\<pod>.log`.
 - **Pod shells.** Arrow keys, Home/End, Delete, F-keys and colours work in `s` shells and debug sessions, and Ctrl+Z goes to the pod. Ctrl+Break ends the shell, not kubetui.
@@ -457,7 +458,7 @@ Adding a new **built-in** kind is a `columns/<kind>.go` projector plus a line in
 ## Notes
 
 - Built with `charm.land/bubbletea`, `charm.land/lipgloss`, `charm.land/bubbles` (v2) and `k8s.io/client-go`.
-- kubeconfigs and secrets are never written to disk by kubetui; `.gitignore` excludes local kubeconfig files.
+- Pasted kubeconfigs are saved under the `clusters/` folder, readable only by you, like `~/.kube/config`. kubetui never writes your own kubeconfig files (client-go's oidc provider refreshing tokens excepted). Secret values are never written to disk. `.gitignore` excludes local kubeconfig files.
 
 ## License
 

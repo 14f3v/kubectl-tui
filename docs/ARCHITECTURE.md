@@ -70,6 +70,9 @@ This is the "fire-and-observe" rule borrowed from the sibling Flutter app.
 9. **Session-per-context, dispose-don't-mutate.** A context switch cancels the old Session's root
    context (all informers, log streams, and forwards die) and builds a fresh one. There is no
    discovery disk cache keyed by server URL (which poisons Teleport).
+   A Session is built from a `k8s.ClusterRef` (a kubeconfig context, a pasted file under
+   `clusters/`, or in-cluster), and the app connects in a Cmd so the current Session stays up
+   until the new one is ready; a failed or cancelled connect disposes only the new one.
 10. **Capsule via dynamic client + hand-decoded struct.** We never import the Capsule Go module
     (it drags controller-runtime); we decode ~10 unstructured fields, which tolerates version
     skew. Quota aggregation is time-driven, not tenant-event-driven, because `ResourceQuota`
@@ -96,6 +99,7 @@ This is the "fire-and-observe" rule borrowed from the sibling Flutter app.
 | `internal/action` | `TerminalGate` + `execshell`, `editor`, `portfwd`, `logstream`, `write`, `inspect` |
 | `internal/msg` | shared `tea.Msg` types |
 | `internal/config` | `~/.config/kubetui/config.yaml` |
+| `internal/clusters` | saved clusters: `clusters/` store of pasted kubeconfigs, `state.yaml` (last use, view, namespace, approved exec), kubeconfig inspection, picker rows |
 
 **Rule:** pages are the only `tea.Msg` speakers; components are plain structs with imperative
 methods. No IO in `Update`; all IO is a `tea.Cmd` or lives in an engine/action goroutine.
