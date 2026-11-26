@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Config
+current-context: dev
+clusters:
+- name: dev
+  cluster: {server: "https://dev.example:6443"}
+- name: prod
+  cluster: {server: "https://prod.example:6443"}
+users:
+- name: u
+  user: {token: abc123}
+contexts:
+- name: dev
+  context: {cluster: dev, user: u}
+- name: prod
+  context: {cluster: prod, user: u}
+---
+apiVersion: v1
+kind: Config
+clusters:
+- name: dev
+  cluster: {server: "https://dev.example:6443"}
+users:
+- name: u
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args: [eks, get-token, --region, eu-west-1]
+      env:
+      - {name: AWS_PROFILE, value: prod}
+      interactiveMode: Never
+contexts:
+- name: dev
+  context: {cluster: dev, user: u}

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Config
+clusters:
+- name: dev
+  cluster: {server: "https://dev.example:6443", insecure-skip-tls-verify: true}
+users:
+- name: u
+  user: {token: abc}
+contexts:
+- name: dev
+  context: {cluster: dev, user: u}
