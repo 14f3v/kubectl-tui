@@ -3,6 +3,7 @@ package editor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -88,6 +89,16 @@ var configmaps = schema.GroupVersionResource{Version: "v1", Resource: "configmap
 // returns what Apply reported and the patch it sent, nil if none.
 func editRoundTrip(t *testing.T, saved string) (changed bool, patch []byte) {
 	t.Helper()
+	changed, patch, err := applyEdit(t, saved, nil)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	return changed, patch
+}
+
+// applyEdit is editRoundTrip with a prepare func, returning Apply's error too.
+func applyEdit(t *testing.T, saved string, prepare func([]byte) ([]byte, error)) (changed bool, patch []byte, err error) {
+	t.Helper()
 	path, sum, err := WriteTemp(object)
 	if err != nil {
 		t.Fatalf("WriteTemp: %v", err)
@@ -109,11 +120,8 @@ func editRoundTrip(t *testing.T, saved string) (changed bool, patch []byte) {
 		patch = pa.GetPatch()
 		return true, nil, nil
 	})
-	changed, err = Apply(context.Background(), dyn, configmaps, true, "demo", "web", path, sum)
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-	return changed, patch
+	changed, err = Apply(context.Background(), dyn, configmaps, true, "demo", "web", path, sum, prepare)
+	return changed, patch, err
 }
 
 // An editor that only rewrote the line endings changed nothing, so nothing may
@@ -133,6 +141,49 @@ func TestApplySendsACRLFEdit(t *testing.T) {
 	}
 	if !bytes.Contains(patch, []byte(`"script":"echo one\necho three\n"`)) || bytes.Contains(patch, []byte(`\r`)) {
 		t.Errorf("applied patch = %s, want the edited script with LF line breaks", patch)
+	}
+}
+
+// prepare gets the edited object as JSON, and what it returns is what the server
+// gets.
+func TestApplySendsWhatPrepareReturns(t *testing.T) {
+	var got []byte
+	prepare := func(edited []byte) ([]byte, error) {
+		got = edited
+		return []byte(`{"prepared":true}`), nil
+	}
+	changed, patch, err := applyEdit(t, strings.Replace(object, "echo two", "echo three", 1), prepare)
+	if err != nil || !changed {
+		t.Fatalf("Apply: changed=%v err=%v, want the edit applied", changed, err)
+	}
+	if !bytes.Contains(got, []byte(`"script":"echo one\necho three\n"`)) {
+		t.Errorf("prepare got %s, want the edited object as JSON", got)
+	}
+	if string(patch) != `{"prepared":true}` {
+		t.Errorf("applied patch = %s, want what prepare returned", patch)
+	}
+}
+
+// An error from prepare stops the apply: it is reported and nothing reaches the
+// server.
+func TestApplyStopsOnAPrepareError(t *testing.T) {
+	refuse := func([]byte) ([]byte, error) { return nil, errors.New("data.password is still redacted") }
+	changed, patch, err := applyEdit(t, strings.Replace(object, "echo two", "echo three", 1), refuse)
+	if err == nil || err.Error() != "data.password is still redacted" {
+		t.Errorf("Apply error = %v, want prepare's", err)
+	}
+	if !changed || patch != nil {
+		t.Errorf("changed=%v patch=%s, want the edit seen but nothing sent", changed, patch)
+	}
+}
+
+// An unchanged file is a no-op before prepare is asked anything.
+func TestApplySkipsPrepareWhenUnchanged(t *testing.T) {
+	called := false
+	prepare := func(b []byte) ([]byte, error) { called = true; return b, nil }
+	changed, patch, err := applyEdit(t, crlf(object), prepare)
+	if err != nil || changed || patch != nil || called {
+		t.Errorf("unchanged save: changed=%v patch=%s err=%v prepare called=%v, want a no-op", changed, patch, err, called)
 	}
 }
 

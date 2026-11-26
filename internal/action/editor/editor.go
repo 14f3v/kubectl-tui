@@ -105,9 +105,15 @@ func quickExitHint(elapsed time.Duration, goos string) string {
 }
 
 // Apply reads the edited file, and if it differs from the original applies it
-// with server-side apply (field manager "kubetui"). It reports whether a change
-// was applied. The caller is responsible for removing the temp file.
-func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, namespaced bool, namespace, name, path string, origSum [32]byte) (changed bool, err error) {
+// with server-side apply (field manager "kubetui"). It reports whether the file
+// changed. The caller is responsible for removing the temp file.
+//
+// prepare, if not nil, gets the edited object as JSON and returns the body to
+// apply in its place. An error from it stops the apply, and nothing is sent.
+// Editing a Secret uses it to put back the values the file held only
+// placeholders for. It runs after the no-op check, so an unchanged file never
+// reaches it.
+func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, namespaced bool, namespace, name, path string, origSum [32]byte, prepare func(edited []byte) ([]byte, error)) (changed bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false, err
@@ -118,6 +124,11 @@ func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionRe
 	jsonBytes, err := yaml.YAMLToJSON(data)
 	if err != nil {
 		return true, err
+	}
+	if prepare != nil {
+		if jsonBytes, err = prepare(jsonBytes); err != nil {
+			return true, err
+		}
 	}
 	opts := metav1.PatchOptions{FieldManager: "kubetui"}
 	if namespaced {

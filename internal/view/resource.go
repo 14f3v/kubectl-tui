@@ -728,7 +728,10 @@ func (p *resourcePage) editAction() tea.Cmd {
 	if !ok {
 		return toast(row.Name+" is no longer in the cache", msg.LevelWarn)
 	}
-	yamlStr, err := inspect.YAML(obj)
+	// A Secret's values are masked in the buffer, so the temp file never holds
+	// them. restore keeps them in memory and puts back every value still masked
+	// once the editor exits. It is nil for other kinds.
+	yamlStr, restore, err := inspect.EditYAML(obj)
 	if err != nil {
 		return toast("edit: "+err.Error(), msg.LevelError)
 	}
@@ -746,7 +749,7 @@ func (p *resourcePage) editAction() tea.Cmd {
 		if execErr != nil {
 			return msg.Toast{Text: "editor: " + execErr.Error(), Level: msg.LevelError}
 		}
-		changed, aerr := editor.Apply(sess.Context(), sess.Dyn, info.GVR, info.Namespaced, ns, name, path, sum)
+		changed, aerr := editor.Apply(sess.Context(), sess.Dyn, info.GVR, info.Namespaced, ns, name, path, sum, restore)
 		switch {
 		case aerr != nil:
 			return msg.Toast{Text: "apply " + name + ": " + aerr.Error(), Level: msg.LevelError}

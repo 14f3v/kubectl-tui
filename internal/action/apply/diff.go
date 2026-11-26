@@ -153,8 +153,10 @@ func diffLabel(gvk, namespace, name string) string {
 // object (no live counterpart) it renders the proposed object entirely as
 // additions via renderAddDiff. Otherwise it normalizes both objects to YAML and
 // feeds them to unifiedDiff. Marshaling failures are returned as errors; identical
-// objects yield an empty string, which callers read as "no change".
+// objects yield an empty string, which callers read as "no change". A Secret's
+// values are shown as their sizes (see maskSecretDiff).
 func renderDiff(live, proposed *unstructured.Unstructured, newObject bool, label string) (string, error) {
+	live, proposed = maskSecretDiff(live, proposed)
 	proposedYAML, err := normalizeYAML(proposed)
 	if err != nil {
 		return "", fmt.Errorf("encode proposed object: %w", err)

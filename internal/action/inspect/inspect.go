@@ -1,14 +1,16 @@
-// Package inspect implements the read-only inspect actions: rendering a cached
-// object as YAML and running kubectl-style describe. Both return plain text that
-// the caller shows in a scrollable text page.
+// Package inspect implements the inspect actions: rendering a cached object as
+// YAML and running kubectl-style describe. Both return plain text that the
+// caller shows in a scrollable text page. EditYAML renders the same YAML for the
+// edit buffer, and for a Secret it also returns a Restore that puts the masked
+// values back into the saved buffer before the edit is applied.
 package inspect
 
 import (
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/describe"
@@ -87,11 +89,34 @@ func GroupKindFor(kind string) (schema.GroupKind, bool) {
 
 // YAML renders a cached object as YAML. managedFields are already stripped by the
 // engine transform; we deep-copy before stamping apiVersion/kind so the shared
-// cache object is never mutated.
+// cache object is never mutated. A core Secret, typed from the cache or
+// unstructured from the dynamic client, renders with its values masked (see
+// secretYAML).
 func YAML(obj any) (string, error) {
+	s, _, err := render(obj)
+	return s, err
+}
+
+// EditYAML renders an object for the edit buffer. The text is what YAML shows,
+// so a Secret's values are masked there too and never reach the temp file the
+// editor gets. For a Secret it also returns a Restore that holds the masked
+// values in memory and puts them back into the saved buffer before it is
+// applied. For any other object the Restore is nil and the buffer is applied
+// as saved.
+func EditYAML(obj any) (string, Restore, error) {
+	s, masked, err := render(obj)
+	if err != nil || masked == nil {
+		return s, nil, err
+	}
+	return s, masked.restore, nil
+}
+
+// render is the body of YAML and EditYAML. It returns, for a Secret, the values
+// it masked.
+func render(obj any) (string, *secretValues, error) {
 	ro, ok := obj.(runtime.Object)
 	if !ok {
-		return "", fmt.Errorf("object is not a runtime.Object (%T)", obj)
+		return "", nil, fmt.Errorf("object is not a runtime.Object (%T)", obj)
 	}
 	clone := ro.DeepCopyObject()
 	if clone.GetObjectKind().GroupVersionKind().Empty() {
@@ -99,42 +124,33 @@ func YAML(obj any) (string, error) {
 			clone.GetObjectKind().SetGroupVersionKind(gvks[0])
 		}
 	}
-	redactSecret(clone)
+	if isSecret(clone) {
+		return secretYAML(clone)
+	}
 	b, err := yaml.Marshal(clone)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return string(b), nil
-}
-
-// redactSecret masks a Secret's values so the yaml view never leaks credentials.
-// Each data value becomes "<redacted: N bytes>" and stringData is dropped. The
-// argument is always a deep copy, so the shared cache object is unaffected. A
-// no-op for every other type. The reveal drill-in (enter on a secret row) reads
-// the real values straight from the cache and shows them only on demand.
-func redactSecret(obj runtime.Object) {
-	s, ok := obj.(*corev1.Secret)
-	if !ok {
-		return
-	}
-	for k, v := range s.Data {
-		s.Data[k] = []byte(fmt.Sprintf("<redacted: %d bytes>", len(v)))
-	}
-	for k := range s.StringData {
-		s.StringData[k] = "<redacted>"
-	}
+	return string(b), nil, nil
 }
 
 // Describe runs the kubectl describer for a kind and object, returning its text.
 // It makes its own API calls (describe aggregates events and related objects), so
-// callers should run it as a command, not inline in Update.
+// callers should run it as a command, not inline in Update. A Secret is
+// described with every value shown as its size (see secretDescriber).
 func Describe(cfg *rest.Config, kind, namespace, name string) (string, error) {
 	gk, ok := GroupKindFor(kind)
 	if !ok {
 		return "", fmt.Errorf("describe not supported for %q", kind)
 	}
-	d, ok := describe.DescriberFor(gk, cfg)
-	if !ok {
+	var d describe.ResourceDescriber
+	if gk == (schema.GroupKind{Group: "", Kind: "Secret"}) {
+		cs, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			return "", err
+		}
+		d = secretDescriber(cs)
+	} else if d, ok = describe.DescriberFor(gk, cfg); !ok {
 		return "", fmt.Errorf("no describer for %s", gk.Kind)
 	}
 	return d.Describe(namespace, name, describe.DescriberSettings{ShowEvents: true})
