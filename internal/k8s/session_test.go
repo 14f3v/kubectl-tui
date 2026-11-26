@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 const twoContexts = `apiVersion: v1
@@ -73,4 +74,56 @@ func TestNewSessionPinsRefContext(t *testing.T) {
 
 func TestDisposeIsNilSafe(t *testing.T) {
 	(&Session{}).Dispose() // must not panic
+}
+
+const execKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- name: dev
+  cluster: {server: "https://dev.example:6443"}
+users:
+- name: u
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args: [eks, get-token]
+      interactiveMode: Never
+contexts:
+- name: dev
+  context: {cluster: dev, user: u}
+current-context: dev
+`
+
+func execSession(t *testing.T, src Source, approved []string) *Session {
+	t.Helper()
+	path := writeKubeconfig(t, execKubeconfig)
+	s, err := NewSession(t.Context(), ClusterRef{Source: src, Path: path, Context: "dev"},
+		Options{Sink: func(tea.Msg) {}, ApprovedExec: approved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Dispose)
+	return s
+}
+
+func TestPastedExecAllowlist(t *testing.T) {
+	p := execSession(t, SourcePasted, []string{"aws"}).RestCfg.ExecProvider.PluginPolicy
+	if p.PolicyType != clientcmdapi.PluginPolicyAllowlist || len(p.Allowlist) != 1 || p.Allowlist[0].Command != "aws" {
+		t.Fatalf("policy = %+v", p)
+	}
+}
+
+func TestPastedExecDeniedWhenUnapproved(t *testing.T) {
+	p := execSession(t, SourcePasted, nil).RestCfg.ExecProvider.PluginPolicy
+	if p.PolicyType != clientcmdapi.PluginPolicyDenyAll || len(p.Allowlist) != 0 {
+		t.Fatalf("policy = %+v", p)
+	}
+}
+
+func TestFileSourceExecUntouched(t *testing.T) {
+	p := execSession(t, SourceFile, []string{"aws"}).RestCfg.ExecProvider.PluginPolicy
+	if p.PolicyType != "" || len(p.Allowlist) != 0 {
+		t.Fatalf("policy = %+v", p)
+	}
 }

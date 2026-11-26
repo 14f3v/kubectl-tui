@@ -170,7 +170,7 @@ func (m *Model) connect(ref k8s.ClusterRef) tea.Cmd {
 	if p := m.picker(); p != nil {
 		p.SetConnecting(&ref)
 	}
-	return bootstrapCmd(ctx, m.bootToken, ref, m.sessionOptions())
+	return bootstrapCmd(ctx, m.bootToken, ref, m.sessionOptions(), m.store)
 }
 
 // cancelConnect cancels the bootstrap in flight, if any, and clears connecting.
@@ -196,8 +196,14 @@ func (m *Model) isCurrent(token int) bool {
 // result tagged with token. The Session's lifetime is its own (its parent is
 // Background, so it outlives this command); ctx bounds only the version probe,
 // which is the one slow step, so a newer pick can cut it short.
-func bootstrapCmd(ctx context.Context, token int, ref k8s.ClusterRef, opts k8s.Options) tea.Cmd {
+//
+// For a pasted ref the store supplies the login commands the user approved when
+// saving it; the lookup reads a file, so it runs here and not in Update.
+func bootstrapCmd(ctx context.Context, token int, ref k8s.ClusterRef, opts k8s.Options, store *clusters.Store) tea.Cmd {
 	return func() tea.Msg {
+		if ref.Source == k8s.SourcePasted && store != nil {
+			opts.ApprovedExec = approvedExec(store, ref)
+		}
 		sess, err := k8s.NewSession(context.Background(), ref, opts)
 		if err != nil {
 			return msg.SessionError{Err: err, Token: token, Ref: ref}
@@ -205,6 +211,18 @@ func bootstrapCmd(ctx context.Context, token int, ref k8s.ClusterRef, opts k8s.O
 		_ = sess.RefreshServerVersion(ctx) // best-effort; empty version is fine
 		return msg.SessionReady{Session: sess, Token: token}
 	}
+}
+
+// approvedExec returns the login commands approved for a pasted ref. An
+// unreadable store or an unknown entry yields none, which denies every command.
+func approvedExec(store *clusters.Store, ref k8s.ClusterRef) []string {
+	entries, _ := store.Entries()
+	for _, e := range entries {
+		if e.Source == k8s.SourcePasted && e.File == filepath.Base(ref.Path) {
+			return e.ApprovedExec
+		}
+	}
+	return nil
 }
 
 // Update is the message router. It recovers from panics in sub-updates so a bug

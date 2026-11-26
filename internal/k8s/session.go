@@ -127,6 +127,18 @@ func NewSession(parent context.Context, ref ClusterRef, opts Options) (*Session,
 			idCfg = clientcmd.NewNonInteractiveClientConfig(*raw, overrides.CurrentContext, overrides, loadingRules)
 		}
 	}
+	// A pasted kubeconfig may run only the login commands the user approved when
+	// saving it; anything else (or nothing approved) is refused.
+	if ref.Source == SourcePasted && restCfg.ExecProvider != nil {
+		pol := clientcmdapi.PluginPolicy{PolicyType: clientcmdapi.PluginPolicyDenyAll}
+		if len(opts.ApprovedExec) > 0 {
+			pol.PolicyType = clientcmdapi.PluginPolicyAllowlist
+			for _, c := range opts.ApprovedExec {
+				pol.Allowlist = append(pol.Allowlist, clientcmdapi.AllowlistEntry{Command: c})
+			}
+		}
+		restCfg.ExecProvider.PluginPolicy = pol
+	}
 	// Bound client-side timeouts keep the UI responsive; watches set their own.
 	restCfg.QPS = 50
 	restCfg.Burst = 100

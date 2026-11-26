@@ -37,7 +37,7 @@ type Options struct {
 	// Sink receives engine snapshots and port-forward events.
 	Sink engine.Sink
 	// ApprovedExec lists the exec credential commands the user approved for a
-	// pasted kubeconfig. Pasted refs only; enforced in a later change.
+	// pasted kubeconfig. Pasted refs only; NewSession allows no other command.
 	ApprovedExec []string
 }
 

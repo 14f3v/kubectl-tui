@@ -619,3 +619,18 @@ func TestOpenPasteBoxWithoutStore(t *testing.T) {
 		t.Errorf("toast = %+v, want a warning %q", m.toast, want)
 	}
 }
+
+func TestApprovedExecComesFromTheEntry(t *testing.T) {
+	s := savedStore(t, "")
+	ref := k8s.ClusterRef{Source: k8s.SourcePasted, Path: s.PastePath("team.yaml"), Context: "dev"}
+	if got := approvedExec(s, ref); got != nil {
+		t.Fatalf("unknown entry approved %v", got)
+	}
+	err := s.Update(clusters.KeyFor(ref, ""), func(e *clusters.Entry) { e.ApprovedExec = []string{"aws"} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := approvedExec(s, ref); !slices.Equal(got, []string{"aws"}) {
+		t.Fatalf("approved = %v, want [aws]", got)
+	}
+}
