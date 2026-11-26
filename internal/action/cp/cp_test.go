@@ -412,6 +412,57 @@ func TestExtractTarLayouts(t *testing.T) {
 	}
 }
 
+// TestExtractTarCreatesEmptyDirs checks that directories arrive even when they
+// hold no files, as with kubectl cp: an empty remote directory is a successful
+// download of an empty directory, not an "empty archive" error, and an empty
+// subdirectory of a tree is reproduced wherever the tree lands.
+func TestExtractTarCreatesEmptyDirs(t *testing.T) {
+	cases := []struct {
+		name     string
+		entries  []tarEntry
+		srcBase  string
+		dstIsDir bool
+		goos     string
+		wantDirs []string // slash paths relative to dst, "." for dst itself
+	}{
+		{name: "empty dir to new path", entries: []tarEntry{{name: "cache/"}}, srcBase: "cache",
+			wantDirs: []string{"."}},
+		{name: "empty dir into existing dir", entries: []tarEntry{{name: "cache/"}}, srcBase: "cache", dstIsDir: true,
+			wantDirs: []string{"cache"}},
+		{name: "empty subdir to new path", srcBase: "nginx",
+			entries:  []tarEntry{{name: "nginx/"}, {name: "nginx/a", body: "A"}, {name: "nginx/run/"}, {name: "nginx/run/lock/"}},
+			wantDirs: []string{".", "run", "run/lock"}},
+		{name: "empty subdir into existing dir", srcBase: "nginx", dstIsDir: true,
+			entries:  []tarEntry{{name: "nginx/"}, {name: "nginx/a", body: "A"}, {name: "nginx/run/"}},
+			wantDirs: []string{"nginx", "nginx/run"}},
+		{name: "renamed empty dir on windows", srcBase: "logs", goos: "windows",
+			entries:  []tarEntry{{name: "logs/"}, {name: "logs/con/"}, {name: "logs/10:00/"}},
+			wantDirs: []string{".", "_con", "10_00"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "out")
+			if c.dstIsDir {
+				if err := os.Mkdir(dst, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			goos := c.goos
+			if goos == "" {
+				goos = runtime.GOOS
+			}
+			if _, err := extractTar(buildTar(t, c.entries...), dst, c.srcBase, goos); err != nil {
+				t.Fatalf("extractTar: %v", err)
+			}
+			for _, d := range c.wantDirs {
+				if fi, err := os.Stat(filepath.Join(dst, filepath.FromSlash(d))); err != nil || !fi.IsDir() {
+					t.Errorf("%s is not a directory under dst: %v", d, err)
+				}
+			}
+		})
+	}
+}
+
 // TestExtractTarRejectsForeignEntries confirms an archive holding anything other
 // than the requested source is refused rather than extracted, including a ".."
 // name that cleaning clamps to something outside the source, and that none of it

@@ -321,7 +321,8 @@ func uploadable(m fs.FileMode) bool {
 }
 
 // extractTar reads the archive that `tar -cf - -C <dir> <srcBase>` produced in the
-// pod and writes its regular-file entries to disk. Whether the copy is a single
+// pod and writes its regular files and directories to disk; a directory is
+// created even when empty, as kubectl cp does. Whether the copy is a single
 // file or a tree is decided from the archive, not from dst: srcBase is a tree when
 // it arrives as a directory entry or has entries beneath it. Where it lands then
 // depends on dst:
@@ -391,21 +392,27 @@ func extractTar(r io.Reader, dst, srcBase, goos string) (Result, error) {
 		if shape == shapeTree && dstIsFile {
 			return res, fmt.Errorf("destination %q is a file but %q is a directory; choose a directory or a new path", dst, srcBase)
 		}
-		// Directory markers only classify the archive; the parent dirs of each file
-		// (dst itself included, for a tree copied to a new path) are created as needed.
-		if isDir {
-			continue
-		}
 
+		// A tree copied to a new path becomes dst, so its srcBase entry is dst
+		// itself; a file copied anywhere but into a directory is written to dst.
 		target, renamed := dst, false
 		switch {
 		case dstIsDir:
 			target, renamed, err = resolveExtractTarget(dst, path.Join(srcBase, rel), goos)
-		case shape == shapeTree:
+		case shape == shapeTree && rel != "":
 			target, renamed, err = resolveExtractTarget(dst, rel, goos)
 		}
 		if err != nil {
 			return res, err
+		}
+		if isDir {
+			// The parent dirs of each file are created as needed as well, so this
+			// only adds the directories that hold no files.
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return res, fmt.Errorf("create dir %q: %w", target, err)
+			}
+			wrote = true
+			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return res, fmt.Errorf("create dir for %q: %w", target, err)
