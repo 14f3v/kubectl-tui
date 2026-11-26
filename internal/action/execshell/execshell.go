@@ -134,6 +134,9 @@ func (c *Cmd) Run() (retErr error) {
 	fmt.Fprintf(out, "\x1b[2J\x1b[H⏳ connecting to %s/%s…"+bannerNewline, c.namespace, target)
 
 	err = tty.Safe(func() error {
+		// Safe has made the console raw by now; on Windows that raw mode still
+		// drops the non-character keys until VT input is added on top of it.
+		enableVTInput(in)
 		return exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
 			Stdin:             in,
 			Stdout:            out,

@@ -12,3 +12,7 @@ const bannerNewline = "\n"
 // enableVTOutput does nothing off Windows: a unix terminal interprets escape
 // sequences whatever its mode. See console_windows.go.
 func enableVTOutput(io.Writer) (restore func()) { return func() {} }
+
+// enableVTInput does nothing off Windows: a unix tty already delivers special
+// keys as escape sequences. See console_windows.go.
+func enableVTInput(io.Reader) {}
