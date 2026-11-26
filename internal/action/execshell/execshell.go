@@ -126,7 +126,12 @@ func (c *Cmd) Run() (retErr error) {
 	if c.container != "" {
 		target = c.pod + "/" + c.container
 	}
-	fmt.Fprintf(out, "\x1b[2J\x1b[H⏳ connecting to %s/%s…\n", c.namespace, target)
+	// On Windows the console Bubble Tea handed back may not interpret escapes at
+	// all, so turn VT output on before the first one is written, and put the
+	// console's own mode back when the shell is done.
+	restoreOutput := enableVTOutput(out)
+	defer restoreOutput()
+	fmt.Fprintf(out, "\x1b[2J\x1b[H⏳ connecting to %s/%s…"+bannerNewline, c.namespace, target)
 
 	err = tty.Safe(func() error {
 		return exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
