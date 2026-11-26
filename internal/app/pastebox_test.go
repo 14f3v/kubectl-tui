@@ -3,6 +3,8 @@ package app
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -792,7 +794,19 @@ func TestPasteBoxWrapsContextProblem(t *testing.T) {
 	pasteIn(t, m, manyCtxExec)
 	v := boxView(m)
 	joined := strings.Join(strings.Fields(v), " ")
-	if !strings.Contains(joined, "✗ invalid configuration:") || !strings.Contains(joined, "no such file or directory") {
+	// The OS words its own missing-file error: ENOENT on Unix, "The system
+	// cannot find the path specified." on Windows.
+	f, err := os.Open(probeCA)
+	if err == nil {
+		f.Close()
+		t.Fatalf("%s exists; the test needs it missing", probeCA)
+	}
+	var pe *fs.PathError
+	if !errors.As(err, &pe) {
+		t.Fatalf("os.Open(%s) = %v, want a *fs.PathError", probeCA, err)
+	}
+	osText := strings.Join(strings.Fields(pe.Err.Error()), " ")
+	if !strings.Contains(joined, "✗ invalid configuration:") || !strings.Contains(joined, osText) {
 		t.Errorf("the problem is not shown whole:\n%s", v)
 	}
 	for _, line := range strings.Split(v, "\n") {
