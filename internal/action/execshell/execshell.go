@@ -138,7 +138,10 @@ func (c *Cmd) Run() (retErr error) {
 		// drops the non-character keys until VT input is added on top of it.
 		enableVTInput(in)
 		return exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
-			Stdin:             in,
+			// Not in itself: on Windows a console read would turn Ctrl+Z into EOF
+			// and end the pod's stdin (see stdin.go). TTY.In stays in, so Safe
+			// still sees the console.
+			Stdin:             streamStdin(in),
 			Stdout:            out,
 			Tty:               true,
 			TerminalSizeQueue: sizeQueue,
