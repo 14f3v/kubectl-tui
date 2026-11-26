@@ -392,7 +392,9 @@ kubetui is a native Windows console app for **Windows 10 1809+ and Windows Serve
 - **kubeconfig.** Found the same way kubectl finds it (normally `%USERPROFILE%\.kube\config`). `KUBECONFIG` takes a `;`-separated list on Windows, not `:`.
 - **Config file.** `%XDG_CONFIG_HOME%\kubetui\config.yaml` if that variable is set, otherwise `%USERPROFILE%\.config\kubetui\config.yaml` — `%USERPROFILE%` even when `%HOME%` is set and kubectl reads its kubeconfig from there.
 - **Editor.** `e` and `:apply` open `KUBE_EDITOR`, else `EDITOR`, else Notepad. kubetui waits for the editor to exit, so a GUI editor needs its wait flag: `$env:EDITOR = 'code --wait'`. Quote a program path that has spaces: `$env:EDITOR = '"C:\Program Files\Notepad++\notepad++.exe" -multiInst'`.
-- **Paths in prompts.** The file-copy (`C`) and log-save prompts accept a quoted path, as Explorer's **Copy as path** produces.
+- **Paths in prompts.** The file-copy (`C`) and log-save prompts accept a quoted path, as Explorer's **Copy as path** produces. The log-save prompt suggests `%TEMP%\<pod>.log`.
+- **Pod shells.** Arrow keys, Home/End, Delete, F-keys and colours work in `s` shells and debug sessions, and Ctrl+Z goes to the pod. Ctrl+Break ends the shell, not kubetui.
+- **Downloaded file names.** A pod file whose name Windows can't hold (`:`, `<>"|?*`, a trailing dot or space, a device name such as `con` or `nul`) is saved under a cleaned-up name, and the toast says how many were renamed. Names that differ only in case land on the same file, and the toast warns when that happens.
 - **Unsigned binary.** Release binaries aren't code-signed. If SmartScreen stops `kubetui.exe` ("Windows protected your PC"), choose **More info → Run anyway**, or clear the download mark before extracting with `Unblock-File .\kubetui_<version>_windows_amd64.zip`.
 
 ---
