@@ -106,8 +106,8 @@ func (c *Cmd) Run() (retErr error) {
 		out = os.Stdout
 	}
 
-	// ctx is cancelled before Run returns only by a termination signal that
-	// interruptParent turns into the end of the session.
+	// While the stream runs, ctx is cancelled only by a termination signal that
+	// interruptParent turns into the end of the session (see sessionErr).
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -158,13 +158,25 @@ func (c *Cmd) Run() (retErr error) {
 			TerminalSizeQueue: sizeQueue,
 		})
 	})
-	if ctx.Err() != nil {
-		// Otherwise the toast reads "session ended: context canceled".
+	return sessionErr(ctx, err)
+}
+
+// sessionErr turns what the stream returned into the error Run reports.
+func sessionErr(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	// The stream hands back ctx's own error only when interruptParent cancelled
+	// it under a live session. ctx.Err() alone cannot tell: on Windows Safe's
+	// handler also runs cancel as every session ends, once the stream has
+	// returned (see interruptParent). Otherwise the toast reads "session ended:
+	// context canceled".
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 		return errors.New("shell interrupted (Ctrl+Break)")
 	}
 	// Exit 127 means the container runtime could not find a shell at all — the
 	// image has no sh (distroless/scratch/static binary). Make that actionable.
-	if err != nil && strings.Contains(err.Error(), "exit code 127") {
+	if strings.Contains(err.Error(), "exit code 127") {
 		return fmt.Errorf("no shell in this container — it may be a minimal/distroless image (%w)", err)
 	}
 	return err
@@ -205,7 +217,10 @@ func saveCrashStack(c *Cmd, r any) string {
 // Chain(parent, restore), whose notify list ends with parent.Close and whose
 // final is parent.Signal; Close spends the parent's once, so when
 // parent.Signal runs it does nothing. cancel is the final as well, so no
-// ordering can ever fall through to the os.Exit default.
+// ordering can ever fall through to the os.Exit default. Being a notify func
+// also means cancel runs when a session ends normally (Run's deferred Close),
+// after the stream has returned, so a cancelled ctx is not by itself a sign
+// that the user interrupted the shell (see sessionErr).
 func interruptParent(goos string, cancel context.CancelFunc) *interrupt.Handler {
 	if goos != "windows" {
 		return nil

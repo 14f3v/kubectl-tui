@@ -113,6 +113,9 @@ func TestInterruptParentEndsTheSessionOnWindows(t *testing.T) {
 	if !restored {
 		t.Fatal("the terminal was not restored")
 	}
+	if got := sessionErr(ctx, err); got == nil || !strings.Contains(got.Error(), "interrupted") {
+		t.Fatalf("sessionErr = %v, want the shell reported as interrupted", got)
+	}
 
 	// Whatever order a future kubectl calls them in, the Parent alone must not
 	// exit either.
@@ -120,5 +123,39 @@ func TestInterruptParentEndsTheSessionOnWindows(t *testing.T) {
 	interruptParent("windows", func() { cancelled = true }).Signal(os.Interrupt)
 	if !cancelled {
 		t.Fatal("Parent.Signal did not cancel the stream")
+	}
+}
+
+// TestInterruptParentNormalExitIsNotAnInterrupt is the other half. cancel is a
+// notify func of the Parent, so on Windows Safe's handler also runs it when a
+// session ends on its own (Run's deferred Close), after the stream has
+// returned. Run must then report what the stream returned, not "interrupted":
+// a shell left with `exit` would otherwise always toast as a Ctrl+Break, and a
+// distroless image would lose its "no shell" hint.
+func TestInterruptParentNormalExitIsNotAnInterrupt(t *testing.T) {
+	exit127 := errors.New("command terminated with exit code 127")
+	for name, tc := range map[string]struct {
+		stream error
+		want   string // substring of the reported error; "" for none
+	}{
+		"shell exited":    {nil, ""},
+		"no shell":        {exit127, "no shell in this container"},
+		"other exit code": {errors.New("command terminated with exit code 1"), "exit code 1"},
+	} {
+		ctx, cancel := context.WithCancel(context.Background())
+		h := interrupt.Chain(interruptParent("windows", cancel), func() {})
+		err := sessionErr(ctx, h.Run(func() error { return tc.stream }))
+		if ctx.Err() == nil {
+			t.Fatalf("%s: ctx was not cancelled on a normal exit; this test no longer covers that case", name)
+		}
+		switch {
+		case tc.want == "" && err != nil:
+			t.Fatalf("%s: Run reports %v, want nil", name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Fatalf("%s: Run reports %v, want an error containing %q", name, err, tc.want)
+		case err != nil && strings.Contains(err.Error(), "interrupted"):
+			t.Fatalf("%s: Run reports %v for a session nobody interrupted", name, err)
+		}
+		cancel()
 	}
 }
