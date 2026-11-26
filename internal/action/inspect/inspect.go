@@ -6,7 +6,6 @@ package inspect
 import (
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -87,7 +86,9 @@ func GroupKindFor(kind string) (schema.GroupKind, bool) {
 
 // YAML renders a cached object as YAML. managedFields are already stripped by the
 // engine transform; we deep-copy before stamping apiVersion/kind so the shared
-// cache object is never mutated.
+// cache object is never mutated. A core Secret, typed from the cache or
+// unstructured from the dynamic client, renders with its values masked (see
+// secretYAML).
 func YAML(obj any) (string, error) {
 	ro, ok := obj.(runtime.Object)
 	if !ok {
@@ -99,30 +100,14 @@ func YAML(obj any) (string, error) {
 			clone.GetObjectKind().SetGroupVersionKind(gvks[0])
 		}
 	}
-	redactSecret(clone)
+	if isSecret(clone) {
+		return secretYAML(clone)
+	}
 	b, err := yaml.Marshal(clone)
 	if err != nil {
 		return "", err
 	}
 	return string(b), nil
-}
-
-// redactSecret masks a Secret's values so the yaml view never leaks credentials.
-// Each data value becomes "<redacted: N bytes>" and stringData is dropped. The
-// argument is always a deep copy, so the shared cache object is unaffected. A
-// no-op for every other type. The reveal drill-in (enter on a secret row) reads
-// the real values straight from the cache and shows them only on demand.
-func redactSecret(obj runtime.Object) {
-	s, ok := obj.(*corev1.Secret)
-	if !ok {
-		return
-	}
-	for k, v := range s.Data {
-		s.Data[k] = []byte(fmt.Sprintf("<redacted: %d bytes>", len(v)))
-	}
-	for k := range s.StringData {
-		s.StringData[k] = "<redacted>"
-	}
 }
 
 // Describe runs the kubectl describer for a kind and object, returning its text.
