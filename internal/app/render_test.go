@@ -123,3 +123,113 @@ func TestHelpShowsWhileDirectLaunchConnects(t *testing.T) {
 		t.Errorf("closing help did not go back to the connect:\n%s", v)
 	}
 }
+
+// headerAt renders the header of a model showing id at the given width, with
+// an optional saved name, and fails if any line is wider than the terminal.
+func headerAt(t *testing.T, width int, name string, id k8s.Identity) string {
+	t.Helper()
+	m := &Model{theme: style.Default(), width: width, height: 30, name: name}
+	m.sess = &k8s.Session{Identity: id}
+	h := ansi.Strip(m.renderHeader())
+	for _, line := range strings.Split(h, "\n") {
+		if w := ansi.StringWidth(line); w > width {
+			t.Errorf("width %d: header line is %d cells: %q", width, w, line)
+		}
+	}
+	return h
+}
+
+// valueWidth is the cells a header value gets in the first column.
+func valueWidth(width int) int { return (width-4)*30/100 - 9 }
+
+// An EKS context is an ARN and a GKE one ends in the cluster name: what tells
+// two clusters apart is at the end, so a value too wide for its column keeps
+// its end and loses its start.
+func TestHeaderKeepsTheEndOfLongContexts(t *testing.T) {
+	const prefix = "arn:aws:eks:us-east-1:123456789012:cluster/"
+	for _, width := range []int{80, 120, 160} {
+		var heads []string
+		for _, name := range []string{"prod-payments", "staging-payments"} {
+			h := headerAt(t, width, "", k8s.Identity{Context: prefix + name})
+			heads = append(heads, h)
+			full := prefix + name
+			tail := full[len(full)-(valueWidth(width)-1):]
+			if !strings.Contains(h, "…"+tail) {
+				t.Errorf("width %d: header lost the end of %q (want …%s):\n%s", width, name, tail, h)
+			}
+		}
+		if heads[0] == heads[1] {
+			t.Errorf("width %d: two different clusters render the same header:\n%s", width, heads[0])
+		}
+	}
+}
+
+// The saved name of a paste takes the room first; the context is cut from its
+// start to fit what is left.
+func TestHeaderPasteNameBeatsLongContext(t *testing.T) {
+	ctx := "arn:aws:eks:us-east-1:123456789012:cluster/prod-payments"
+	h := headerAt(t, 80, "prod", k8s.Identity{Context: ctx})
+	if !strings.Contains(h, "Context  prod ") {
+		t.Errorf("the saved name is not whole:\n%s", h)
+	}
+	if strings.Contains(h, "prod (arn") {
+		t.Errorf("the context was cut from its end:\n%s", h)
+	}
+	if !strings.Contains(h, "ments)") {
+		t.Errorf("the context lost its end or its closing paren:\n%s", h)
+	}
+
+	// A name wider than the column is cut from its end, and the context goes.
+	long := strings.Repeat("n", 40)
+	h = headerAt(t, 80, long, k8s.Identity{Context: ctx})
+	if !strings.Contains(h, "Context  nnnn") || !strings.Contains(h, "…") || strings.Contains(h, "(") {
+		t.Errorf("a long name should be cut from its end, alone:\n%s", h)
+	}
+}
+
+func TestHeaderKeepsTheEndOfClusterAndUser(t *testing.T) {
+	long := "arn:aws:eks:us-east-1:123456789012:cluster/prod-payments"
+	for _, width := range []int{80, 120, 160} {
+		h := headerAt(t, width, "", k8s.Identity{Context: "c", Cluster: long, User: long})
+		n := valueWidth(width) - 1
+		want := "…" + long[len(long)-n:]
+		if got := strings.Count(h, want); got != 2 {
+			t.Errorf("width %d: cluster and user should both end in %q (found %d):\n%s", width, want, got, h)
+		}
+	}
+}
+
+// A cut that lands inside a wide rune must not leave the value a cell too wide.
+func TestKeepEndWideRunes(t *testing.T) {
+	for _, in := range []string{"日本語日本語日本", "a日本語bc日"} {
+		runes := []rune(in)
+		last := string(runes[len(runes)-1])
+		for w := 1; w <= 10; w++ {
+			got := keepEnd(in, w)
+			if sw := ansi.StringWidth(got); sw > w {
+				t.Errorf("keepEnd(%q, %d) = %q is %d cells", in, w, got, sw)
+			}
+			// The last rune must survive whenever "…" and it fit together.
+			if w >= 1+ansi.StringWidth(last) && !strings.HasSuffix(got, last) {
+				t.Errorf("keepEnd(%q, %d) = %q lost the last rune", in, w, got)
+			}
+		}
+	}
+}
+
+func TestHeaderWideRunesDoNotWrap(t *testing.T) {
+	ctx := "日本語日本語日本語日本語日本語日本語"
+	for _, width := range []int{80, 81, 120, 160} {
+		h := headerAt(t, width, "", k8s.Identity{Context: ctx, Cluster: ctx, User: ctx})
+		if !strings.Contains(h, "K8s Rev") {
+			t.Errorf("width %d: a wide value wrapped and pushed the last row out:\n%s", width, h)
+		}
+	}
+}
+
+func TestHeaderNamedPasteWithEmptyContext(t *testing.T) {
+	h := headerAt(t, 120, "prod", k8s.Identity{})
+	if strings.Contains(h, "()") || !strings.Contains(h, "Context  prod") {
+		t.Errorf("empty context:\n%s", h)
+	}
+}

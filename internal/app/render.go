@@ -408,10 +408,12 @@ func (m *Model) renderHeader() string {
 	// Each value is cut to its column: a long context (an EKS ARN, or a
 	// paste's name before it) would otherwise wrap and push the rows below
 	// it out of the header.
-	cut := func(s string) string { return ansi.Truncate(orDash(s), max(wA-9, 1), "…") }
-	ctxLabel, _ := m.contextLabel(id.Context)
+	// Two clusters differ at the end of their names (an ARN's cluster, a GKE
+	// context's last part), so a value keeps its end.
+	vw := max(wA-9, 1)
+	cut := func(s string) string { return keepEnd(orDash(s), vw) }
 	colA := []string{
-		kv("Context", cut(ctxLabel), 9, labelA, val),
+		kv("Context", m.fitContext(id.Context, vw), 9, labelA, val),
 		kv("Cluster", cut(id.Cluster), 9, labelA, val),
 		kv("User", cut(id.User), 9, labelA, val),
 		kv("Kubetui", Version, 9, labelA, dim),
@@ -452,6 +454,60 @@ func (m *Model) renderHeader() string {
 		lipgloss.NewStyle().Width(wC).Render(strings.Join(colC, "\n")),
 	)
 	return fitBlock(block, m.width, headerHeight)
+}
+
+// keepEnd fits s into w cells. When it does not fit, the start is cut and a
+// leading … stands in for it, because the end of a context, cluster or user
+// name is the part that tells one from another. s must already be sanitized,
+// so no escape sequence is split.
+func keepEnd(s string, w int) string {
+	if w < 1 {
+		w = 1
+	}
+	over := ansi.StringWidth(s) - w
+	if over <= 0 {
+		return s
+	}
+	if w == 1 {
+		return "…"
+	}
+	out := ansi.TruncateLeft(s, over+1, "…")
+	if ansi.StringWidth(out) > w {
+		// The cut fell inside a wide rune, which TruncateLeft keeps.
+		out = ansi.TruncateLeft(s, over+2, "…")
+	}
+	return out
+}
+
+// minCtxCells is the least room worth giving "(…context)" next to a saved name.
+const minCtxCells = 5
+
+// fitContext is contextLabel cut to w cells. The saved name comes first and is
+// cut (from its end: the user chose it and knows how it starts) only when it
+// alone is wider than w. The "(context)" gets what is left, cut from its start
+// to keep the end and the closing paren, and is dropped when too little is left.
+func (m *Model) fitContext(context string, w int) string {
+	context = clusters.Sanitize(context)
+	name := clusters.Sanitize(m.name)
+	if name == "" || name == context {
+		return keepEnd(orDash(context), w)
+	}
+	nw := ansi.StringWidth(name)
+	if nw >= w {
+		return ansi.Truncate(name, w, "…")
+	}
+	if context == "" {
+		return name
+	}
+	// name + " (" + ctx + ")"
+	room := w - nw - 3
+	if ansi.StringWidth(context) <= room {
+		return name + " (" + context + ")"
+	}
+	if room < minCtxCells {
+		return name
+	}
+	return name + " (" + keepEnd(context, room) + ")"
 }
 
 // renderKeyGrid lays the active page's context keys into a 2-column grid.
