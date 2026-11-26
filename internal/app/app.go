@@ -1,9 +1,9 @@
 // Package app is the root Bubble Tea model. It owns the terminal (alt-screen,
 // mouse, title), the page stack, the command line and overlays, the global
-// keymap, and panic recovery. It routes every message: key input goes to the
-// command line or the active page; engine snapshots and action results flow to
-// the page or the chrome. All IO happens in commands or engine goroutines, never
-// in Update.
+// keymap, and panic recovery. It routes every message: key and paste input go to
+// the command line or the active page; engine snapshots and action results flow
+// to the page or the chrome. All IO happens in commands or engine goroutines,
+// never in Update.
 package app
 
 import (
@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -157,6 +158,9 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return m.handleKey(t)
+
+	case tea.PasteMsg:
+		return m.handlePaste(t)
 
 	case msg.SessionReady:
 		return m.onSessionReady(t)
@@ -605,12 +609,64 @@ func (m *Model) handlePromptKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default:
 		// k.Text carries the printable character(s), including " " for space, so a
 		// prompt can accept spaces (e.g. cp's "localPath remotePath").
-		if k.Text != "" {
-			m.prompt.buf += k.Text
-			m.prompt.errMsg = ""
-		}
+		m.promptInsert(k.Text)
 		return m, nil
 	}
+}
+
+// promptInsert appends typed or pasted text to the prompt buffer. Any edit clears
+// the last validation error, since it no longer describes what is in the field.
+func (m *Model) promptInsert(s string) {
+	if s == "" {
+		return
+	}
+	m.prompt.buf += s
+	m.prompt.errMsg = ""
+}
+
+// handlePaste delivers a bracketed paste. Bubble Tea turns bracketed paste on by
+// default, so text pasted into the terminal (Ctrl+V, Cmd+V, right-click) arrives
+// as one PasteMsg rather than as key presses, and the key handlers never see it.
+// It goes to whichever text input is open, exactly as if it had been typed. With
+// none open it is gated like a key: it cannot answer a confirm dialog, and it
+// does not reach a page that is hidden behind help or an error banner.
+func (m *Model) handlePaste(p tea.PasteMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case m.panicInfo != "" || m.fatal != nil:
+		return m, nil
+	case m.prompt != nil:
+		m.promptInsert(singleLine(p.Content))
+		return m, nil
+	case m.confirm != nil:
+		return m, nil
+	case m.mode != modeNone:
+		m.inputInsert(singleLine(p.Content))
+		return m, nil
+	case m.showHelp || m.bannerUp():
+		return m, nil
+	default:
+		return m, m.routeToPage(p)
+	}
+}
+
+// singleLine flattens pasted text for a one-line input. Every line break becomes
+// one space — CRLF, a lone CR and a lone LF alike, because terminals differ in
+// which they send — so a pasted newline can never act as enter and submit a
+// half-written prompt or command. Tabs become a space too, and other control
+// characters are dropped, which defuses an escape sequence in the clipboard
+// instead of writing it to the terminal when the buffer is drawn. Quotes are left
+// alone: the path prompts strip them on submit, and elsewhere they are just text.
+func singleLine(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\r' || r == '\n' || r == '\t':
+			return ' '
+		case unicode.IsControl(r):
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // recomputeSuggest refreshes the filter suggestion list for the current buffer's
@@ -737,17 +793,25 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// non-text keys like arrows). Using it rather than String() — which renders
 		// space as "space" — lets the command/filter line accept spaces, which
 		// multi-term filters and "kind namespace" commands need.
-		if k.Text != "" {
-			m.inputBuf += k.Text
-			m.cmdSel = 0
-			if m.mode == modeFilter {
-				if p := m.active(); p != nil {
-					p.SetFilter(m.inputBuf)
-				}
-				m.recomputeSuggest()
-			}
-		}
+		m.inputInsert(k.Text)
 		return m, nil
+	}
+}
+
+// inputInsert appends typed or pasted text to the command line. The palette
+// selection resets because the match list changed under it, and in filter mode
+// the filter is re-applied live and its suggestions recomputed.
+func (m *Model) inputInsert(s string) {
+	if s == "" {
+		return
+	}
+	m.inputBuf += s
+	m.cmdSel = 0
+	if m.mode == modeFilter {
+		if p := m.active(); p != nil {
+			p.SetFilter(m.inputBuf)
+		}
+		m.recomputeSuggest()
 	}
 }
 
