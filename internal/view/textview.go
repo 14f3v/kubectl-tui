@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/14f3v/kubectl-tui/internal/clusters"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
 	"github.com/14f3v/kubectl-tui/internal/style"
 )
@@ -47,6 +48,34 @@ type PromptRequest struct {
 // SwitchContextRequest asks the root model to switch to the cluster Ref names
 // (rebuilding the Session). Emitted by the context picker.
 type SwitchContextRequest struct{ Ref k8s.ClusterRef }
+
+// ClustersLoaded delivers the picker's rows. NoStore says why paste, load-file
+// and the saved state are off ("" when they are on).
+type ClustersLoaded struct {
+	Rows    []clusters.Row
+	Err     error
+	NoStore string
+}
+
+// OpenPasteBox asks the root model to open the paste-a-kubeconfig box.
+type OpenPasteBox struct{}
+
+// AddKubeconfigFile asks the root model to remember a kubeconfig file by path.
+type AddKubeconfigFile struct{ Path string }
+
+// ForgetCluster asks the root model to remove a row's source: a pasted file is
+// deleted, a loaded file is forgotten; the file itself is never touched.
+type ForgetCluster struct{ Row clusters.Row }
+
+// ReviewCluster asks the root model to show a pasted file that has no state
+// record yet, so the user can accept it before connecting.
+type ReviewCluster struct{ Row clusters.Row }
+
+// ClusterConnectFailed tells the picker a connect to Ref failed.
+type ClusterConnectFailed struct {
+	Ref k8s.ClusterRef
+	Err string
+}
 
 // ExecRequest asks the root model to hand the terminal to a child process through
 // the TerminalGate. Exactly one of Command (an interactive tea.ExecCommand, e.g.

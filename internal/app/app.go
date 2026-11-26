@@ -23,6 +23,7 @@ import (
 	"github.com/14f3v/kubectl-tui/internal/action/dynbrowse"
 	"github.com/14f3v/kubectl-tui/internal/action/editor"
 	"github.com/14f3v/kubectl-tui/internal/action/explain"
+	"github.com/14f3v/kubectl-tui/internal/clusters"
 	"github.com/14f3v/kubectl-tui/internal/config"
 	"github.com/14f3v/kubectl-tui/internal/engine"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
@@ -338,6 +339,13 @@ func (m *Model) pushPage(p view.Page) (tea.Model, tea.Cmd) {
 	m.mode = modeNone
 	m.inputBuf = ""
 	return m, tea.Batch(p.Init(), p.OnEnter())
+}
+
+// loadClusters reads every cluster source off the UI thread. Until the saved
+// store is wired in, only the default kubeconfig and in-cluster are listed.
+func loadClusters() tea.Msg {
+	rows, err := clusters.Collect(nil)
+	return view.ClustersLoaded{Rows: rows, Err: err}
 }
 
 // popPage backs out of a drill-in. The base page is never popped.
@@ -946,7 +954,9 @@ func (m *Model) runCommand(buf string) (tea.Model, tea.Cmd) {
 			if m.sess == nil {
 				return m, nil
 			}
-			return m.pushPage(view.NewContextPicker(m.sess, m.theme))
+			cur := m.ref
+			mdl, cmd := m.pushPage(view.NewClusterPicker(m.theme, &cur, false))
+			return mdl, tea.Batch(cmd, loadClusters)
 		}
 		// Same kubeconfig as the active cluster, another context in it.
 		return m.switchContext(k8s.ClusterRef{Source: m.ref.Source, Path: m.ref.Path, Context: cmd.arg})

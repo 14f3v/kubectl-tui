@@ -29,7 +29,7 @@ func allPages(th style.Theme) map[string]Page {
 		"cronjobmenu":   newCronJobMenuPage(nil, th, "demo", "nightly", false),
 		"nodeops":       newNodeOpsPage(nil, th, "node-1", false),
 		"rollout":       newRolloutPage(nil, th, "deployments", "demo", "web", false),
-		"contextpicker": &contextPickerPage{theme: th, contexts: []string{"kind-a", "kind-b"}, current: "kind-a"},
+		"clusterpicker": NewClusterPicker(th, nil, true),
 		"portforwards":  &pfPage{theme: th},
 		"secretreveal":  &secretRevealPage{theme: th, namespace: "demo", name: "creds", stype: "Opaque"},
 		"whoami":        &whoamiPage{theme: th, namespace: "demo"},
