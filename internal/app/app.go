@@ -1,9 +1,9 @@
 // Package app is the root Bubble Tea model. It owns the terminal (alt-screen,
-// mouse, title), the page stack, the command line and overlays, the global
-// keymap, and panic recovery. It routes every message: key and paste input go to
-// the command line or the active page; engine snapshots and action results flow
-// to the page or the chrome. All IO happens in commands or engine goroutines,
-// never in Update.
+// title), the page stack, the command line and overlays, the global keymap, and
+// panic recovery. It routes every message: key and paste input go to the command
+// line or the active page; engine snapshots and action results flow to the page
+// or the chrome. All IO happens in commands or engine goroutines, never in
+// Update.
 package app
 
 import (
