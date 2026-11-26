@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/14f3v/kubectl-tui/internal/action/write"
+	"github.com/14f3v/kubectl-tui/internal/clusters"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
 	"github.com/14f3v/kubectl-tui/internal/style"
 )
@@ -144,8 +145,10 @@ func (p *whoamiPage) View(width, height int) string {
 	}
 	var b strings.Builder
 
+	// The values come from the kubeconfig and the server: drawn through
+	// clusters.Sanitize so none of them can move the cursor.
 	row := func(k, v string) {
-		b.WriteString(t.Dim.Render(pad("  "+k, 16)) + t.Base.Render(dashOr(v)) + "\n")
+		b.WriteString(t.Dim.Render(pad("  "+k, 16)) + t.Base.Render(dashOr(clusters.Sanitize(v))) + "\n")
 	}
 	b.WriteString(t.ColHeader.Render("  CONTEXT") + "\n")
 	row("context", id.Context)

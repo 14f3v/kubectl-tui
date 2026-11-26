@@ -43,11 +43,22 @@ type SessionReady struct {
 	// Session is typed as any to avoid importing the k8s package here (which would
 	// create an import cycle); the root model type-asserts it.
 	Session any
+	// Token is the bootstrap's; a result whose token is no longer current is stale.
+	Token int
+	// Saved is what state.yaml remembers of the cluster, a *clusters.Entry (nil
+	// when nothing), read by the bootstrap so the view to restore is at hand
+	// without IO in Update. Typed as any for the same reason as Session.
+	Saved any
 }
 
 // SessionError is delivered when a Session fails to bootstrap.
 type SessionError struct {
 	Err error
+	// Token is the bootstrap's, as on SessionReady.
+	Token int
+	// Ref is the k8s.ClusterRef that failed, typed as any for the same reason as
+	// SessionReady.Session.
+	Ref any
 }
 
 // LogBatch delivers a coalesced batch of new log lines for a log session, plus

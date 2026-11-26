@@ -7,7 +7,7 @@ type command struct {
 	verb      string // "nav" | "ctx" | "quit" | "noop"
 	kind      string // resource alias for nav
 	namespace string // optional namespace for nav
-	arg       string // argument for ctx (context name)
+	arg       string // argument for ctx (a cluster's display name)
 }
 
 // parseCommand parses a command-line string into a command. The grammar is
@@ -23,9 +23,9 @@ func parseCommand(s string) command {
 		return command{verb: "quit"}
 	case "ctx", "context":
 		c := command{verb: "ctx"}
-		if len(fields) > 1 {
-			c.arg = fields[1] // preserve case for the context name
-		}
+		// The rest of the line, case kept: a pasted cluster's name is
+		// "name / context".
+		c.arg = strings.Join(fields[1:], " ")
 		return c
 	case "apply", "create":
 		return command{verb: "apply"}

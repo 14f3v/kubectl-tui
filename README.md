@@ -121,10 +121,11 @@ go build -o kubetui.exe ./cmd/kubetui
 ## Quick start
 
 ```bash
-# Use your current-context from ~/.kube/config (or $KUBECONFIG)
+# Pick a cluster: the contexts in ~/.kube/config (or $KUBECONFIG), plus any
+# kubeconfig you pasted into kubetui or loaded from a file
 kubetui
 
-# Point at a specific kubeconfig and/or context
+# Connect straight to a kubeconfig file (remembered for the picker) and/or a context
 kubetui -kubeconfig /path/to/kubeconfig
 kubetui -context staging
 
@@ -142,14 +143,20 @@ Then:
 
 | Flag | Default | Description |
 |---|---|---|
-| `-kubeconfig <path>` | — | kubeconfig file (overrides `$KUBECONFIG` and `~/.kube/config`) |
-| `-context <name>` | current-context | kubeconfig context to use |
-| `-kind <kind>` | `pods` | initial resource view |
+| `-kubeconfig <path>` | — | connect directly with this kubeconfig file (overrides `$KUBECONFIG` and `~/.kube/config`); kubetui remembers it in the cluster picker |
+| `-context <name>` | the file's current-context | connect directly to this context, of `-kubeconfig` or else of your default kubeconfig |
+| `-kind <kind>` | the view you left the cluster on, else `pods` | resource view the first cluster opens on; clusters you switch to later open where you left them |
 | `-version` | — | print version and exit |
 
 ---
 
 ## Usage
+
+### Starting
+
+Plain `kubetui` opens the **cluster picker** (the one `:ctx` opens, see [Namespaces & contexts](#namespaces--contexts)) with the cluster you used last under the cursor, so going back to it is one `enter`; the first time, before you have used any, the cursor is on your kubeconfig's current-context. It lists the contexts in your kubeconfig and the kubeconfigs you pasted or loaded. A set `$KUBECONFIG` changes which contexts are listed; it does not skip the picker. With nothing to list, kubetui opens the paste box. Until a cluster is connected only the picker's keys, `?` and `q` work. A connect that fails leaves the picker up, with the error under that cluster's row, or above the list for a cluster that has no row (a `-context` your kubeconfig does not have). Whatever the picker could not read (a kubeconfig that does not load, an unreadable `state.yaml`) it says above the list, and it lists everything else.
+
+`-kubeconfig` and `-context` skip the picker and connect directly. A `-kubeconfig` file is remembered by its absolute path, so the picker lists it from then on. If a direct connect fails, kubetui opens the picker and says why.
 
 ### The command line (`:`)
 
@@ -208,7 +215,14 @@ An unknown `col:` is treated as literal text (so `nginx:1.25` matches that image
 
 - `0`–`9` — jump namespace: `0` = all namespaces, `1`–`9` = your configured favorites (see [Configuration](#configuration)).
 - `enter` on a **namespace** row — open that namespace's pods.
-- `:ctx` — open the **context picker** (or `:ctx <name>` to switch directly). Switching rebuilds the session.
+- Each cluster opens where you left it: on the same view (`:deploy`, `:svc`, …) and namespace, after a switch, after `r` on the expired-credentials banner, and the next time you start kubetui. A cluster you have not used yet opens on pods in its context's namespace (all namespaces if the context names none). `-kind` picks the view of the first cluster only.
+- `:ctx` — open the **cluster picker**: every cluster kubetui knows (each context of your kubeconfig, kubeconfigs you pasted, and files you loaded), most recently used first, with `●` on the one you are on. `enter` connects, `p` pastes a kubeconfig, `f` loads a kubeconfig file by path, `ctrl+d` removes a saved entry and `esc` goes back.
+  - `p` opens the **paste box**: paste a kubeconfig into it (the terminal's paste, e.g. `ctrl+shift+v` or right-click). The box never shows the text, only how much arrived, the contexts it found with their servers, and any problem; `↑`/`↓` picks the context to connect to. `ctrl+s` asks for a name (the context's, to start with; up to 64 characters), saves the kubeconfig in kubetui's own folder (see [Saved kubeconfigs](#saved-kubeconfigs)) and connects; `esc` cancels, asking first if anything was pasted. The name labels the cluster in the picker and, once connected, in the header and the window title next to its context, which tells apart the many pastes whose context is called `default`. Pasting a saved kubeconfig again under a new name renames it rather than saving a copy. A kubeconfig that runs a login command, reads files on your computer, logs in through an auth-provider or skips TLS verification is shown for review first, with secret values hidden, and a second `ctrl+s` saves it. That `ctrl+s` works only while the whole review is on the screen; on a short window kubetui asks you to make it taller. One that points to certificate or token files by a relative path is refused, since the path would break once saved; export a self-contained copy with `kubectl config view --raw --flatten --minify --context <name>`.
+  - A file in that folder that kubetui has no record of (one copied in by hand, say) is listed as "needs review", and `enter` on it shows the same review before anything in it runs.
+  - `f` takes a path as you would type it in a shell, a leading `~/` included. A file loaded with `f` is remembered by its absolute path, not copied, so later edits to it are picked up. Removing it only forgets the path; the file is left alone.
+  - Contexts from your kubeconfig cannot be removed, since kubetui never edits that file. The cluster you are connected to cannot be removed either: switch to another one first.
+  - `:ctx <name>` switches directly when exactly one cluster has that name (the name shown in the picker, or a context name). If several do, it opens the picker on the first of them.
+  - The current cluster stays up while the new one connects, and esc cancels the connect, as does picking the cluster you are on. A failed connect leaves you where you were and says why: on its row while the picker is open, otherwise (as after `:ctx <name>` on a resource page) as a toast. Switching closes your port-forwards, so kubetui asks first when any are open.
 
 ### Resource actions
 
@@ -314,7 +328,7 @@ The secrets table only shows the type and data-key count. `enter` opens a reveal
 | `:nodetop` | `topnodes` | Node CPU/memory usage |
 | `:explain <kind[.field]>` | `exp` | OpenAPI field docs (e.g. `:explain pod.spec.containers`) |
 | `:api-resources` · `:api-versions` | — | Served resources / group-versions |
-| `:ctx` | `context` | Context picker (or `:ctx <name>`) |
+| `:ctx` | `context` | Cluster picker: every saved cluster (or `:ctx <name>`) |
 | `:whoami` | `auth` | Identity + access review |
 | `:tenants` | `tnt` | Capsule tenant dashboard |
 | `:q` | `quit`, `exit` | Quit |
@@ -357,6 +371,12 @@ favorites:              # namespaces on digit keys 1-9
 | `tierLabel` | `tier` | tenant label key for the TIER column |
 | `favorites` | — | namespaces surfaced by the `1`–`9` keys |
 
+### Saved kubeconfigs
+
+Kubeconfigs you paste into kubetui are stored in **`clusters/`** next to the config file (`~/.config/kubetui/clusters/`, or `$XDG_CONFIG_HOME/kubetui/clusters/`). The folder is private to you (mode `0700`, files `0600` on Unix) and holds a `.gitignore` of `*` so a dotfiles repo never picks the credentials up. kubetui never writes `~/.kube/config`, your `$KUBECONFIG` files or a `--kubeconfig` file.
+
+Beside `clusters/`, **`state.yaml`** lists the clusters kubetui knows and, for each, when you last used it and the view and namespace you were on. It holds names, paths, positions and the login commands you approved for a pasted kubeconfig, never credentials. A missing one is fine, and a malformed one is moved aside to `state.yaml.bad`. One kubetui cannot read never stops it: the picker says so and lists everything else, with your pasted kubeconfigs marked "needs review" until it can be read again. If it can't be written (a read-only or full config folder), kubetui says so once while it runs, tries again on exit and prints the error there if that fails too.
+
 ### Read-only mode
 
 `readOnly: true` makes kubetui behave exactly as a read-only ServiceAccount would:
@@ -377,7 +397,7 @@ or an upload can change a container from the inside), and **`p` port-forward**.
 
 ## Requirements & authentication
 
-- **A kubeconfig.** Resolution order: `-kubeconfig` flag → `$KUBECONFIG` (a list of files, merged; separate them with `:` on Linux/macOS and `;` on Windows) → `~/.kube/config`. `-context` overrides the current-context; `:ctx` switches live.
+- **A kubeconfig**, or one pasted into kubetui. Resolution order: `-kubeconfig` flag (connects directly) → `$KUBECONFIG` (a list of files, merged; separate them with `:` on Linux/macOS and `;` on Windows) → `~/.kube/config`. Without `-kubeconfig` or `-context` kubetui opens the cluster picker, which lists the contexts found that way next to your pasted and loaded kubeconfigs. `-context` connects directly to that context; `:ctx` switches live.
 - **Standard auth is supported** — client certificates, tokens, OIDC, and **exec credential plugins** (Teleport `tsh`, `aws eks get-token`, `gke-gcloud-auth-plugin`, etc.) all work through client-go's normal config resolution.
 - **RBAC.** kubetui only does what your credentials allow; a forbidden resource shows a clear banner rather than failing. Mutating actions preflight a `SelfSubjectAccessReview` where possible.
 - **Metrics** (CPU/MEM columns, cluster gauges) require `metrics-server`; they're simply absent otherwise.
@@ -392,7 +412,9 @@ kubetui is a native Windows console app for **Windows 10 1809+ and Windows Serve
 - **Terminal.** Use **Windows Terminal** (the default on current Windows 11). The classic console window that PowerShell and cmd open on older systems works, but its fonts lack some of the symbols kubetui draws, so they show as boxes. On a Chinese, Japanese or Korean system code page it also draws the table and border glyphs two cells wide, which misaligns columns and boxes. Windows Terminal has neither problem.
 - **Git Bash / mintty.** Recent Git for Windows releases run console programs on a pseudo console (ConPTY), and kubetui works there. Without one (an older Git Bash, or with pseudo console support turned off) you get a blank screen that ignores keys: run kubetui from Windows Terminal, or as `winpty kubetui`.
 - **kubeconfig.** Found the same way kubectl finds it (normally `%USERPROFILE%\.kube\config`). `KUBECONFIG` takes a `;`-separated list on Windows, not `:`.
+- **Pasting a kubeconfig.** Windows Terminal hands a paste to the paste box in one piece. The classic console window types it in key by key instead, which is slow and not reliable for a whole kubeconfig: there, save it to a file and load it with `f` in the cluster picker, or use Windows Terminal.
 - **Config file.** `%XDG_CONFIG_HOME%\kubetui\config.yaml` if that variable is set, otherwise `%USERPROFILE%\.config\kubetui\config.yaml` — `%USERPROFILE%` even when `%HOME%` is set and kubectl reads its kubeconfig from there.
+- **Saved kubeconfigs.** The `clusters/` and `state.yaml` files live in the same folder as the config file, `%XDG_CONFIG_HOME%\kubetui\` if that variable is set, otherwise `%USERPROFILE%\.config\kubetui\`. Windows has no `0700`/`0600`: the files rely on the folder's inherited ACL, which under `%USERPROFILE%` is limited to you, SYSTEM and Administrators. If `XDG_CONFIG_HOME` points outside your profile (say a shared drive), check who can read that folder, since kubetui does not change its ACL.
 - **Editor.** `e` and `:apply` open `KUBE_EDITOR`, else `EDITOR`, else Notepad. kubetui waits for the editor to exit, so a GUI editor needs its wait flag: `$env:EDITOR = 'code --wait'`. Quote a program path that has spaces: `$env:EDITOR = '"C:\Program Files\Notepad++\notepad++.exe" -multiInst'`.
 - **Paths in prompts.** The file-copy (`C`) and log-save prompts accept a quoted path, as Explorer's **Copy as path** produces. The log-save prompt suggests `%TEMP%\<pod>.log`.
 - **Pod shells.** Arrow keys, Home/End, Delete, F-keys and colours work in `s` shells and debug sessions, and Ctrl+Z goes to the pod. Ctrl+Break ends the shell, not kubetui.
@@ -436,7 +458,7 @@ Adding a new **built-in** kind is a `columns/<kind>.go` projector plus a line in
 ## Notes
 
 - Built with `charm.land/bubbletea`, `charm.land/lipgloss`, `charm.land/bubbles` (v2) and `k8s.io/client-go`.
-- kubeconfigs and secrets are never written to disk by kubetui; `.gitignore` excludes local kubeconfig files.
+- Pasted kubeconfigs are saved under the `clusters/` folder, readable only by you, like `~/.kube/config`. kubetui never writes your own kubeconfig files (client-go's oidc provider refreshing tokens excepted). Secret values are never written to disk. `.gitignore` excludes local kubeconfig files.
 
 ## License
 

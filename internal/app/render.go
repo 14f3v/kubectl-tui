@@ -10,8 +10,10 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/14f3v/kubectl-tui/internal/clusters"
 	"github.com/14f3v/kubectl-tui/internal/component"
 	"github.com/14f3v/kubectl-tui/internal/engine"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
 	"github.com/14f3v/kubectl-tui/internal/msg"
 	"github.com/14f3v/kubectl-tui/internal/view"
 )
@@ -34,20 +36,39 @@ func (m *Model) View() tea.View {
 	return v
 }
 
+// windowTitle is "user@cluster — kubetui", or for a paste saved under its own
+// name "user@name (context) — kubetui". Bubble Tea writes it inside an OSC 2
+// with no filtering, so every part from the kubeconfig goes through
+// clusters.Sanitize: a BEL in a user name would end the sequence and send the
+// rest, a clipboard write say, to the terminal raw.
 func (m *Model) windowTitle() string {
 	if m.sess == nil {
 		return "kubetui"
 	}
 	id := m.sess.Identity
-	who := id.User
+	who := clusters.Sanitize(id.User)
 	if who == "" {
 		who = "kube"
 	}
-	where := id.Cluster
-	if where == "" {
-		where = id.Context
+	where, named := m.contextLabel(id.Context)
+	if !named {
+		if where = clusters.Sanitize(id.Cluster); where == "" {
+			where = clusters.Sanitize(id.Context)
+		}
 	}
 	return who + "@" + where + " — kubetui"
+}
+
+// contextLabel is how the header names the context on screen: "name (context)"
+// for a paste saved under a name of its own, which is what tells apart pastes
+// that all call their context "default", else the context. named says the
+// saved name is in it. Both parts are drawn through clusters.Sanitize.
+func (m *Model) contextLabel(context string) (label string, named bool) {
+	context = clusters.Sanitize(context)
+	if name := clusters.Sanitize(m.name); name != "" && name != context {
+		return name + " (" + context + ")", true
+	}
+	return context, false
 }
 
 func (m *Model) render() string {
@@ -59,10 +80,8 @@ func (m *Model) render() string {
 		return m.renderPanic()
 	case m.fatal != nil:
 		return m.renderFatal()
-	case m.booting || m.sess == nil:
-		body := m.theme.Base.Render("connecting to cluster…") + "\n\n" +
-			m.theme.Faint.Render("press q to cancel")
-		return m.renderCentered(body, m.theme.Dim)
+	case m.beforeConnect():
+		return m.renderNoSession()
 	}
 
 	cmd := m.renderCommandBar()
@@ -70,11 +89,7 @@ func (m *Model) render() string {
 	crumb := m.renderBreadcrumb()
 	footer := m.renderFooter()
 
-	contentH := m.height - 1 - headerHeight - 1 - 1
-	if contentH < 1 {
-		contentH = 1
-	}
-	content := m.renderContent(contentH)
+	content := m.renderContent(m.contentHeight())
 
 	frame := strings.Join([]string{cmd, header, crumb, content, footer}, "\n")
 
@@ -87,6 +102,38 @@ func (m *Model) render() string {
 		frame = m.overlayFilterSuggest(frame)
 	}
 	return frame
+}
+
+// renderNoSession draws the screen before the first connect: a title line, the
+// content area and the toast line, with no header or breadcrumb, which describe
+// a Session. The content area holds the launch picker, every dialog it opens
+// (the paste box, the f prompt, the remove confirm) and help. A direct launch
+// has no picker while it connects, so it shows only that.
+func (m *Model) renderNoSession() string {
+	t := m.theme
+	// Help shows over the connect too: drawn behind it, ? would turn help on
+	// unseen, and the next q would only close it.
+	if m.active() == nil && m.paste == nil && m.prompt == nil && m.confirm == nil && !m.showHelp {
+		body := t.Base.Render("connecting to cluster…") + "\n\n" + t.Faint.Render("press q to cancel")
+		return m.renderCentered(body, t.Dim)
+	}
+	title := fitLine(" "+t.AccentText.Bold(true).Render("kubetui")+t.Faint.Render(" · pick a cluster"), m.width)
+	foot := fitLine("", m.width)
+	if m.toast != nil {
+		foot = m.renderToast()
+	}
+	return strings.Join([]string{title, m.renderContent(m.contentHeight()), foot}, "\n")
+}
+
+// contentHeight is the height render gives the content area, which holds the
+// page, the dialogs and the paste box: the screen less the title and toast
+// lines before the first connect, less the command bar, header, breadcrumb
+// and footer after it.
+func (m *Model) contentHeight() int {
+	if m.beforeConnect() {
+		return max(m.height-2, 1)
+	}
+	return max(m.height-1-headerHeight-1-1, 1)
 }
 
 // overlayPalette splices the command palette box onto the frame's lines starting
@@ -332,9 +379,19 @@ func (m *Model) renderCommandBar() string {
 
 // ---- header ----
 
+// renderHeader draws the identity of the cluster on screen, the page's counts
+// and gauges, and its keys. The identity comes from the kubeconfig (and the
+// version from the server), so it is drawn through clusters.Sanitize: a CR in a
+// context name would move the cursor back over the header.
 func (m *Model) renderHeader() string {
 	t := m.theme
-	id := m.sess.Identity
+	var id k8s.Identity // blank before the first connect
+	if m.sess != nil {
+		id = m.sess.Identity
+	}
+	for _, f := range []*string{&id.Context, &id.Cluster, &id.User, &id.Namespace, &id.K8sVersion} {
+		*f = clusters.Sanitize(*f)
+	}
 	usable := m.width - 4
 	if usable < 12 {
 		usable = 12
@@ -348,12 +405,19 @@ func (m *Model) renderHeader() string {
 	val := t.Base
 	dim := t.Dim
 
+	// Each value is cut to its column: a long context (an EKS ARN, or a
+	// paste's name before it) would otherwise wrap and push the rows below
+	// it out of the header.
+	// Two clusters differ at the end of their names (an ARN's cluster, a GKE
+	// context's last part), so a value keeps its end.
+	vw := max(wA-9, 1)
+	cut := func(s string) string { return keepEnd(orDash(s), vw) }
 	colA := []string{
-		kv("Context", orDash(id.Context), 9, labelA, val),
-		kv("Cluster", orDash(id.Cluster), 9, labelA, val),
-		kv("User", orDash(id.User), 9, labelA, val),
+		kv("Context", m.fitContext(id.Context, vw), 9, labelA, val),
+		kv("Cluster", cut(id.Cluster), 9, labelA, val),
+		kv("User", cut(id.User), 9, labelA, val),
 		kv("Kubetui", Version, 9, labelA, dim),
-		kv("K8s Rev", orDash(id.K8sVersion), 9, labelA, dim),
+		kv("K8s Rev", cut(id.K8sVersion), 9, labelA, dim),
 	}
 
 	nsLabel := id.Namespace
@@ -390,6 +454,60 @@ func (m *Model) renderHeader() string {
 		lipgloss.NewStyle().Width(wC).Render(strings.Join(colC, "\n")),
 	)
 	return fitBlock(block, m.width, headerHeight)
+}
+
+// keepEnd fits s into w cells. When it does not fit, the start is cut and a
+// leading … stands in for it, because the end of a context, cluster or user
+// name is the part that tells one from another. s must already be sanitized,
+// so no escape sequence is split.
+func keepEnd(s string, w int) string {
+	if w < 1 {
+		w = 1
+	}
+	over := ansi.StringWidth(s) - w
+	if over <= 0 {
+		return s
+	}
+	if w == 1 {
+		return "…"
+	}
+	out := ansi.TruncateLeft(s, over+1, "…")
+	if ansi.StringWidth(out) > w {
+		// The cut fell inside a wide rune, which TruncateLeft keeps.
+		out = ansi.TruncateLeft(s, over+2, "…")
+	}
+	return out
+}
+
+// minCtxCells is the least room worth giving "(…context)" next to a saved name.
+const minCtxCells = 5
+
+// fitContext is contextLabel cut to w cells. The saved name comes first and is
+// cut (from its end: the user chose it and knows how it starts) only when it
+// alone is wider than w. The "(context)" gets what is left, cut from its start
+// to keep the end and the closing paren, and is dropped when too little is left.
+func (m *Model) fitContext(context string, w int) string {
+	context = clusters.Sanitize(context)
+	name := clusters.Sanitize(m.name)
+	if name == "" || name == context {
+		return keepEnd(orDash(context), w)
+	}
+	nw := ansi.StringWidth(name)
+	if nw >= w {
+		return ansi.Truncate(name, w, "…")
+	}
+	if context == "" {
+		return name
+	}
+	// name + " (" + ctx + ")"
+	room := w - nw - 3
+	if ansi.StringWidth(context) <= room {
+		return name + " (" + context + ")"
+	}
+	if room < minCtxCells {
+		return name
+	}
+	return name + " (" + keepEnd(context, room) + ")"
 }
 
 // renderKeyGrid lays the active page's context keys into a 2-column grid.
@@ -432,7 +550,7 @@ func (m *Model) renderBreadcrumb() string {
 		return fitLine("", m.width)
 	}
 	sum := p.Summary()
-	ns := p.Namespace()
+	ns := clusters.Sanitize(p.Namespace()) // the first one is the kubeconfig's
 	if ns == "" {
 		ns = "all"
 	}
@@ -487,7 +605,9 @@ func (m *Model) renderToast() string {
 	case msg.LevelError:
 		col = t.Pal.Err
 	}
-	return fitLine(lipgloss.NewStyle().Foreground(col).Render("• "+m.toast.Text), m.width)
+	// A toast is one line, and it often quotes a name or an error: line breaks
+	// become spaces and other control characters go, as in a pasted prompt.
+	return fitLine(lipgloss.NewStyle().Foreground(col).Render("• "+singleLine(m.toast.Text)), m.width)
 }
 
 // ---- content ----
@@ -498,6 +618,9 @@ func (m *Model) renderContent(h int) string {
 	}
 	if m.confirm != nil {
 		return m.renderConfirm(h)
+	}
+	if m.paste != nil {
+		return m.renderPasteBox(h)
 	}
 	if m.showHelp {
 		return m.renderHelp(h)
@@ -598,7 +721,7 @@ func (m *Model) renderHelp(h int) string {
 	b.WriteString(t.AccentText.Bold(true).Render("kubetui — keys"))
 	b.WriteString("\n\n")
 	globals := [][2]string{
-		{":", "command line (:pods, :ns, :q)"},
+		{":", "command line (:pods, :ns, :ctx, :q)"},
 		{"/", filterHelpText(m.active())},
 		{"j/k ↑/↓", "move cursor"},
 		{"g/G", "top / bottom"},
@@ -606,6 +729,14 @@ func (m *Model) renderHelp(h int) string {
 		{"?", "toggle this help"},
 		{"esc", "back / clear filter"},
 		{"q", "quit"},
+	}
+	if m.beforeConnect() {
+		// Only the picker's keys, ? and q work yet.
+		globals = [][2]string{
+			{"j/k ↑/↓", "move cursor"},
+			{"?", "toggle this help"},
+			{"q", "quit"},
+		}
 	}
 	for _, g := range globals {
 		b.WriteString(t.PinkText.Render(padRight(g[0], 12)) + t.Dim.Render(g[1]) + "\n")
@@ -623,11 +754,13 @@ func (m *Model) renderHelp(h int) string {
 
 // ---- fatal / panic / centered ----
 
+// renderFatal is for an internal error only: a failed connect returns to the
+// cluster picker instead.
 func (m *Model) renderFatal() string {
 	t := m.theme
-	body := lipgloss.NewStyle().Foreground(t.Pal.Err).Bold(true).Render("could not connect to the cluster") +
+	body := lipgloss.NewStyle().Foreground(t.Pal.Err).Bold(true).Render("internal error") +
 		"\n\n" + t.Dim.Render(m.fatal.Error()) +
-		"\n\n" + t.Faint.Render("check your kubeconfig / context, then restart · q to quit")
+		"\n\n" + t.Faint.Render("q to quit")
 	return m.renderCentered(body, t.Base)
 }
 

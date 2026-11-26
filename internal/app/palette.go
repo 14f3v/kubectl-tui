@@ -10,7 +10,7 @@ import (
 // appCommands are the `:` verbs the view registry doesn't know about (they are
 // handled directly by runCommand rather than being pages).
 var appCommands = []view.Command{
-	{Name: "ctx", Desc: "switch kube-context (:ctx opens a picker)"},
+	{Name: "ctx", Desc: "switch to any saved cluster"},
 	{Name: "crds", Aliases: []string{"crd"}, Desc: "browse CustomResourceDefinitions and custom resources"},
 	{Name: "apply", Aliases: []string{"create"}, Desc: "apply YAML from $EDITOR (any kind, incl. CRDs)"},
 	{Name: "q", Aliases: []string{"quit", "exit"}, Desc: "quit kubetui"},

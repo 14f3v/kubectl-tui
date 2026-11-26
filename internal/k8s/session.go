@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	// Blank import registers the legacy auth providers (gcp/azure/oidc). Exec
@@ -69,6 +70,7 @@ type Session struct {
 	Engine   *engine.Engine
 	Forwards *portfwd.Manager
 	Identity Identity
+	Ref      ClusterRef // what this Session connects to; a reconnect rebuilds it
 
 	contexts []string // available kubeconfig context names, sorted
 
@@ -82,30 +84,57 @@ func (s *Session) Contexts() (names []string, current string) {
 	return s.contexts, s.Identity.Context
 }
 
-// NewSession loads the kubeconfig and builds the clients, then registers the
-// engine factories. It does not start any informer; pages start kinds lazily.
+// NewSession loads the kubeconfig ref names and builds the clients, then
+// registers the engine factories. It does not start any informer; pages start
+// kinds lazily.
 //
-// Config resolution, in precedence order: an explicit kubeconfigPath (empty to
-// skip) wins; otherwise the KUBECONFIG environment variable (a list of files,
-// merged; ':'-separated on unix, ';' on Windows); otherwise ~/.kube/config.
-// contextName overrides the current-context when non-empty.
-// readOnly wraps every client's transport so mutating requests are refused
+// An in-cluster ref uses the pod's service account. Any other ref uses client-go's
+// default loading rules: ref.Path, when set, is the only file read (no
+// $KUBECONFIG merging); otherwise the KUBECONFIG environment variable (a list of
+// files, merged; ':'-separated on unix, ';' on Windows), else ~/.kube/config.
+// ref.Context overrides the current-context, so the Session connects to the
+// context the ref names whatever the file says.
+// opts.ReadOnly wraps every client's transport so mutating requests are refused
 // before they leave the process; see readonly.go for why the boundary lives
 // there rather than in the pages.
-func NewSession(parent context.Context, kubeconfigPath, contextName string, readOnly bool, sink engine.Sink) (*Session, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if kubeconfigPath != "" {
-		loadingRules.ExplicitPath = kubeconfigPath
+func NewSession(parent context.Context, ref ClusterRef, opts Options) (*Session, error) {
+	var (
+		restCfg *rest.Config
+		err     error
+		idCfg   clientcmd.ClientConfig // describes the context; nil in-cluster
+	)
+	if ref.Source == SourceInCluster {
+		restCfg, err = rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("load in-cluster config: %w", err)
+		}
+	} else {
+		loadingRules := loadingRules(ref.Path)
+		overrides := &clientcmd.ConfigOverrides{CurrentContext: ref.Context}
+		cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
+		restCfg, err = cc.ClientConfig()
+		if err != nil {
+			return nil, fmt.Errorf("load kubeconfig: %w", err)
+		}
+		// DeferredLoadingClientConfig cannot report the override-merged config, so
+		// identity and the context list come from a direct config over the same
+		// rules and overrides.
+		idCfg = cc
+		if raw, err := loadingRules.Load(); err == nil {
+			idCfg = clientcmd.NewNonInteractiveClientConfig(*raw, overrides.CurrentContext, overrides, loadingRules)
+		}
 	}
-	overrides := &clientcmd.ConfigOverrides{}
-	if contextName != "" {
-		overrides.CurrentContext = contextName
-	}
-	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
-
-	restCfg, err := cc.ClientConfig()
-	if err != nil {
-		return nil, fmt.Errorf("load kubeconfig: %w", err)
+	// A pasted kubeconfig may run only the login commands the user approved when
+	// saving it; anything else (or nothing approved) is refused.
+	if ref.Source == SourcePasted && restCfg.ExecProvider != nil {
+		pol := clientcmdapi.PluginPolicy{PolicyType: clientcmdapi.PluginPolicyDenyAll}
+		if len(opts.ApprovedExec) > 0 {
+			pol.PolicyType = clientcmdapi.PluginPolicyAllowlist
+			for _, c := range opts.ApprovedExec {
+				pol.Allowlist = append(pol.Allowlist, clientcmdapi.AllowlistEntry{Command: c})
+			}
+		}
+		restCfg.ExecProvider.PluginPolicy = pol
 	}
 	// Bound client-side timeouts keep the UI responsive; watches set their own.
 	restCfg.QPS = 50
@@ -114,7 +143,7 @@ func NewSession(parent context.Context, kubeconfigPath, contextName string, read
 	// Install the read-only guard before any client is built, so every one of them
 	// inherits it — including the SPDY and WebSocket transports used by exec,
 	// attach and port-forward.
-	if readOnly {
+	if opts.ReadOnly {
 		restCfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
 			return readOnlyRoundTripper{base: rt}
 		})
@@ -140,13 +169,18 @@ func NewSession(parent context.Context, kubeconfigPath, contextName string, read
 		Dyn:     dyn,
 		Disco:   cs.Discovery(),
 		Metrics: metrics,
-		Engine:  engine.NewEngine(ctx, sink),
+		Engine:  engine.NewEngine(ctx, opts.Sink),
+		Ref:     ref,
 		ctx:     ctx,
 		cancel:  cancel,
 	}
-	s.Forwards = portfwd.NewManager(restCfg, cs, sink)
-	s.Identity = deriveIdentity(cc, restCfg)
-	s.contexts = contextNames(cc)
+	s.Forwards = portfwd.NewManager(restCfg, cs, opts.Sink)
+	if idCfg != nil {
+		s.Identity = deriveIdentity(idCfg, restCfg)
+		s.contexts = contextNames(idCfg)
+	} else {
+		s.Identity = Identity{Server: restCfg.Host} // in-cluster: only the server is known
+	}
 	s.registerFactories()
 	return s, nil
 }
@@ -184,18 +218,25 @@ func (s *Session) Context() context.Context {
 // Dispose cancels the context and stops every engine store and port-forward.
 // After Dispose the Session must not be reused.
 func (s *Session) Dispose() {
-	s.Forwards.StopAll()
-	s.Engine.StopAll()
-	s.cancel()
+	if s.Forwards != nil {
+		s.Forwards.StopAll()
+	}
+	if s.Engine != nil {
+		s.Engine.StopAll()
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
 }
 
 // RefreshServerVersion queries /version for the cluster's Kubernetes version and
 // updates Identity. It is bounded by an 8s timeout so an unreachable cluster
 // cannot stall startup indefinitely (client-go's ServerVersion() takes no
-// context). Best-effort; safe to ignore the error. Must be called before the
-// Session is handed to the UI so the Identity write is not raced by rendering.
-func (s *Session) RefreshServerVersion() error {
-	ctx, cancel := context.WithTimeout(s.ctx, 8*time.Second)
+// context), and cancelling ctx stops it sooner. Best-effort; safe to ignore the
+// error. Must be called before the Session is handed to the UI so the Identity
+// write is not raced by rendering.
+func (s *Session) RefreshServerVersion(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	body, err := s.Disco.RESTClient().Get().AbsPath("/version").Do(ctx).Raw()
 	if err != nil {
@@ -316,11 +357,19 @@ func nsOrAll(ns string) string {
 	return ns
 }
 
-// deriveIdentity extracts the header identity from the raw kubeconfig and the
-// resolved rest.Config.
+// deriveIdentity extracts the header identity from the kubeconfig with the
+// caller's overrides applied (MergedRawConfig), so a --context or :ctx choice is
+// what the header describes, not the file's current-context, and the resolved
+// rest.Config.
 func deriveIdentity(cc clientcmd.ClientConfig, restCfg *rest.Config) Identity {
 	id := Identity{Server: restCfg.Host}
-	raw, err := cc.RawConfig()
+	var raw clientcmdapi.Config
+	var err error
+	if oc, ok := cc.(clientcmd.OverridingClientConfig); ok {
+		raw, err = oc.MergedRawConfig()
+	} else {
+		raw, err = cc.RawConfig()
+	}
 	if err != nil {
 		return id
 	}

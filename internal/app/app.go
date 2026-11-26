@@ -8,8 +8,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -23,6 +26,7 @@ import (
 	"github.com/14f3v/kubectl-tui/internal/action/dynbrowse"
 	"github.com/14f3v/kubectl-tui/internal/action/editor"
 	"github.com/14f3v/kubectl-tui/internal/action/explain"
+	"github.com/14f3v/kubectl-tui/internal/clusters"
 	"github.com/14f3v/kubectl-tui/internal/config"
 	"github.com/14f3v/kubectl-tui/internal/engine"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
@@ -44,13 +48,34 @@ const (
 	modeFilter
 )
 
+// Launch is how kubetui starts.
+type Launch int
+
+const (
+	// LaunchDirect connects to Config.Start at once: a flag named the cluster.
+	LaunchDirect Launch = iota
+	// LaunchPicker opens the cluster picker; nothing connects until a pick.
+	LaunchPicker
+)
+
 // Config parameterizes the root model.
 type Config struct {
-	Sink            engine.Sink
-	Config          config.Config
-	KubeconfigPath  string
-	ContextOverride string
-	StartKind       string
+	Sink   engine.Sink
+	Config config.Config
+	Launch Launch
+	// Start is the cluster a direct launch connects to. The caller names its
+	// context when it can, so a reconnect never follows the file's
+	// current-context elsewhere; a -kubeconfig file that had none to pin (a
+	// missing or unreadable one) leaves it empty, and the connect says why.
+	Start     k8s.ClusterRef
+	StartKind string
+	// StartKindExplicit is true when the user chose StartKind (-kind), even as
+	// "pods", rather than leaving it to the default.
+	StartKindExplicit bool
+	// Store keeps pasted kubeconfigs and state.yaml; nil when it could not be
+	// opened, with StoreErr saying why.
+	Store    *clusters.Store
+	StoreErr string
 }
 
 // Model is the root model.
@@ -66,10 +91,40 @@ type Model struct {
 	clusterCPU float64
 	clusterMem float64
 
-	sess    *k8s.Session
-	pages   []view.Page // stack; top is active
-	fatal   error       // unrecoverable bootstrap error
-	booting bool
+	store *clusters.Store // nil: paste, load-file and saved state are off
+
+	sess *k8s.Session
+	ref  k8s.ClusterRef // the cluster the Session connects to; at a direct launch, the one being connected to
+	// name is what the user named the pasted cluster on screen, "" for any
+	// other source: many pastes share their context, cluster and user names
+	// (default, kubernetes-admin), and the header tells them apart by it.
+	name  string
+	pages []view.Page // stack; top is active
+	fatal error       // an internal error the UI cannot recover from
+
+	// A switch builds the new Session while the current one keeps running, and
+	// swaps it in only once it is ready. Each bootstrap carries a token; a result
+	// whose token is not the one in flight is stale and its Session is disposed.
+	bootToken  int                // increments per bootstrap
+	bootCancel context.CancelFunc // cancels the in-flight version probe
+	connecting *k8s.ClusterRef    // non-nil while a bootstrap is in flight
+
+	// Where the user is in the current cluster, kept for state.yaml. at changes
+	// with every view or namespace change; unsaved says it has not been written
+	// since. It is written saveDelay after the last change (saveToken
+	// debounces, like toastToken), at once when a connect replaces the
+	// cluster, and by FlushState on exit. A failed write of the cluster on
+	// screen marks it unsaved again, so the next change, a switch or the exit
+	// flush tries it again.
+	at        position
+	unsaved   bool
+	saveToken int
+	// saveFailShown is set once a failed state.yaml write has been toasted:
+	// every view change retries it, and one toast per run is enough.
+	saveFailShown bool
+	// startKindUsed is set once the first connect has opened its page: an
+	// explicit -kind applies to that one only.
+	startKindUsed bool
 
 	width, height int
 
@@ -87,6 +142,7 @@ type Model struct {
 	showHelp   bool
 	confirm    *confirmState
 	prompt     *promptState
+	paste      *pasteBox // the paste-a-kubeconfig box; nil when closed
 
 	panicInfo string
 }
@@ -107,6 +163,7 @@ type promptState struct {
 	label     string
 	buf       string
 	prefilled bool
+	oneLine   bool // a paste with a line break is refused (view.PromptRequest.OneLine)
 	errMsg    string
 	validate  func(string) error
 	action    func(string) tea.Msg
@@ -119,29 +176,153 @@ func New(cfg Config) *Model {
 		cfg.StartKind = "pods"
 	}
 	return &Model{
-		cfg:     cfg,
-		theme:   theme,
-		sink:    cfg.Sink,
-		gate:    action.NewTerminalGate(),
-		booting: true,
+		cfg:   cfg,
+		theme: theme,
+		sink:  cfg.Sink,
+		store: cfg.Store,
+		ref:   cfg.Start,
+		gate:  action.NewTerminalGate(),
 	}
 }
 
-// Init requests the session bootstrap.
+// Init starts the launch: a direct launch connects at once, a picker launch
+// opens the cluster picker and lists the clusters.
 func (m *Model) Init() tea.Cmd {
-	return bootstrapCmd(m.sink, m.cfg.KubeconfigPath, m.cfg.ContextOverride, m.cfg.Config.ReadOnly)
+	if m.cfg.Launch == LaunchPicker {
+		return m.launchPicker(nil)
+	}
+	return m.connect(m.ref)
 }
 
-// bootstrapCmd builds a Session off the UI goroutine and reports the result.
-func bootstrapCmd(sink engine.Sink, kubeconfigPath, ctxOverride string, readOnly bool) tea.Cmd {
-	return func() tea.Msg {
-		sess, err := k8s.NewSession(context.Background(), kubeconfigPath, ctxOverride, readOnly, sink)
-		if err != nil {
-			return msg.SessionError{Err: err}
-		}
-		_ = sess.RefreshServerVersion() // best-effort; empty version is fine
-		return msg.SessionReady{Session: sess}
+// launchPicker puts the cluster picker on the empty stack, as the screen to pick
+// the first cluster from, and lists the clusters with the cursor on sel, if set.
+// No row is marked connected: there is no Session yet.
+func (m *Model) launchPicker(sel *k8s.ClusterRef) tea.Cmd {
+	_, push := m.pushPage(view.NewClusterPicker(m.theme, nil, true))
+	s := m.store
+	return tea.Batch(push, func() tea.Msg {
+		l := listed(clusters.Collect(s))
+		l.Select = sel
+		return launchRows{loaded: l}
+	})
+}
+
+// launchRows is the launch picker's first ClustersLoaded. Only these rows may
+// open the paste box: a later reload with none (after removing the last one,
+// say) leaves the user where they are.
+type launchRows struct{ loaded view.ClustersLoaded }
+
+// onLaunchRows hands the launch picker its rows. With none to pick and a store
+// to save into, it opens the paste box: on a machine with no kubeconfig that is
+// the one thing to do, and it replaces the old "could not connect" dead end.
+// When something could not be read it stays on the picker, whose banner says
+// what: the box would cover why the user's clusters are missing.
+func (m *Model) onLaunchRows(l view.ClustersLoaded) (tea.Model, tea.Cmd) {
+	l = m.withStoreNote(l)
+	route := m.routeToPage(l)
+	warned := false
+	for _, b := range l.Banner {
+		warned = warned || b.Warn
 	}
+	switch {
+	case len(l.Rows) > 0, warned, m.store == nil, m.picker() == nil:
+		return m, route
+	case m.paste != nil, m.prompt != nil, m.confirm != nil:
+		return m, route // the user is already doing something else
+	}
+	mdl, open := m.openPasteBox("")
+	return mdl, tea.Batch(route, open)
+}
+
+// sessionOptions are the Session settings that come from the config rather than
+// from the cluster being connected to.
+func (m *Model) sessionOptions() k8s.Options {
+	return k8s.Options{ReadOnly: m.cfg.Config.ReadOnly, Sink: m.sink}
+}
+
+// connect starts a bootstrap for ref, cancelling any already in flight. The
+// current Session, if there is one, keeps running until the result arrives.
+func (m *Model) connect(ref k8s.ClusterRef) tea.Cmd {
+	m.cancelConnect()
+	m.bootToken++
+	ctx, cancel := context.WithCancel(context.Background())
+	m.bootCancel, m.connecting = cancel, &ref
+	if p := m.picker(); p != nil {
+		p.SetConnecting(&ref)
+	}
+	return bootstrapCmd(ctx, m.bootToken, ref, m.sessionOptions(), m.store)
+}
+
+// cancelConnect cancels the bootstrap in flight, if any, and clears connecting.
+// Its result, still on its way, is then stale (see isCurrent) and is disposed on
+// arrival.
+func (m *Model) cancelConnect() {
+	if m.bootCancel != nil {
+		m.bootCancel()
+	}
+	m.bootCancel, m.connecting = nil, nil
+	if p := m.picker(); p != nil {
+		p.SetConnecting(nil)
+	}
+}
+
+// isCurrent reports whether a bootstrap result belongs to the bootstrap in
+// flight, rather than to one a later pick or a cancel replaced.
+func (m *Model) isCurrent(token int) bool {
+	return m.connecting != nil && token == m.bootToken
+}
+
+// bootstrapCmd builds a Session for ref off the UI goroutine and reports the
+// result tagged with token. The Session's lifetime is its own (its parent is
+// Background, so it outlives this command); ctx bounds only the version probe,
+// which is the one slow step, so a newer pick can cut it short.
+//
+// For a pasted ref the store supplies the login commands the user approved when
+// saving it, and for every ref what state.yaml remembers of it (the view and
+// namespace to restore); both reads are file IO, so they run here and not in
+// Update. The entry is read last, as late as it can be.
+func bootstrapCmd(ctx context.Context, token int, ref k8s.ClusterRef, opts k8s.Options, store *clusters.Store) tea.Cmd {
+	return func() tea.Msg {
+		if ref.Source == k8s.SourcePasted && store != nil {
+			opts.ApprovedExec = approvedExec(store, ref)
+		}
+		sess, err := k8s.NewSession(context.Background(), ref, opts)
+		if err != nil {
+			return msg.SessionError{Err: err, Token: token, Ref: ref}
+		}
+		_ = sess.RefreshServerVersion(ctx) // best-effort; empty version is fine
+		ready := msg.SessionReady{Session: sess, Token: token}
+		if store != nil {
+			if e := savedEntry(store, clusters.KeyFor(ref, sess.Identity.Server)); e != nil {
+				ready.Saved = e
+			}
+		}
+		return ready
+	}
+}
+
+// savedEntry returns state.yaml's entry for key, or nil when it has none or
+// cannot be read: the cluster then opens as one never used.
+func savedEntry(store *clusters.Store, key clusters.Key) *clusters.Entry {
+	entries, _ := store.Entries()
+	for _, e := range entries {
+		if e.Key() == key {
+			return &e
+		}
+	}
+	return nil
+}
+
+// approvedExec returns the login commands approved for a pasted ref. An
+// unreadable store or an unknown entry yields none, which denies every command.
+func approvedExec(store *clusters.Store, ref k8s.ClusterRef) []string {
+	entries, _ := store.Entries()
+	for _, e := range entries {
+		if e.Source == k8s.SourcePasted && e.File == filepath.Base(ref.Path) {
+			return e.ApprovedExec
+		}
+	}
+	return nil
 }
 
 // Update is the message router. It recovers from panics in sub-updates so a bug
@@ -166,12 +347,24 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		return m.handlePaste(t)
 
 	case msg.SessionReady:
+		if !m.isCurrent(t.Token) {
+			// A later pick or a cancel replaced this bootstrap; nothing else holds
+			// its Session, so dispose it rather than leak it.
+			if sess, ok := t.Session.(*k8s.Session); ok {
+				sess.Dispose()
+			}
+			return m, nil
+		}
 		return m.onSessionReady(t)
 
 	case msg.SessionError:
-		m.booting = false
-		m.fatal = t.Err
-		return m, nil
+		if !m.isCurrent(t.Token) {
+			return m, nil
+		}
+		return m.onSessionError(t)
+
+	case switchConfirmed:
+		return m, m.connect(t.ref)
 
 	case msg.Toast:
 		return m.showToast(t)
@@ -181,6 +374,16 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 			m.toast = nil
 		}
 		return m, nil
+
+	case stateSaveMsg:
+		if t.token != m.saveToken || !m.unsaved || m.store == nil {
+			return m, nil // a later change re-armed it, or it is written already
+		}
+		m.unsaved = false
+		return m, saveCmd(m.store, m.at)
+
+	case stateSaveFailed:
+		return m.onSaveFailed(t)
 
 	case msg.Navigate:
 		return m.navigate(t.Kind, t.Namespace)
@@ -196,11 +399,63 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		return m, nil
 
 	case view.PromptRequest:
-		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, prefilled: t.Initial != "", validate: t.Validate, action: t.Action}
+		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, prefilled: t.Initial != "", oneLine: t.OneLine, validate: t.Validate, action: t.Action}
 		return m, nil
 
 	case view.SwitchContextRequest:
-		return m.switchContext(t.Name)
+		return m.switchContext(t.Ref)
+
+	case view.StayOnCluster:
+		// Picking the cluster on screen is choosing to stay on it: a switch in
+		// flight is cancelled, as esc on the picker cancels it.
+		text := "already on " + clusters.Sanitize(t.Label)
+		if m.connecting != nil {
+			text = "staying on " + clusters.Sanitize(t.Label)
+		}
+		m.cancelConnect()
+		return m.showToast(msg.Toast{Text: text, Level: msg.LevelInfo})
+
+	case view.ClustersLoaded:
+		return m, m.routeToPage(m.withStoreNote(t))
+
+	case launchRows:
+		return m.onLaunchRows(t.loaded)
+
+	case ctxLookup:
+		return m.onCtxLookup(t)
+
+	case view.AddKubeconfigFile:
+		return m.addKubeconfigFile(t.Path)
+
+	case view.ForgetCluster:
+		return m.forgetCluster(t.Row)
+
+	case view.OpenPasteBox:
+		return m.openPasteBox("")
+
+	case view.ReviewCluster:
+		return m.reviewCluster(t.Row)
+
+	case pasteChecked:
+		return m.onPasteChecked(t)
+
+	case pasteNamed:
+		return m.onPasteNamed(t)
+
+	case pasteDiscarded:
+		m.paste = nil
+		return m, nil
+
+	case pasteSaved:
+		return m.onPasteSaved(t)
+
+	case clustersChanged:
+		reload := loadClustersCmd(m.store)
+		if t.err == nil {
+			return m, reload
+		}
+		_, tick := m.showToast(msg.Toast{Text: t.err.Error(), Level: msg.LevelError})
+		return m, tea.Batch(tick, reload)
 
 	case view.ExecRequest:
 		return m.handleExecRequest(t)
@@ -283,12 +538,243 @@ func (m *Model) pushPage(p view.Page) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(p.Init(), p.OnEnter())
 }
 
+// loadClustersCmd reads every cluster source off the UI thread. With no store,
+// only the default kubeconfig (and in-cluster) is listed.
+func loadClustersCmd(s *clusters.Store) tea.Cmd {
+	return func() tea.Msg { return listed(clusters.Collect(s)) }
+}
+
+// listed is the picker's message for what Collect found: its rows, the default
+// kubeconfig's current-context, and a warning line for each source it could
+// not read.
+func listed(l clusters.Listing) view.ClustersLoaded {
+	out := view.ClustersLoaded{Rows: l.Rows, Current: l.Current}
+	for _, w := range l.Warnings {
+		out.Banner = append(out.Banner, view.BannerLine{Text: w, Warn: true})
+	}
+	return out
+}
+
+// withStoreNote adds to l what only the model knows: that paste, load-file and
+// the saved state are off, and why, both for p and f to say and as a standing
+// line above the table. Without it the reason showed only once p was pressed.
+func (m *Model) withStoreNote(l view.ClustersLoaded) view.ClustersLoaded {
+	if l.NoStore = m.noStoreReason(); l.NoStore != "" {
+		l.Banner = append([]view.BannerLine{{Text: l.NoStore}}, l.Banner...)
+	}
+	return l
+}
+
+// clusterPicker is the cluster picker page as the root model drives it. The
+// picker only asks; the root tells it which row is connecting.
+type clusterPicker interface {
+	view.Page
+	SetConnecting(ref *k8s.ClusterRef)
+}
+
+// beforeConnect reports whether the first cluster is still being picked or
+// connected to: there is no Session yet, and the screen holds the launch picker
+// or, while a direct launch connects, nothing. Then only the picker's keys, ?
+// and q work, and there is no header or breadcrumb to draw.
+func (m *Model) beforeConnect() bool {
+	return m.sess == nil && (m.active() == nil || m.picker() != nil)
+}
+
+// picker returns the cluster picker when it is the active page, else nil.
+func (m *Model) picker() clusterPicker {
+	p, _ := m.active().(clusterPicker)
+	return p
+}
+
+// openPicker pushes the cluster picker over the current page, unless it is
+// already the active one; esc pops it. A connect already in flight shows on
+// its row. Its rows arrive by a ClustersLoaded the caller sends.
+func (m *Model) openPicker() (tea.Model, tea.Cmd) {
+	if m.picker() != nil {
+		return m, nil
+	}
+	cur := m.ref
+	p := view.NewClusterPicker(m.theme, &cur, false)
+	if m.connecting != nil {
+		ref := *m.connecting
+		p.SetConnecting(&ref)
+	}
+	return m.pushPage(p)
+}
+
+// noStoreReason says why paste, load-file and the saved state are off, or ""
+// when the store is open.
+func (m *Model) noStoreReason() string {
+	if m.store != nil {
+		return ""
+	}
+	why := m.cfg.StoreErr
+	if why == "" {
+		why = clusters.ErrNoConfigDir.Error()
+	}
+	return "saved clusters are off: " + why
+}
+
+// ctxLookup is every cluster, listed to resolve ":ctx <name>".
+type ctxLookup struct {
+	name   string
+	loaded view.ClustersLoaded
+}
+
+// lookupClusterCmd lists every cluster off the UI thread, for ":ctx <name>".
+func lookupClusterCmd(s *clusters.Store, name string) tea.Cmd {
+	return func() tea.Msg { return ctxLookup{name: name, loaded: listed(clusters.Collect(s))} }
+}
+
+// onCtxLookup resolves ":ctx <name>" against every cluster's display name. One
+// match does what enter on its row would (view.PickMsg, whose answer comes back
+// through Update, port-forward confirm included); several open the picker on the
+// first; none says so.
+func (m *Model) onCtxLookup(t ctxLookup) (tea.Model, tea.Cmd) {
+	matches := clusters.Match(t.loaded.Rows, t.name)
+	switch len(matches) {
+	case 0:
+		return m.showToast(msg.Toast{Text: fmt.Sprintf("no cluster named %q", t.name), Level: msg.LevelWarn})
+	case 1:
+		var cur *k8s.ClusterRef
+		if m.sess != nil {
+			cur = &m.ref
+		}
+		// Decided here, not in the Cmd, so the Cmd never reads m.ref.
+		out := view.PickMsg(matches[0], cur)
+		return m, func() tea.Msg { return out }
+	}
+	mdl, push := m.openPicker()
+	first := matches[0].Ref
+	loaded := m.withStoreNote(t.loaded)
+	loaded.Select = &first
+	return mdl, tea.Batch(push, m.routeToPage(loaded))
+}
+
+// clustersChanged is the result of a Cmd that changed the saved clusters. The
+// picker reloads its rows either way; an error is also toasted.
+type clustersChanged struct{ err error }
+
+// addKubeconfigFile remembers the kubeconfig file the user named with f in the
+// picker.
+func (m *Model) addKubeconfigFile(path string) (tea.Model, tea.Cmd) {
+	switch {
+	case strings.TrimSpace(path) == "":
+		return m, nil
+	case m.store == nil:
+		return m.showToast(msg.Toast{Text: m.noStoreReason(), Level: msg.LevelWarn})
+	}
+	return m, addFileCmd(m.store, path)
+}
+
+// addFileCmd remembers a kubeconfig file exactly as --kubeconfig does: one file
+// entry per context, by absolute path, so the entry still works when kubetui
+// starts in another folder. The file is not copied, so later edits to it are
+// picked up. It must load as a kubeconfig with at least one context. A leading
+// ~/ is the home folder, as in a shell, since that is how most people type it.
+func addFileCmd(s *clusters.Store, path string) tea.Cmd {
+	return func() tea.Msg {
+		path, err := expandHome(path)
+		if err != nil {
+			return clustersChanged{err: err}
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return clustersChanged{err: err}
+		}
+		ctxs, _, err := k8s.ListContexts(abs)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return clustersChanged{err: fmt.Errorf("%s: no such file", abs)}
+		case err != nil: // client-go's error names the file
+			return clustersChanged{err: fmt.Errorf("%w: %s", clusters.ErrNotKubeconfig, clusters.SafeLoadError(err))}
+		case len(ctxs) == 0:
+			return clustersChanged{err: fmt.Errorf("%s: %w: it has no contexts", abs, clusters.ErrNotKubeconfig)}
+		}
+		for _, c := range ctxs {
+			ref := k8s.ClusterRef{Source: k8s.SourceFile, Path: abs, Context: c.Name}
+			server := c.Server // shown on the row if the file goes missing
+			if err := s.Update(clusters.KeyFor(ref, ""), func(e *clusters.Entry) { e.Server = server }); err != nil {
+				return clustersChanged{err: err}
+			}
+		}
+		return clustersChanged{}
+	}
+}
+
+// expandHome replaces a leading ~/ (or ~\ on Windows) with the home folder.
+func expandHome(path string) (string, error) {
+	rest, ok := strings.CutPrefix(path, "~/")
+	if !ok && filepath.Separator != '/' {
+		rest, ok = strings.CutPrefix(path, "~"+string(filepath.Separator))
+	}
+	if !ok {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("expand ~: %w", err)
+	}
+	return filepath.Join(home, rest), nil
+}
+
+// forgetCluster removes a picker row's source, unless the connected cluster (or
+// the one connecting) comes from it: deleting a pasted file under a live Session
+// would break it, and an oidc token refresh would write the file back
+// unreviewed. Rows from the default kubeconfig are never removed.
+func (m *Model) forgetCluster(r clusters.Row) (tea.Model, tea.Cmd) {
+	sameSource := func(ref k8s.ClusterRef) bool { return ref.Source == r.Ref.Source && ref.Path == r.Ref.Path }
+	switch {
+	case r.Source != k8s.SourcePasted && r.Source != k8s.SourceFile:
+		return m.showToast(msg.Toast{Text: clusters.Sanitize(r.Label) + " comes from your kubeconfig; kubetui doesn't edit it", Level: msg.LevelInfo})
+	case m.store == nil:
+		return m.showToast(msg.Toast{Text: m.noStoreReason(), Level: msg.LevelWarn})
+	case (m.sess != nil && sameSource(m.ref)) || (m.connecting != nil && sameSource(*m.connecting)):
+		return m.showToast(msg.Toast{Text: "disconnect first: switch to another cluster", Level: msg.LevelWarn})
+	}
+	return m, forgetCmd(m.store, r)
+}
+
+// forgetCmd removes what a row came from. A pasted file is deleted along with
+// the record of every context in it. A loaded file is forgotten, every context
+// of it, and the file itself is left alone. A record left behind by a failed
+// write is harmless: the picker drops records whose pasted file is gone.
+func forgetCmd(s *clusters.Store, r clusters.Row) tea.Cmd {
+	return func() tea.Msg {
+		entries, err := s.Entries()
+		if err != nil {
+			return clustersChanged{err: err}
+		}
+		ours := func(e clusters.Entry) bool { return e.Source == k8s.SourceFile && e.Path == r.Ref.Path }
+		if r.Source == k8s.SourcePasted {
+			if err := s.DeletePaste(r.Key.File); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return clustersChanged{err: err}
+			}
+			ours = func(e clusters.Entry) bool { return e.Source == k8s.SourcePasted && e.File == r.Key.File }
+		}
+		for _, e := range entries {
+			if !ours(e) {
+				continue
+			}
+			if err := s.Remove(e.Key()); err != nil {
+				return clustersChanged{err: err}
+			}
+		}
+		return clustersChanged{}
+	}
+}
+
 // popPage backs out of a drill-in. The base page is never popped.
 func (m *Model) popPage() (tea.Model, tea.Cmd) {
 	if len(m.pages) <= 1 {
 		return m, nil
 	}
 	top := m.pages[len(m.pages)-1]
+	if _, ok := top.(clusterPicker); ok {
+		// Closing the picker stays on the current cluster: the connect it started
+		// is cut short, and its result is disposed when it arrives.
+		m.cancelConnect()
+	}
 	top.OnLeave()
 	m.pages = m.pages[:len(m.pages)-1]
 	// A page that drives its own refresh tick lost that chain while it was buried:
@@ -312,25 +798,231 @@ func (m *Model) routeToPage(message tea.Msg) tea.Cmd {
 	return cmd
 }
 
+// onSessionReady swaps in the Session the current bootstrap built. The previous
+// one, kept running through the connect, is disposed now, which closes its
+// port-forwards; its pages and dialogs go with it, and late snapshots from its
+// engine carry view ids no new page holds, so they change nothing.
 func (m *Model) onSessionReady(t msg.SessionReady) (tea.Model, tea.Cmd) {
+	m.cancelConnect() // the probe is done; this releases its context
 	sess, ok := t.Session.(*k8s.Session)
 	if !ok {
 		m.fatal = fmt.Errorf("internal: session type mismatch")
-		m.booting = false
 		return m, nil
 	}
-	m.sess = sess
-	m.booting = false
+	for _, p := range m.pages {
+		p.OnLeave()
+	}
+	m.pages = nil
+	m.confirm, m.prompt = nil, nil // they would act on the disposed Session
+	if m.sess != nil {
+		m.sess.Dispose()
+	}
+	m.metricsOK, m.clusterCPU, m.clusterMem = false, 0, 0
+	m.sess, m.ref = sess, sess.Ref
 	m.poller = metrics.NewPoller(sess.CS, sess.Metrics, sess.Disco, m.sink)
 	go m.poller.Run(sess.Context())
-	return m.navigate(m.cfg.StartKind, sess.Identity.Namespace)
+
+	// Open where the user left this cluster. Every connect comes through here:
+	// the first, a switch, and the reconnect behind the auth banner's r.
+	key := clusters.KeyFor(sess.Ref, sess.Identity.Server)
+	saved, _ := t.Saved.(*clusters.Entry)
+	m.name = ""
+	if saved != nil && sess.Ref.Source == k8s.SourcePasted {
+		m.name = saved.Name
+	}
+	kind, ns := m.startPosition(m.remembered(key, saved))
+	m.startKindUsed = true
+	var writes []position
+	if m.unsaved && m.at.key != key {
+		writes = append(writes, m.at) // where the user was in the cluster left behind
+	}
+	m.at = position{key: key, server: sess.Identity.Server}
+	mdl, nav := m.navigate(kind, ns)
+	if m.store == nil {
+		return mdl, nav
+	}
+	// Write the connect now rather than after the debounce, so the picker's
+	// last-used order has it: its time, and the position it opened on.
+	m.unsaved = false
+	return mdl, tea.Batch(nav, saveCmd(m.store, append(writes, m.at)...))
 }
 
-// navigate replaces the page stack with a fresh page for kind, scoped to
-// namespace ("" = all namespaces).
+// position is where the user is in one cluster, as state.yaml records it.
+type position struct {
+	key    clusters.Key
+	server string // a file's server is kept for its row when the file goes missing
+	// kind and ns are the last navigate's; kind is "" until a page opened.
+	kind, ns string
+}
+
+// saveDelay is how long the view must stay put before its position is written.
+const saveDelay = 500 * time.Millisecond
+
+// stateSaveMsg is the debounce tick of recordPosition. Only the tick of the
+// latest change, the one whose token is current, writes.
+type stateSaveMsg struct{ token int }
+
+// stateSaveFailed reports a write of saveCmd that failed: the last one, which
+// is the cluster on screen's when that one failed.
+type stateSaveFailed struct {
+	key clusters.Key
+	err error
+}
+
+// recordPosition notes kind (canonical) and namespace ns as where the user is
+// in the current cluster and returns the debounce tick that writes it. With no
+// store the position is still kept in memory, which a reconnect returns to,
+// and there is nothing to write.
+func (m *Model) recordPosition(kind, ns string) tea.Cmd {
+	m.at.kind, m.at.ns = kind, ns
+	if m.store == nil {
+		return nil
+	}
+	m.unsaved = true
+	m.saveToken++
+	tok := m.saveToken
+	return tea.Tick(saveDelay, func(time.Time) tea.Msg { return stateSaveMsg{token: tok} })
+}
+
+// FlushState writes the position recorded since the last write, or whose
+// write failed. main calls it once the program has stopped, so a quit inside
+// the debounce still saves where the user was, and prints the error when
+// state.yaml still cannot be written.
+func (m *Model) FlushState() error {
+	if m.store == nil || !m.unsaved {
+		return nil
+	}
+	if err := writePosition(m.store, m.at); err != nil {
+		return err
+	}
+	m.unsaved = false
+	return nil
+}
+
+// onSaveFailed handles a state.yaml write that failed. The first failure of the
+// run is toasted; later ones would repeat it on every view change. When the
+// failed write was the cluster on screen's, its position is pending again, so
+// FlushState retries it at exit and reports the error if it fails there too.
+// A failure for a cluster since left behind has nothing left to retry.
+func (m *Model) onSaveFailed(t stateSaveFailed) (tea.Model, tea.Cmd) {
+	if t.key == m.at.key {
+		m.unsaved = true
+	}
+	if m.saveFailShown {
+		return m, nil
+	}
+	m.saveFailShown = true
+	return m.showToast(msg.Toast{Text: "saving state.yaml: " + t.err.Error(), Level: msg.LevelWarn})
+}
+
+// remembered is the record to restore the cluster key names from: the entry
+// the bootstrap read, except on a reconnect to the cluster on screen, where the
+// position in memory is newer than any state.yaml may hold yet (its write can
+// still be on its way, or debounced).
+func (m *Model) remembered(key clusters.Key, saved *clusters.Entry) *clusters.Entry {
+	if key != m.at.key || m.at.kind == "" {
+		return saved
+	}
+	// LastUsed marks it used, so its namespace is restored too: it is the
+	// cluster on screen.
+	return &clusters.Entry{Kind: m.at.kind, Namespace: m.at.ns, LastUsed: time.Now()}
+}
+
+// startPosition is the view and namespace a cluster opens on, given what
+// state.yaml remembers of it (e may be nil). The view is an explicit -kind on
+// the run's first connect, else the remembered one while it is still a
+// first-class kind, else pods. The namespace is the remembered one once the
+// cluster has been used ("" there is all namespaces, a choice like any other),
+// else the context's, else all namespaces.
+func (m *Model) startPosition(e *clusters.Entry) (kind, ns string) {
+	kind = "pods"
+	switch {
+	case m.cfg.StartKindExplicit && !m.startKindUsed:
+		kind = m.cfg.StartKind
+	case e != nil:
+		if k, ok := view.ResolveKind(e.Kind); ok {
+			kind = k
+		}
+	}
+	switch {
+	case e != nil && !e.LastUsed.IsZero():
+		ns = e.Namespace
+	case m.sess != nil:
+		ns = m.sess.Identity.Namespace
+	}
+	return kind, ns
+}
+
+// saveCmd writes positions to state.yaml off the UI thread, in order. Each is
+// tried even when an earlier one failed. It answers stateSaveFailed for the
+// last that failed, or nothing when all were written.
+func saveCmd(s *clusters.Store, ps ...position) tea.Cmd {
+	return func() tea.Msg {
+		var failed tea.Msg
+		for _, p := range ps {
+			if err := writePosition(s, p); err != nil {
+				failed = stateSaveFailed{key: p.key, err: err}
+			}
+		}
+		return failed
+	}
+}
+
+// writePosition records that the cluster p names was just used, and on which
+// view and namespace. A position with no page yet (an unknown -kind opened
+// none) keeps the remembered view and namespace.
+func writePosition(s *clusters.Store, p position) error {
+	return s.Update(p.key, func(e *clusters.Entry) {
+		e.LastUsed = time.Now()
+		if p.key.Source == k8s.SourceFile {
+			e.Server = p.server
+		}
+		if p.kind != "" {
+			e.Kind, e.Namespace = p.kind, p.ns
+		}
+	})
+}
+
+// onSessionError reports a failed bootstrap; it is never a dead end. A switch
+// that fails leaves the current Session as it was. The picker, when open, stays
+// and shows why on the row that failed, whether or not a Session is up.
+// Otherwise a toast says why, and a direct launch, which has no Session to stay
+// on, opens the launch picker on that row: the flags named a cluster that does
+// not connect, and the picker lists every one that might.
+//
+// The error is shown through clusters.SafeLoadError: client-go prints a
+// kubeconfig's duplicate names with the whole list, tokens included, and the
+// error quotes raw names from the file.
+func (m *Model) onSessionError(t msg.SessionError) (tea.Model, tea.Cmd) {
+	m.cancelConnect()
+	ref, _ := t.Ref.(k8s.ClusterRef)
+	why := clusters.SafeLoadError(t.Err)
+	failed := view.ClusterConnectFailed{Ref: ref, Err: why}
+	if m.picker() != nil {
+		return m, m.routeToPage(failed)
+	}
+	_, tick := m.showToast(msg.Toast{Text: "connect " + view.RefName(ref) + ": " + why, Level: msg.LevelError})
+	if m.sess != nil {
+		return m, tick
+	}
+	// A ref with no row, such as a -context the kubeconfig does not have, has
+	// its error above the picker's table, where it stays after the toast.
+	open := m.launchPicker(&ref)
+	route := m.routeToPage(failed) // to the picker just opened
+	return m, tea.Batch(tick, open, route)
+}
+
+// navigate replaces the page stack with a fresh page for kind (an alias such as
+// -kind deploy works too), scoped to namespace ("" = all namespaces). Every
+// change of base view or namespace comes through here, so this is where the
+// position is recorded, by its canonical kind: several base pages report an
+// empty Kind().
 func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	if m.sess == nil {
 		return m, nil
+	}
+	if k, ok := view.ResolveKind(kind); ok {
+		kind = k
 	}
 	page, ok := view.NewPage(kind, view.Deps{
 		Session:   m.sess,
@@ -353,26 +1045,33 @@ func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	if m.poller != nil {
 		m.poller.SetNamespace(namespace)
 	}
-	return m, tea.Batch(page.Init(), page.OnEnter())
+	return m, tea.Batch(page.Init(), page.OnEnter(), m.recordPosition(kind, namespace))
 }
 
-// switchContext disposes the current Session and bootstraps one for the named
-// kubeconfig context. All informers, log streams, and forwards die with the old
-// Session's context.
-func (m *Model) switchContext(name string) (tea.Model, tea.Cmd) {
-	for _, p := range m.pages {
-		p.OnLeave()
+// switchConfirmed is the yes to a switch that closes port-forwards; it starts the
+// connect the confirm held back.
+type switchConfirmed struct{ ref k8s.ClusterRef }
+
+// switchContext starts a bootstrap for ref; it does not dispose the current
+// Session, which stays up until the new one is ready (onSessionReady). The
+// switch will close every open port-forward, so with any open it asks first.
+// A new pick replaces any connect in flight, so asking cancels that one first:
+// left running, it would land, close the question and leave the user on the
+// cluster they had just moved away from, and a no stays on the current one.
+func (m *Model) switchContext(ref k8s.ClusterRef) (tea.Model, tea.Cmd) {
+	if m.sess != nil && m.sess.Forwards != nil {
+		if n := m.sess.Forwards.Count(); n > 0 {
+			m.cancelConnect()
+			return m, func() tea.Msg {
+				return view.ConfirmRequest{
+					Title:  "switch cluster",
+					Prompt: fmt.Sprintf("Switching closes %d port-forwards.", n),
+					Action: func() tea.Msg { return switchConfirmed{ref: ref} },
+				}
+			}
+		}
 	}
-	m.pages = nil
-	if m.sess != nil {
-		m.sess.Dispose()
-		m.sess = nil
-	}
-	m.booting = true
-	m.mode = modeNone
-	m.inputBuf = ""
-	m.cfg.ContextOverride = name
-	return m, bootstrapCmd(m.sink, m.cfg.KubeconfigPath, name, m.cfg.Config.ReadOnly)
+	return m, m.connect(ref)
 }
 
 // jumpNamespace switches the active page to a namespace: "0" is all namespaces,
@@ -461,26 +1160,29 @@ func (m *Model) retryActive() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(p.OnEnter(), toastCmd("retrying "+p.Title(), msg.LevelInfo))
 }
 
-// reconnect disposes the Session and builds a fresh one for the same context,
-// which re-runs the exec credential plugin. The context name comes from the
-// configured override rather than Identity.Context: the latter is derived from
-// the merged kubeconfig and can name a different context than the one actually in
-// use, which would silently move the user to another cluster.
+// reconnect builds a fresh Session for the same ClusterRef, which re-runs the exec
+// credential plugin, and swaps it in once it connects. The ref pins the context
+// by name, so a `kubectl config use-context` run elsewhere since the connect
+// cannot move the user to another cluster.
 func (m *Model) reconnect() (tea.Model, tea.Cmd) {
 	if m.sess == nil {
 		return m, nil
 	}
-	// Reconnecting tears down every port-forward with it, so say so first.
+	// Reconnecting tears down every port-forward with it, so say so first, in
+	// its own words; a yes connects without switchContext asking again. As in
+	// switchContext, asking cancels a connect in flight.
 	if n := m.sess.Forwards.Count(); n > 0 {
+		m.cancelConnect()
+		ref := m.ref // the confirm's action runs as a Cmd, off the UI goroutine
 		return m, func() tea.Msg {
 			return view.ConfirmRequest{
 				Title:  "reconnect",
 				Prompt: fmt.Sprintf("re-authenticate and rebuild the session? this closes %d active port-forward(s)", n),
-				Action: func() tea.Msg { return view.SwitchContextRequest{Name: m.cfg.ContextOverride} },
+				Action: func() tea.Msg { return switchConfirmed{ref: ref} },
 			}
 		}
 	}
-	return m.switchContext(m.cfg.ContextOverride)
+	return m.switchContext(m.ref)
 }
 
 func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -505,6 +1207,13 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmKey(k)
 	}
 
+	// The paste box takes every key, global ones included: they are text to it.
+	// It comes after the prompt and the confirm because it opens both on top of
+	// itself (the name prompt, the esc confirm), and they need the keys.
+	if m.paste != nil {
+		return m.handlePasteBoxKey(k)
+	}
+
 	// Command-line capture takes precedence over everything else.
 	if m.mode != modeNone {
 		return m.handleInputKey(k)
@@ -522,6 +1231,10 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(k, keyHelp):
 		m.showHelp = true
 		return m, nil
+	case m.beforeConnect():
+		// The launch picker gets every other key: the command line, the filter,
+		// digit jumps and esc all need a cluster.
+		return m, m.routeToPage(k)
 	case key.Matches(k, keyCommand):
 		m.mode = modeCommand
 		m.inputBuf = ""
@@ -648,15 +1361,27 @@ func (m *Model) promptPaste(s string) {
 // It goes to whichever text input is open, exactly as if it had been typed. With
 // none open it is gated like a key: it cannot answer a confirm dialog, and it
 // does not reach a page that is hidden behind help or an error banner.
+//
+// A paste that looks like a file is refused by a prompt that wants one line,
+// with a toast, rather than flattened into it, where it would be drawn and
+// could become a file name in an error. That is any prompt over the paste box,
+// whose name prompt a second paste of the kubeconfig would otherwise fill, and
+// a prompt that asked for one line (a path).
 func (m *Model) handlePaste(p tea.PasteMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case m.panicInfo != "" || m.fatal != nil:
 		return m, nil
+	case m.prompt != nil && m.paste != nil && (hasLineBreak(p.Content) || len(trimBreaks(p.Content)) > maxNamePaste):
+		return m.showToast(msg.Toast{Text: "the box already holds the kubeconfig; type a name", Level: msg.LevelWarn})
+	case m.prompt != nil && m.prompt.oneLine && hasLineBreak(p.Content):
+		return m.showToast(msg.Toast{Text: "that paste has line breaks; paste only one line", Level: msg.LevelWarn})
 	case m.prompt != nil:
 		m.promptPaste(singleLine(p.Content))
 		return m, nil
 	case m.confirm != nil:
 		return m, nil
+	case m.paste != nil:
+		return m.handlePasteBoxPaste(p)
 	case m.mode != modeNone:
 		m.inputInsert(singleLine(p.Content))
 		return m, nil
@@ -666,6 +1391,17 @@ func (m *Model) handlePaste(p tea.PasteMsg) (tea.Model, tea.Cmd) {
 		return m, m.routeToPage(p)
 	}
 }
+
+// maxNamePaste is the most a paste into a prompt over the paste box may hold:
+// far more than a name, far less than a kubeconfig.
+const maxNamePaste = 256
+
+// trimBreaks drops the line breaks at the end of a paste: copying a line from a
+// terminal often takes its newline too.
+func trimBreaks(s string) string { return strings.TrimRight(s, "\r\n") }
+
+// hasLineBreak reports whether a paste holds a line break before its end.
+func hasLineBreak(s string) bool { return strings.ContainsAny(trimBreaks(s), "\r\n") }
 
 // singleLine flattens pasted text for a one-line input. Every line break becomes
 // one space — CRLF, a lone CR and a lone LF alike, because terminals differ in
@@ -849,13 +1585,14 @@ func (m *Model) runCommand(buf string) (tea.Model, tea.Cmd) {
 		// open it in the Table browser (e.g. :endpoints, :componentstatuses).
 		return m.openResource(cmd.kind, cmd.namespace)
 	case "ctx":
-		if cmd.arg == "" {
-			if m.sess == nil {
-				return m, nil
-			}
-			return m.pushPage(view.NewContextPicker(m.sess, m.theme))
+		if cmd.arg != "" {
+			return m, lookupClusterCmd(m.store, cmd.arg)
 		}
-		return m.switchContext(cmd.arg)
+		if m.sess == nil {
+			return m, nil
+		}
+		mdl, push := m.openPicker()
+		return mdl, tea.Batch(push, loadClustersCmd(m.store))
 	case "apply":
 		return m.applyCommand()
 	case "explain":
