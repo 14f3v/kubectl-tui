@@ -293,3 +293,55 @@ func TestPickerAgoText(t *testing.T) {
 		}
 	}
 }
+
+// Labels, servers, errors, toasts and the remove confirm come from kubeconfigs
+// and are drawn without their control characters: a CR in a context name moves
+// the cursor back over its own row, a line feed adds a fake one.
+func TestPickerSanitizesKubeconfigText(t *testing.T) {
+	evil := pickRow("x\rprod", k8s.SourcePasted)
+	evil.Ref.Context = "x\rprod"
+	evil.Key.File = "a\x1b]52;c;eA==\a.yaml"
+	evil.Server = "https://\x1b[2Jsrv\n.example"
+	cfg := pickRow("k\a\rk", k8s.SourceKubeconfig)
+	p := loadedPicker(t, nil, evil, cfg)
+	p.Update(ClusterConnectFailed{Ref: evil.Ref, Err: "boom\a\x1b]0;title\a\rdone"})
+	out := p.View(160, 20)
+	for _, bad := range []string{"\r", "\a", "\x1b]", "\x1b[2J"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("the picker draws %q:\n%q", bad, out)
+		}
+	}
+	if plain := ansi.Strip(out); !strings.Contains(plain, "xprod") || !strings.Contains(plain, "https://[2Jsrv.example") || !strings.Contains(plain, "boom]0;titledone") {
+		t.Errorf("the picker does not show the text without its control characters:\n%s", plain)
+	}
+
+	clean := func(what, s string) {
+		t.Helper()
+		if strings.ContainsAny(s, "\r\a\x1b\n") {
+			t.Errorf("%s holds a control character: %q", what, s)
+		}
+	}
+	_, m := press(p, "ctrl+d")
+	c, ok := m.(ConfirmRequest)
+	if !ok {
+		t.Fatalf("ctrl+d = %#v, want the remove confirm", m)
+	}
+	clean("remove confirm", c.Prompt)
+	cur := cfg.Ref
+	missing := evil
+	missing.Missing = true
+	for _, got := range []tea.Msg{PickMsg(cfg, &cur), PickMsg(missing, nil)} {
+		tm, ok := got.(msg.Toast)
+		if !ok {
+			t.Fatalf("PickMsg = %#v, want a toast", got)
+		}
+		clean("toast", tm.Text)
+	}
+	p.cursor = 1
+	_, m = press(p, "ctrl+d")
+	if tm, ok := m.(msg.Toast); !ok {
+		t.Fatalf("ctrl+d on a kubeconfig row = %#v, want a toast", m)
+	} else {
+		clean("kubeconfig toast", tm.Text)
+	}
+}

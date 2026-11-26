@@ -30,12 +30,14 @@ type RelativePathError struct{ Field, Owner, Path string }
 
 func (e *RelativePathError) Error() string {
 	return fmt.Sprintf("%s of %q is a relative path (%s); export a self-contained copy with: kubectl config view --raw --flatten --minify --context <name>",
-		e.Field, sanitize(e.Owner), sanitize(e.Path))
+		e.Field, Sanitize(e.Owner), Sanitize(e.Path))
 }
 
-// ContextCheck is one context in a pasted kubeconfig. Problem is what
-// ConfirmUsable said, "" when the context is usable.
-type ContextCheck struct{ Name, Server, Problem string }
+// ContextCheck is one context in a pasted kubeconfig. Name is the context as
+// the kubeconfig spells it: the identifier kubetui connects to and keys
+// state.yaml by, never drawn. Display is Name as it is drawn, through Sanitize.
+// Problem is what ConfirmUsable said, "" when the context is usable.
+type ContextCheck struct{ Name, Display, Server, Problem string }
 
 // ExecCheck is an exec login command kubetui would run on every connect.
 type ExecCheck struct {
@@ -47,9 +49,13 @@ type ExecCheck struct {
 
 type AuthProviderCheck struct{ User, Name, IssuerURL string }
 
-// Report is what a paste contains, for the review box.
+// Report is what a paste contains, for the review box. Every string in it is
+// for the screen and has been through Sanitize, except the context names that
+// identify a context: CurrentContext and each ContextCheck's Name.
 type Report struct {
-	Data           []byte // normalised bytes to save
+	Data []byte // normalised bytes to save
+	// CurrentContext is the paste's current-context as it spells it, which
+	// only picks the context the box starts on; it is never drawn.
 	CurrentContext string
 	Contexts       []ContextCheck // sorted by name
 	Exec           []ExecCheck
@@ -64,7 +70,10 @@ func (r *Report) NeedsReview() bool {
 	return len(r.Exec) > 0 || len(r.AuthProviders) > 0 || len(r.LocalFiles) > 0 || len(r.Insecure) > 0
 }
 
-// ExecCommands returns the distinct exec commands, sorted.
+// ExecCommands returns the distinct exec commands, sorted, as the review shows
+// them. A command holding a control character is listed without it, so it never
+// matches the real one in the exec allowlist and is refused: the user approved
+// the command they saw, not one with hidden characters.
 func (r *Report) ExecCommands() []string {
 	seen := map[string]bool{}
 	var out []string
@@ -122,42 +131,42 @@ func Inspect(data []byte) (*Report, error) {
 		}
 	}
 
-	r := &Report{Data: data, CurrentContext: sanitize(cfg.CurrentContext)}
+	r := &Report{Data: data, CurrentContext: cfg.CurrentContext}
 	for _, n := range clusterNames {
 		c := cfg.Clusters[n]
 		if c.CertificateAuthority != "" {
-			r.LocalFiles = append(r.LocalFiles, sanitize(c.CertificateAuthority))
+			r.LocalFiles = append(r.LocalFiles, Sanitize(c.CertificateAuthority))
 		}
 		if c.InsecureSkipTLSVerify {
-			r.Insecure = append(r.Insecure, sanitize(n))
+			r.Insecure = append(r.Insecure, Sanitize(n))
 		}
 	}
 	for _, n := range userNames {
 		u := cfg.AuthInfos[n]
 		for _, f := range []string{u.ClientCertificate, u.ClientKey, u.TokenFile} {
 			if f != "" {
-				r.LocalFiles = append(r.LocalFiles, sanitize(f))
+				r.LocalFiles = append(r.LocalFiles, Sanitize(f))
 			}
 		}
 		if e := u.Exec; e != nil {
-			ec := ExecCheck{User: sanitize(n), Command: sanitize(e.Command), Args: maskArgs(e.Args), InteractiveMode: sanitize(string(e.InteractiveMode))}
+			ec := ExecCheck{User: Sanitize(n), Command: Sanitize(e.Command), Args: maskArgs(e.Args), InteractiveMode: Sanitize(string(e.InteractiveMode))}
 			for _, env := range e.Env {
-				ec.EnvNames = append(ec.EnvNames, sanitize(env.Name))
+				ec.EnvNames = append(ec.EnvNames, Sanitize(env.Name))
 			}
 			r.Exec = append(r.Exec, ec)
 		}
 		if p := u.AuthProvider; p != nil {
-			r.AuthProviders = append(r.AuthProviders, AuthProviderCheck{User: sanitize(n), Name: sanitize(p.Name), IssuerURL: sanitize(p.Config["idp-issuer-url"])})
+			r.AuthProviders = append(r.AuthProviders, AuthProviderCheck{User: Sanitize(n), Name: Sanitize(p.Name), IssuerURL: Sanitize(p.Config["idp-issuer-url"])})
 		}
 	}
 
 	for _, n := range sortedKeys(cfg.Contexts) {
-		cc := ContextCheck{Name: sanitize(n)}
+		cc := ContextCheck{Name: n, Display: Sanitize(n)}
 		if cl := cfg.Clusters[cfg.Contexts[n].Cluster]; cl != nil {
-			cc.Server = sanitize(cl.Server)
+			cc.Server = Sanitize(cl.Server)
 		}
 		if err := clientcmd.ConfirmUsable(*cfg, n); err != nil {
-			cc.Problem = sanitize(err.Error())
+			cc.Problem = Sanitize(err.Error())
 		}
 		r.Contexts = append(r.Contexts, cc)
 	}
@@ -187,7 +196,7 @@ func maskArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	maskNext := false
 	for _, a := range args {
-		a = sanitize(a)
+		a = Sanitize(a)
 		if maskNext {
 			maskNext = false
 			if !strings.HasPrefix(a, "-") {
@@ -228,16 +237,19 @@ func SafeLoadError(err error) string {
 	if i := strings.Index(msg, " in list:"); i >= 0 {
 		msg = msg[:i]
 	}
-	msg = sanitize(msg)
+	msg = Sanitize(msg)
 	if r := []rune(msg); len(r) > 200 {
 		msg = string(r[:200]) + "…"
 	}
 	return msg
 }
 
-// sanitize drops C0/C1 control characters, ESC and DEL so pasted text cannot
-// move the cursor or fake the review box.
-func sanitize(s string) string {
+// Sanitize drops C0 and C1 control characters, ESC and DEL among them, so a
+// string from a kubeconfig cannot move the cursor, fake a line of the screen or
+// the review box, or end the window title and reach the terminal raw. Every
+// kubeconfig-derived string kubetui draws goes through it; the raw string stays
+// the identifier (a context to connect to, a key in state.yaml).
+func Sanitize(s string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return -1

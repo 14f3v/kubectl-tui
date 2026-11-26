@@ -158,8 +158,8 @@ func TestInspectSanitizes(t *testing.T) {
 	if a := r.Exec[0].Args[0]; strings.ContainsRune(a, 0x1b) || a != "[2Jfake" {
 		t.Fatalf("arg = %q", a)
 	}
-	if got := sanitize("a\x00b\u0085c\x7fd\te\nf"); got != "abcdef" {
-		t.Fatalf("sanitize = %q", got)
+	if got := Sanitize("a\x00b\u0085c\x7fd\te\nf"); got != "abcdef" {
+		t.Fatalf("Sanitize = %q", got)
 	}
 }
 

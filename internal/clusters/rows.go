@@ -15,7 +15,7 @@ import (
 type Row struct {
 	Ref         k8s.ClusterRef
 	Key         Key
-	Label       string // pasted: Name, or "Name / context" when its file has >1 context; else the context name
+	Label       string // pasted: Name, or "Name / context" when its file has >1 context; else the context name. Drawn through Sanitize; Ref and Key are the identifiers
 	Source      k8s.Source
 	Server      string
 	LastUsed    time.Time // zero = never
@@ -254,11 +254,13 @@ func Collect(s *Store) ([]Row, error) {
 	return Build(in), nil
 }
 
-// Match returns the rows whose label or context name equals name exactly.
+// Match returns the rows whose label or context name equals name exactly, as
+// the picker draws them: a typed name holds no control characters, so it is
+// matched against the names with theirs stripped.
 func Match(rows []Row, name string) []Row {
 	var out []Row
 	for _, r := range rows {
-		if r.Label == name || r.Ref.Context == name {
+		if Sanitize(r.Label) == name || Sanitize(r.Ref.Context) == name {
 			out = append(out, r)
 		}
 	}

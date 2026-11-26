@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/14f3v/kubectl-tui/internal/clusters"
 	"github.com/14f3v/kubectl-tui/internal/component"
 	"github.com/14f3v/kubectl-tui/internal/engine"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
@@ -35,18 +36,22 @@ func (m *Model) View() tea.View {
 	return v
 }
 
+// windowTitle is "user@cluster — kubetui". Bubble Tea writes it inside an OSC 2
+// with no filtering, so every part from the kubeconfig goes through
+// clusters.Sanitize: a BEL in a user name would end the sequence and send the
+// rest, a clipboard write say, to the terminal raw.
 func (m *Model) windowTitle() string {
 	if m.sess == nil {
 		return "kubetui"
 	}
 	id := m.sess.Identity
-	who := id.User
+	who := clusters.Sanitize(id.User)
 	if who == "" {
 		who = "kube"
 	}
-	where := id.Cluster
+	where := clusters.Sanitize(id.Cluster)
 	if where == "" {
-		where = id.Context
+		where = clusters.Sanitize(id.Context)
 	}
 	return who + "@" + where + " — kubetui"
 }
@@ -350,11 +355,18 @@ func (m *Model) renderCommandBar() string {
 
 // ---- header ----
 
+// renderHeader draws the identity of the cluster on screen, the page's counts
+// and gauges, and its keys. The identity comes from the kubeconfig (and the
+// version from the server), so it is drawn through clusters.Sanitize: a CR in a
+// context name would move the cursor back over the header.
 func (m *Model) renderHeader() string {
 	t := m.theme
 	var id k8s.Identity // blank before the first connect
 	if m.sess != nil {
 		id = m.sess.Identity
+	}
+	for _, f := range []*string{&id.Context, &id.Cluster, &id.User, &id.Namespace, &id.K8sVersion} {
+		*f = clusters.Sanitize(*f)
 	}
 	usable := m.width - 4
 	if usable < 12 {
@@ -453,7 +465,7 @@ func (m *Model) renderBreadcrumb() string {
 		return fitLine("", m.width)
 	}
 	sum := p.Summary()
-	ns := p.Namespace()
+	ns := clusters.Sanitize(p.Namespace()) // the first one is the kubeconfig's
 	if ns == "" {
 		ns = "all"
 	}
@@ -508,7 +520,9 @@ func (m *Model) renderToast() string {
 	case msg.LevelError:
 		col = t.Pal.Err
 	}
-	return fitLine(lipgloss.NewStyle().Foreground(col).Render("• "+m.toast.Text), m.width)
+	// A toast is one line, and it often quotes a name or an error: line breaks
+	// become spaces and other control characters go, as in a pasted prompt.
+	return fitLine(lipgloss.NewStyle().Foreground(col).Render("• "+singleLine(m.toast.Text)), m.width)
 }
 
 // ---- content ----

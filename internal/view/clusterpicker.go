@@ -149,13 +149,14 @@ func (p *clusterPickerPage) connect() tea.Cmd {
 // msg.Toast, an unreviewed paste asks for a ReviewCluster before anything in it
 // runs, and any other row asks for a SwitchContextRequest. It does no IO.
 func PickMsg(r clusters.Row, current *k8s.ClusterRef) tea.Msg {
+	label := clusters.Sanitize(r.Label)
 	switch {
 	case r.Missing:
-		return msg.Toast{Text: r.Label + ": file missing", Level: msg.LevelWarn}
+		return msg.Toast{Text: label + ": file missing", Level: msg.LevelWarn}
 	case r.NeedsReview:
 		return ReviewCluster{Row: r}
 	case current != nil && r.Ref == *current:
-		return msg.Toast{Text: "already on " + r.Label, Level: msg.LevelInfo}
+		return msg.Toast{Text: "already on " + label, Level: msg.LevelInfo}
 	}
 	return SwitchContextRequest{Ref: r.Ref}
 }
@@ -171,14 +172,14 @@ func (p *clusterPickerPage) remove() tea.Cmd {
 		var names []string
 		for _, o := range p.rows {
 			if o.Source == k8s.SourcePasted && o.Key.File == r.Key.File {
-				names = append(names, o.Ref.Context)
+				names = append(names, clusters.Sanitize(o.Ref.Context))
 			}
 		}
-		prompt = fmt.Sprintf("Delete %s and its contexts: %s?", r.Key.File, strings.Join(names, ", "))
+		prompt = fmt.Sprintf("Delete %s and its contexts: %s?", clusters.Sanitize(r.Key.File), strings.Join(names, ", "))
 	case k8s.SourceFile:
-		prompt = fmt.Sprintf("Forget %s? The file is not touched.", r.Ref.Path)
+		prompt = fmt.Sprintf("Forget %s? The file is not touched.", clusters.Sanitize(r.Ref.Path))
 	default:
-		return toast(r.Label+" comes from your kubeconfig; kubetui doesn't edit it", msg.LevelInfo)
+		return toast(clusters.Sanitize(r.Label)+" comes from your kubeconfig; kubetui doesn't edit it", msg.LevelInfo)
 	}
 	req := ConfirmRequest{
 		Title:  "remove cluster",
@@ -226,6 +227,9 @@ const (
 	pickerMinWide   = 70 // below this the SERVER column is dropped
 )
 
+// View draws the rows. Labels, servers and errors come from kubeconfigs and are
+// drawn through clusters.Sanitize: a CR in a context name would otherwise move
+// the cursor back over its own row, and a line feed would add a fake one.
 func (p *clusterPickerPage) View(width, height int) string {
 	t := p.theme
 	if width < 1 || height < 1 {
@@ -253,7 +257,7 @@ func (p *clusterPickerPage) View(width, height int) string {
 	cursorLine := 1
 	switch {
 	case p.loadErr != nil:
-		lines = append(lines, fit(t.Faint.Render("  could not list clusters: "+p.loadErr.Error())))
+		lines = append(lines, fit(t.Faint.Render("  could not list clusters: "+clusters.Sanitize(p.loadErr.Error()))))
 	case !p.loaded:
 		lines = append(lines, fit(t.Faint.Render("  loading…")))
 	case len(p.rows) == 0:
@@ -264,8 +268,8 @@ func (p *clusterPickerPage) View(width, height int) string {
 		if p.isCurrent(r) {
 			marker = t.AccentText.Render("● ")
 		}
-		server, last := r.Server, lastUsedText(r.LastUsed, p.now())
-		name, st := r.Label, t.Dim
+		server, last := clusters.Sanitize(r.Server), lastUsedText(r.LastUsed, p.now())
+		name, st := clusters.Sanitize(r.Label), t.Dim
 		switch {
 		case r.Missing:
 			name += " (file missing)"
@@ -287,7 +291,7 @@ func (p *clusterPickerPage) View(width, height int) string {
 		}
 		lines = append(lines, fit(marker+st.Render(row("", name, string(r.Source), server, last))))
 		if e := p.errs[r.Ref]; e != "" {
-			lines = append(lines, fit(t.Faint.Render("    ✗ "+strings.Join(strings.Fields(e), " "))))
+			lines = append(lines, fit(t.Faint.Render("    ✗ "+strings.Join(strings.Fields(clusters.Sanitize(e)), " "))))
 		}
 	}
 

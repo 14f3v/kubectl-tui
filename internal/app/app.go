@@ -671,7 +671,7 @@ func (m *Model) forgetCluster(r clusters.Row) (tea.Model, tea.Cmd) {
 	sameSource := func(ref k8s.ClusterRef) bool { return ref.Source == r.Ref.Source && ref.Path == r.Ref.Path }
 	switch {
 	case r.Source != k8s.SourcePasted && r.Source != k8s.SourceFile:
-		return m.showToast(msg.Toast{Text: r.Label + " comes from your kubeconfig; kubetui doesn't edit it", Level: msg.LevelInfo})
+		return m.showToast(msg.Toast{Text: clusters.Sanitize(r.Label) + " comes from your kubeconfig; kubetui doesn't edit it", Level: msg.LevelInfo})
 	case m.store == nil:
 		return m.showToast(msg.Toast{Text: m.noStoreReason(), Level: msg.LevelWarn})
 	case (m.sess != nil && sameSource(m.ref)) || (m.connecting != nil && sameSource(*m.connecting)):
@@ -930,21 +930,26 @@ func writePosition(s *clusters.Store, p position) error {
 // Otherwise a toast says why, and a direct launch, which has no Session to stay
 // on, opens the launch picker on that row: the flags named a cluster that does
 // not connect, and the picker lists every one that might.
+//
+// The error is shown through clusters.SafeLoadError: client-go prints a
+// kubeconfig's duplicate names with the whole list, tokens included, and the
+// error quotes raw names from the file.
 func (m *Model) onSessionError(t msg.SessionError) (tea.Model, tea.Cmd) {
 	m.cancelConnect()
 	ref, _ := t.Ref.(k8s.ClusterRef)
-	failed := view.ClusterConnectFailed{Ref: ref, Err: t.Err.Error()}
+	why := clusters.SafeLoadError(t.Err)
+	failed := view.ClusterConnectFailed{Ref: ref, Err: why}
 	if m.picker() != nil {
 		return m, m.routeToPage(failed)
 	}
-	name := ref.Context
+	name := clusters.Sanitize(ref.Context)
 	if name == "" {
 		name = string(ref.Source) // an in-cluster ref names no context
 		if ref.Path != "" {
-			name = filepath.Base(ref.Path) // a file with no current-context to pin
+			name = clusters.Sanitize(filepath.Base(ref.Path)) // a file with no current-context to pin
 		}
 	}
-	_, tick := m.showToast(msg.Toast{Text: "connect " + name + ": " + t.Err.Error(), Level: msg.LevelError})
+	_, tick := m.showToast(msg.Toast{Text: "connect " + name + ": " + why, Level: msg.LevelError})
 	if m.sess != nil {
 		return m, tick
 	}

@@ -214,7 +214,7 @@ func (m *Model) savePasteBox() (tea.Model, tea.Cmd) {
 	req := view.PromptRequest{
 		Title:   "Name this cluster",
 		Label:   "Name",
-		Initial: context,
+		Initial: b.selectedDisplay(),
 		Validate: func(s string) error {
 			if strings.TrimSpace(s) == "" {
 				return errors.New("give it a name")
@@ -292,7 +292,9 @@ func recordPasteCmd(s *clusters.Store, file, name string, r *clusters.Report, co
 
 // recordPaste writes the state record of every context in a pasted file: its
 // name in the picker, and the login commands the user approved by saving it.
-// The file is no longer listed as needing review once this is done.
+// The file is no longer listed as needing review once this is done. Records
+// are keyed by each context's raw name, the one clusters.Build lists the file's
+// rows under, and context is a raw name too.
 func recordPaste(s *clusters.Store, file, name string, r *clusters.Report, context string) pasteSaved {
 	path := s.PastePath(file)
 	approved := r.ExecCommands()
@@ -359,7 +361,8 @@ func (b *pasteBox) tooLarge() bool { return b.buf.Len() > clusters.MaxPasteBytes
 
 // setReport takes a check of the text as it is now. The selected context stays
 // selected if the report still has it; otherwise the cursor goes to want, then
-// to the paste's current-context, then to the first.
+// to the paste's current-context, then to the first. Contexts are matched by
+// their raw names, which are what want and the current-context hold.
 func (b *pasteBox) setReport(r *clusters.Report, err error) {
 	prev := b.selected()
 	b.report, b.err, b.current, b.review, b.cursor = r, err, true, false, 0
@@ -376,12 +379,21 @@ func (b *pasteBox) setReport(r *clusters.Report, err error) {
 	}
 }
 
-// selected is the name of the context the cursor is on, "" with no report.
+// selected is the raw name of the context the cursor is on, "" with no report:
+// the context to connect to and to record.
 func (b *pasteBox) selected() string {
 	if b.report == nil || b.cursor >= len(b.report.Contexts) {
 		return ""
 	}
 	return b.report.Contexts[b.cursor].Name
+}
+
+// selectedDisplay is the selected context's name as it is drawn.
+func (b *pasteBox) selectedDisplay() string {
+	if b.report == nil || b.cursor >= len(b.report.Contexts) {
+		return ""
+	}
+	return b.report.Contexts[b.cursor].Display
 }
 
 // lineCount is the number of lines received, counting a last one with no break.
@@ -440,7 +452,7 @@ func (m *Model) renderPasteBox(h int) string {
 	if r != nil {
 		nameW := 0
 		for _, c := range r.Contexts {
-			nameW = max(nameW, ansi.StringWidth(c.Name))
+			nameW = max(nameW, ansi.StringWidth(c.Display))
 		}
 		nameW = min(nameW, 32)
 		for i, c := range r.Contexts {
@@ -452,7 +464,7 @@ func (m *Model) renderPasteBox(h int) string {
 				marker, st = "› ", t.Base
 			}
 			row := "  " + t.Dim.Render(label) + t.AccentText.Render(marker) +
-				st.Render(padRight(ansi.Truncate(c.Name, nameW, "…"), nameW)+"   "+c.Server)
+				st.Render(padRight(ansi.Truncate(c.Display, nameW, "…"), nameW)+"   "+c.Server)
 			if c.Problem != "" {
 				row += "  " + errText.Render("✗ "+c.Problem)
 			}

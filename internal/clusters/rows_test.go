@@ -132,6 +132,11 @@ func TestMatch(t *testing.T) {
 	if got := Match(rows, "nope"); len(got) != 0 {
 		t.Fatalf("none: %+v", got)
 	}
+	// A typed name holds no control characters: it matches the name as drawn.
+	raw := []Row{{Label: "x\rprod", Ref: k8s.ClusterRef{Context: "x\rprod"}}}
+	if got := Match(raw, "xprod"); len(got) != 1 {
+		t.Fatalf("drawn name: %+v", got)
+	}
 }
 
 const oneCtx = `apiVersion: v1
