@@ -93,7 +93,7 @@ func Inspect(data []byte) (*Report, error) {
 	data = Normalize(data)
 	cfg, err := clientcmd.Load(data)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrNotKubeconfig, err)
+		return nil, fmt.Errorf("%w: %s", ErrNotKubeconfig, safeLoadError(err))
 	}
 	if api.IsConfigEmpty(cfg) {
 		return nil, ErrNotKubeconfig
@@ -218,6 +218,21 @@ func secretFlag(name string) bool {
 		}
 	}
 	return false
+}
+
+// safeLoadError makes a clientcmd.Load error fit to show. client-go prints the
+// whole duplicate list with %v, token and password included, so the text is cut
+// at " in list:". Control characters are dropped and the length is capped.
+func safeLoadError(err error) string {
+	msg := err.Error()
+	if i := strings.Index(msg, " in list:"); i >= 0 {
+		msg = msg[:i]
+	}
+	msg = sanitize(msg)
+	if r := []rune(msg); len(r) > 200 {
+		msg = string(r[:200]) + "…"
+	}
+	return msg
 }
 
 // sanitize drops C0/C1 control characters, ESC and DEL so pasted text cannot

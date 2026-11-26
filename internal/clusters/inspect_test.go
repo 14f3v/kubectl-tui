@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -101,7 +102,8 @@ func TestInspectRelativeExecCommand(t *testing.T) {
 	if !errors.As(err, &rp) || rp.Field != "exec.command" {
 		t.Fatalf("err = %v", err)
 	}
-	y = strings.Replace(string(fixture(t, "exec.yaml")), "command: aws", "command: /usr/local/bin/aws", 1)
+	absCmd := filepath.Join(t.TempDir(), "aws")
+	y = strings.Replace(string(fixture(t, "exec.yaml")), "command: aws", "command: "+strconv.Quote(absCmd), 1)
 	if _, err := Inspect([]byte(y)); err != nil {
 		t.Fatalf("absolute command: %v", err)
 	}
@@ -175,11 +177,12 @@ func TestInspectAuthProvider(t *testing.T) {
 }
 
 func TestInspectLocalFilesAndInsecure(t *testing.T) {
-	r, err := Inspect(fixture(t, "tokenfile.yaml"))
+	tok := filepath.Join(t.TempDir(), "token")
+	r, err := Inspect([]byte(strings.Replace(string(fixture(t, "tokenfile.yaml")), "@@TOKENFILE@@", strconv.Quote(tok), 1)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(r.LocalFiles) != "[/etc/token]" || !r.NeedsReview() {
+	if fmt.Sprint(r.LocalFiles) != "["+tok+"]" || !r.NeedsReview() {
 		t.Fatalf("files = %v", r.LocalFiles)
 	}
 	r, err = Inspect(fixture(t, "insecure.yaml"))
@@ -199,5 +202,29 @@ func TestInspectUnusableContext(t *testing.T) {
 	}
 	if r.Contexts[0].Problem != "" || r.Contexts[1].Problem == "" {
 		t.Fatalf("contexts = %+v", r.Contexts)
+	}
+}
+
+func TestInspectLoadErrorsLeakNothing(t *testing.T) {
+	dup := `apiVersion: v1
+kind: Config
+users:
+- name: u
+  user: {token: SUPERSECRETTOKEN}
+- name: u
+  user: {username: x, password: hunter2}
+`
+	_, err := Inspect([]byte(dup))
+	if !errors.Is(err, ErrNotKubeconfig) {
+		t.Fatalf("err = %v", err)
+	}
+	for _, bad := range []string{"SUPERSECRETTOKEN", "hunter2"} {
+		if strings.Contains(err.Error(), bad) {
+			t.Fatalf("error leaks %q: %v", bad, err)
+		}
+	}
+	_, err = Inspect([]byte("apiVersion: v1\nkind: \"X\\e[2J\"\n"))
+	if err == nil || strings.ContainsRune(err.Error(), 0x1b) {
+		t.Fatalf("err = %q", err)
 	}
 }

@@ -5,7 +5,7 @@ clusters:
   cluster: {server: "https://dev.example:6443"}
 users:
 - name: u
-  user: {tokenFile: /etc/token}
+  user: {tokenFile: @@TOKENFILE@@}
 contexts:
 - name: dev
   context: {cluster: dev, user: u}
