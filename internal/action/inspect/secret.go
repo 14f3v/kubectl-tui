@@ -155,7 +155,9 @@ type Restore func(edited []byte) ([]byte, error)
 // key), one that is not the placeholder its key was written with (one moved,
 // copied or swapped from another key, or a size retyped), and one moved into
 // stringData, where it would be stored as the literal text. Errors name the
-// first such key in sorted order.
+// first such key in sorted order. They end the "apply NAME: " toast, a single
+// footer line cut to the terminal width, so each says what to do in few enough
+// words to fit 80 columns whole for a short name and key.
 //
 // When any value is put back, metadata.resourceVersion is set to the version
 // the values were read at, even if the line was deleted from the buffer. A
@@ -176,7 +178,7 @@ func (v *secretValues) restore(edited []byte) ([]byte, error) {
 	if sd, ok := obj["stringData"].(map[string]any); ok {
 		for _, k := range slices.Sorted(maps.Keys(sd)) {
 			if s, ok := sd[k].(string); ok && placeholderRE.MatchString(s) {
-				return nil, fmt.Errorf("stringData.%s is a redacted placeholder — enter the plain value", k)
+				return nil, fmt.Errorf("stringData.%s is a placeholder — enter the plain value", k)
 			}
 		}
 	}
@@ -191,9 +193,9 @@ func (v *secretValues) restore(edited []byte) ([]byte, error) {
 		orig, had := v.data[k]
 		switch {
 		case !had:
-			return nil, fmt.Errorf("data.%s is still redacted — enter a base64 value, or use stringData", k)
+			return nil, fmt.Errorf("data.%s is still redacted — set base64 or stringData", k)
 		case s != orig.placeholder:
-			return nil, fmt.Errorf("data.%s has a placeholder that is not its own — enter a base64 value, or use stringData", k)
+			return nil, fmt.Errorf("data.%s has a wrong placeholder — set base64 or stringData", k)
 		}
 		data[k] = orig.encoded
 		restored = true

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -313,7 +314,7 @@ func TestRestore(t *testing.T) {
 		{
 			name:    "a renamed key that kept its placeholder",
 			edit:    replace("  password:", "  passwd:"),
-			wantErr: "data.passwd is still redacted — enter a base64 value, or use stringData",
+			wantErr: "data.passwd is still redacted — set base64 or stringData",
 		},
 		{
 			name:    "a new key with a copy of a placeholder",
@@ -323,17 +324,17 @@ func TestRestore(t *testing.T) {
 		{
 			name:    "a placeholder with its size retyped",
 			edit:    replace("<redacted: 7 bytes of password>", "<redacted: 8 bytes of password>"),
-			wantErr: "data.password has a placeholder that is not its own — enter a base64 value, or use stringData",
+			wantErr: "data.password has a wrong placeholder — set base64 or stringData",
 		},
 		{
 			name:    "a placeholder with its key retyped",
 			edit:    replace("<redacted: 7 bytes of password>", "<redacted: 7 bytes of passwd>"),
-			wantErr: "data.password has a placeholder that is not its own",
+			wantErr: "data.password has a wrong placeholder",
 		},
 		{
 			name:    "the older placeholder form, without the key",
 			edit:    replace("<redacted: 7 bytes of password>", "<redacted: 7 bytes>"),
-			wantErr: "data.password has a placeholder that is not its own",
+			wantErr: "data.password has a wrong placeholder",
 		},
 		{
 			name: "two placeholders swapped",
@@ -342,21 +343,21 @@ func TestRestore(t *testing.T) {
 				s = replace("<redacted: 18 bytes of token>", "<redacted: 7 bytes of password>")(s)
 				return replace("<swap>", "<redacted: 18 bytes of token>")(s)
 			},
-			wantErr: "data.password has a placeholder that is not its own",
+			wantErr: "data.password has a wrong placeholder",
 		},
 		{
 			name: "a placeholder moved into stringData",
 			edit: func(s string) string {
 				return replace(password, "")(s) + "stringData:\n  password: '<redacted: 7 bytes of password>'\n"
 			},
-			wantErr: "stringData.password is a redacted placeholder — enter the plain value",
+			wantErr: "stringData.password is a placeholder — enter the plain value",
 		},
 		{
 			name: "the older placeholder form in stringData",
 			edit: func(s string) string {
 				return s + "stringData:\n  password: '<redacted: 7 bytes>'\n"
 			},
-			wantErr: "stringData.password is a redacted placeholder",
+			wantErr: "stringData.password is a placeholder",
 		},
 	}
 	for _, c := range cases {
@@ -483,20 +484,20 @@ func TestRestore_EqualSizeKeys(t *testing.T) {
 				buf = strings.Replace(buf, curLine, "", 1)
 				return strings.Replace(buf, "  next:", "  current:", 1)
 			},
-			wantErr: "data.current has a placeholder that is not its own",
+			wantErr: "data.current has a wrong placeholder",
 		},
 		"the two swapped": {
 			edit: func(buf string) string {
 				buf = strings.Replace(buf, curLine, "  current: '<redacted: 32 bytes of next>'\n", 1)
 				return strings.Replace(buf, nextLine, "  next: '<redacted: 32 bytes of current>'\n", 1)
 			},
-			wantErr: "data.current has a placeholder that is not its own",
+			wantErr: "data.current has a wrong placeholder",
 		},
 		"current copied over next": {
 			edit: func(buf string) string {
 				return strings.Replace(buf, nextLine, "  next: '<redacted: 32 bytes of current>'\n", 1)
 			},
-			wantErr: "data.next has a placeholder that is not its own",
+			wantErr: "data.next has a wrong placeholder",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -506,6 +507,40 @@ func TestRestore_EqualSizeKeys(t *testing.T) {
 			}
 			if out != nil {
 				t.Errorf("Restore returned a body to apply alongside its error: %s", out)
+			}
+		})
+	}
+}
+
+// A Restore error ends the toast "• apply NAME: ERR", one footer line cut to the
+// terminal width with no history, and the temp file holding the edit is gone
+// by then. So the whole message, the remedy at its end included, must fit 80
+// columns for a short name and a key of ten characters.
+func TestRestoreErrorsFitTheToast(t *testing.T) {
+	s := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "demo"},
+		Data:       map[string][]byte{"passwd_key": []byte("x")},
+	}
+	const ph = "'<redacted: 1 bytes of passwd_key>'"
+	for name, edit := range map[string]func(string) string{
+		"still redacted": func(buf string) string {
+			return strings.Replace(buf, "  passwd_key:", "  passwd_new:", 1)
+		},
+		"wrong placeholder": func(buf string) string {
+			return strings.Replace(buf, ph, "'<redacted: 2 bytes of passwd_key>'", 1)
+		},
+		"placeholder in stringData": func(buf string) string {
+			return buf + "stringData:\n  passwd_key: " + ph + "\n"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := editAndRestore(t, s, edit)
+			if err == nil {
+				t.Fatal("the edit was not refused")
+			}
+			toast := "• apply web: " + err.Error()
+			if w := ansi.StringWidth(toast); w > 80 {
+				t.Errorf("toast is %d columns, over 80: %s", w, toast)
 			}
 		})
 	}
