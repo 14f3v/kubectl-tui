@@ -83,12 +83,12 @@ On Windows, download `kubetui_<version>_windows_amd64.zip` (`windows_arm64` on A
 
 ```powershell
 $dir = "$env:LOCALAPPDATA\Programs\kubetui"
-Expand-Archive .\kubetui_<version>_windows_amd64.zip -DestinationPath $dir
+Expand-Archive .\kubetui_<version>_windows_amd64.zip -DestinationPath $dir -Force
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User')
 ```
 
-Then open a new terminal and run `kubetui`. See [Windows notes](#windows-notes) if SmartScreen blocks it.
+Then open a new terminal and run `kubetui`. To upgrade, run just the first two lines again with the new zip. See [Windows notes](#windows-notes) if SmartScreen blocks it.
 
 ### `go install`
 
@@ -385,14 +385,14 @@ or an upload can change a container from the inside), and **`p` port-forward**.
 
 ## Windows notes
 
-kubetui is a native Windows console app. It needs a console that understands VT (ANSI) sequences, which means **Windows 10 1809+ or Windows Server 2019+**; in the legacy console mode ("Use legacy console" in the window's properties) it exits with a console-mode error.
+kubetui is a native Windows console app for **Windows 10 1809+ and Windows Server 2019+**. It needs a console that understands VT (ANSI) sequences, so in the legacy console mode ("Use legacy console" in the window's properties) it exits with a console-mode error.
 
 - **Terminal.** Use **Windows Terminal** (the default on current Windows 11). The classic console window that PowerShell and cmd open on older systems works, but its fonts lack some of the symbols kubetui draws, so they show as boxes. On a Chinese, Japanese or Korean system code page it also draws the table and border glyphs two cells wide, which misaligns columns and boxes. Windows Terminal has neither problem.
 - **Git Bash / mintty.** Recent Git for Windows releases run console programs on a pseudo console (ConPTY), and kubetui works there. Without one (an older Git Bash, or with pseudo console support turned off) you get a blank screen that ignores keys: run kubetui from Windows Terminal, or as `winpty kubetui`.
 - **kubeconfig.** Found the same way kubectl finds it (normally `%USERPROFILE%\.kube\config`). `KUBECONFIG` takes a `;`-separated list on Windows, not `:`.
 - **Config file.** `%XDG_CONFIG_HOME%\kubetui\config.yaml` if that variable is set, otherwise `%USERPROFILE%\.config\kubetui\config.yaml` — `%USERPROFILE%` even when `%HOME%` is set and kubectl reads its kubeconfig from there.
 - **Editor.** `e` and `:apply` open `KUBE_EDITOR`, else `EDITOR`, else Notepad. kubetui waits for the editor to exit, so a GUI editor needs its wait flag: `$env:EDITOR = 'code --wait'`. Quote a program path that has spaces: `$env:EDITOR = '"C:\Program Files\Notepad++\notepad++.exe" -multiInst'`.
-- **Paths in prompts.** The file-copy (`C`) and log-save prompts accept a quoted path, such as Explorer's **Copy as path** gives you.
+- **Paths in prompts.** The file-copy (`C`) and log-save prompts accept a quoted path, as Explorer's **Copy as path** produces.
 - **Unsigned binary.** Release binaries aren't code-signed. If SmartScreen stops `kubetui.exe` ("Windows protected your PC"), choose **More info → Run anyway**, or clear the download mark before extracting with `Unblock-File .\kubetui_<version>_windows_amd64.zip`.
 
 ---
