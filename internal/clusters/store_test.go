@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func openTemp(t *testing.T) *Store {
@@ -148,5 +150,19 @@ func TestSavePasteLeadingDotIsListed(t *testing.T) {
 	}
 	if len(files) == 0 {
 		t.Fatal("pasted files not listed")
+	}
+}
+
+// No name makes a file name too long: the stem is capped, at a rune boundary.
+func TestSlugCapsLength(t *testing.T) {
+	for _, name := range []string{strings.Repeat("a", 300), strings.Repeat("é", 300), strings.Repeat("ab.", 40)} {
+		got := slug(name)
+		if len(got) > maxStem || !utf8.ValidString(got) || strings.HasSuffix(got, ".") {
+			t.Errorf("slug(%d bytes) = %q (%d bytes), want a valid stem of at most %d", len(name), got, len(got), maxStem)
+		}
+	}
+	s := openTemp(t)
+	if file, err := s.SavePaste(strings.Repeat("long ", 100), []byte("x")); err != nil || len(file) > maxStem+len(pasteExt) {
+		t.Errorf("SavePaste = %q, %v", file, err)
 	}
 }

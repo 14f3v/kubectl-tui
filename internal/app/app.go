@@ -158,6 +158,7 @@ type promptState struct {
 	label     string
 	buf       string
 	prefilled bool
+	oneLine   bool // a paste with a line break is refused (view.PromptRequest.OneLine)
 	errMsg    string
 	validate  func(string) error
 	action    func(string) tea.Msg
@@ -386,7 +387,7 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		return m, nil
 
 	case view.PromptRequest:
-		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, prefilled: t.Initial != "", validate: t.Validate, action: t.Action}
+		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, prefilled: t.Initial != "", oneLine: t.OneLine, validate: t.Validate, action: t.Action}
 		return m, nil
 
 	case view.SwitchContextRequest:
@@ -1303,10 +1304,20 @@ func (m *Model) promptPaste(s string) {
 // It goes to whichever text input is open, exactly as if it had been typed. With
 // none open it is gated like a key: it cannot answer a confirm dialog, and it
 // does not reach a page that is hidden behind help or an error banner.
+//
+// A paste that looks like a file is refused by a prompt that wants one line,
+// with a toast, rather than flattened into it, where it would be drawn and
+// could become a file name in an error. That is any prompt over the paste box,
+// whose name prompt a second paste of the kubeconfig would otherwise fill, and
+// a prompt that asked for one line (a path).
 func (m *Model) handlePaste(p tea.PasteMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case m.panicInfo != "" || m.fatal != nil:
 		return m, nil
+	case m.prompt != nil && m.paste != nil && (hasLineBreak(p.Content) || len(trimBreaks(p.Content)) > maxNamePaste):
+		return m.showToast(msg.Toast{Text: "the box already holds the kubeconfig; type a name", Level: msg.LevelWarn})
+	case m.prompt != nil && m.prompt.oneLine && hasLineBreak(p.Content):
+		return m.showToast(msg.Toast{Text: "that paste has line breaks; paste only one line", Level: msg.LevelWarn})
 	case m.prompt != nil:
 		m.promptPaste(singleLine(p.Content))
 		return m, nil
@@ -1323,6 +1334,17 @@ func (m *Model) handlePaste(p tea.PasteMsg) (tea.Model, tea.Cmd) {
 		return m, m.routeToPage(p)
 	}
 }
+
+// maxNamePaste is the most a paste into a prompt over the paste box may hold:
+// far more than a name, far less than a kubeconfig.
+const maxNamePaste = 256
+
+// trimBreaks drops the line breaks at the end of a paste: copying a line from a
+// terminal often takes its newline too.
+func trimBreaks(s string) string { return strings.TrimRight(s, "\r\n") }
+
+// hasLineBreak reports whether a paste holds a line break before its end.
+func hasLineBreak(s string) bool { return strings.ContainsAny(trimBreaks(s), "\r\n") }
 
 // singleLine flattens pasted text for a one-line input. Every line break becomes
 // one space — CRLF, a lone CR and a lone LF alike, because terminals differ in

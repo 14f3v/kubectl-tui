@@ -116,9 +116,10 @@ func (p *clusterPickerPage) onKey(k string) tea.Cmd {
 			return toast(p.noStore, msg.LevelWarn)
 		}
 		req := PromptRequest{
-			Title:  "Add kubeconfig file",
-			Label:  "Path",
-			Action: func(s string) tea.Msg { return AddKubeconfigFile{Path: unquotePath(s)} },
+			Title:   "Add kubeconfig file",
+			Label:   "Path",
+			OneLine: true,
+			Action:  func(s string) tea.Msg { return AddKubeconfigFile{Path: unquotePath(s)} },
 		}
 		return func() tea.Msg { return req }
 	case "ctrl+d":

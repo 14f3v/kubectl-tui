@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
@@ -189,6 +190,8 @@ func (m *Model) handlePasteBoxPaste(p tea.PasteMsg) (tea.Model, tea.Cmd) {
 // savePasteBox is ctrl+s. It does nothing while the text has errors, shows the
 // review first when the paste needs one, then asks for a name, which leads to
 // the save. A saved file under review is recorded as it is, with no prompt.
+// With the review showing, ctrl+s means "I've read this", so it does nothing
+// while any line of the review is cut off the screen; the footer says so.
 func (m *Model) savePasteBox() (tea.Model, tea.Cmd) {
 	b := m.paste
 	switch {
@@ -202,30 +205,44 @@ func (m *Model) savePasteBox() (tea.Model, tea.Cmd) {
 	case b.report.NeedsReview() && !b.review:
 		b.review = true
 		return m, nil
+	case b.report.NeedsReview() && !m.reviewWhole():
+		return m, nil
 	case b.existing != "":
 		// Named after the file's stem ("team" for team.yaml), which is the
 		// label clusters.Build gave its unreviewed row, so approving it does
-		// not rename the row.
+		// not rename the row. Contexts already recorded keep their names.
 		b.saving = true
 		name := strings.TrimSuffix(b.existing, filepath.Ext(b.existing))
 		return m, recordPasteCmd(m.store, b.existing, name, b.report, b.selected())
 	}
 	r, context := b.report, b.selected()
 	req := view.PromptRequest{
-		Title:   "Name this cluster",
-		Label:   "Name",
-		Initial: b.selectedDisplay(),
-		Validate: func(s string) error {
-			if strings.TrimSpace(s) == "" {
-				return errors.New("give it a name")
-			}
-			return nil
-		},
+		Title:    "Name this cluster",
+		Label:    "Name",
+		Initial:  b.selectedDisplay(),
+		Validate: validName,
 		Action: func(s string) tea.Msg {
 			return pasteNamed{name: strings.TrimSpace(s), report: r, context: context}
 		},
 	}
 	return m, func() tea.Msg { return req }
+}
+
+// maxNameRunes caps a paste's name, which labels its picker rows and stems its
+// file name.
+const maxNameRunes = 64
+
+// validName is the name prompt's check: a name, on one line, and short.
+func validName(s string) error {
+	switch {
+	case strings.TrimSpace(s) == "":
+		return errors.New("give it a name")
+	case strings.IndexFunc(s, unicode.IsControl) >= 0:
+		return errors.New("a name is one line")
+	case utf8.RuneCountInString(strings.TrimSpace(s)) > maxNameRunes:
+		return fmt.Errorf("keep it to %d characters", maxNameRunes)
+	}
+	return nil
 }
 
 // onPasteNamed starts the save of the paste the user just named.
@@ -281,13 +298,14 @@ func savePasteCmd(s *clusters.Store, name string, r *clusters.Report, context st
 		if err != nil {
 			return pasteSaved{err: err}
 		}
-		return recordPaste(s, file, name, r, context)
+		return recordPaste(s, file, name, r, context, true)
 	}
 }
 
-// recordPasteCmd records a pasted file that was reviewed in the box.
+// recordPasteCmd records a pasted file that was reviewed in the box, keeping
+// the names its recorded contexts already have.
 func recordPasteCmd(s *clusters.Store, file, name string, r *clusters.Report, context string) tea.Cmd {
-	return func() tea.Msg { return recordPaste(s, file, name, r, context) }
+	return func() tea.Msg { return recordPaste(s, file, name, r, context, false) }
 }
 
 // recordPaste writes the state record of every context in a pasted file: its
@@ -295,13 +313,20 @@ func recordPasteCmd(s *clusters.Store, file, name string, r *clusters.Report, co
 // The file is no longer listed as needing review once this is done. Records
 // are keyed by each context's raw name, the one clusters.Build lists the file's
 // rows under, and context is a raw name too.
-func recordPaste(s *clusters.Store, file, name string, r *clusters.Report, context string) pasteSaved {
+//
+// rename gives every context the name: a new paste, or one whose text is
+// already saved, which this relabels. Without it, the review of a saved file,
+// name only fills a context that has none, so names the user gave stay.
+func recordPaste(s *clusters.Store, file, name string, r *clusters.Report, context string, rename bool) pasteSaved {
 	path := s.PastePath(file)
 	approved := r.ExecCommands()
 	for _, c := range r.Contexts {
 		ref := k8s.ClusterRef{Source: k8s.SourcePasted, Path: path, Context: c.Name}
 		if err := s.Update(clusters.KeyFor(ref, ""), func(e *clusters.Entry) {
-			e.Name, e.ApprovedExec = name, approved
+			if rename || e.Name == "" {
+				e.Name = name
+			}
+			e.ApprovedExec = approved
 		}); err != nil {
 			return pasteSaved{err: err}
 		}
@@ -411,11 +436,34 @@ func lineBreaks(s string) int {
 	return strings.Count(s, "\n") + strings.Count(s, "\r") - strings.Count(s, "\r\n")
 }
 
-// renderPasteBox draws the box in the content area. It never draws the text it
-// holds: only the counts, the contexts with their servers and problems, the
-// review, any error and the keys. Everything else it shows came through
-// clusters.Inspect, which strips control characters.
+// renderPasteBox draws the box in the content area.
 func (m *Model) renderPasteBox(h int) string {
+	box, _ := m.pasteBoxLayout(h)
+	return box
+}
+
+// reviewWhole reports whether the paste box, as render draws it now, shows
+// every line of its review. Nothing is drawn before the screen has a size.
+func (m *Model) reviewWhole() bool {
+	if m.width <= 0 || m.height <= 0 {
+		return false
+	}
+	_, whole := m.pasteBoxLayout(m.contentHeight())
+	return whole
+}
+
+// pasteBoxLayout lays the box out in h lines and reports whether every line of
+// the review is among them. It never draws the text the box holds: only the
+// counts, the review, the contexts with their servers and problems, any error
+// and the keys. Everything else it shows came through clusters.Inspect, which
+// strips control characters.
+//
+// The review comes before the contexts, so a paste with many of them cannot
+// push the login command off the screen, and the contexts collapse to the
+// selected one when the whole list does not fit. On a screen too short for the
+// review even so, the footer says to make the window taller instead of
+// offering ctrl+s as "I've read this".
+func (m *Model) pasteBoxLayout(h int) (box string, reviewWhole bool) {
 	t, b := m.theme, m.paste
 	w := max(m.width-4, 10) // two cells of margin on each side
 	errText := lipgloss.NewStyle().Foreground(t.Pal.Err)
@@ -428,64 +476,44 @@ func (m *Model) renderPasteBox(h int) string {
 		}
 		return out
 	}
-	var body []string
-	add := func(indent int, st lipgloss.Style, s string) { body = append(body, wrap(indent, st, s)...) }
+	add := func(dst *[]string, indent int, st lipgloss.Style, s string) {
+		*dst = append(*dst, wrap(indent, st, s)...)
+	}
 
+	var head []string
 	title, intro := "paste a kubeconfig", "Paste it now (ctrl+shift+v or right-click in most terminals)."
 	if b.existing != "" {
 		title = "review a saved kubeconfig"
 		intro = singleLine(b.existing) + " is in kubetui's clusters folder but was never reviewed. Check what it does before connecting."
 	}
-	add(0, t.AccentText.Bold(true), title)
-	body = append(body, "")
-	add(0, t.Base, intro)
-	body = append(body, "")
+	add(&head, 0, t.AccentText.Bold(true), title)
+	head = append(head, "")
+	add(&head, 0, t.Base, intro)
+	head = append(head, "")
 	if b.existing == "" {
 		lines := fmt.Sprintf("%d lines", b.lineCount())
 		if b.lineCount() == 1 {
 			lines = "1 line"
 		}
-		add(0, t.Dim, fmt.Sprintf("received %s, %.1f KB", lines, float64(b.buf.Len())/1024))
+		add(&head, 0, t.Dim, fmt.Sprintf("received %s, %.1f KB", lines, float64(b.buf.Len())/1024))
 	}
 
 	r := b.report
-	if r != nil {
-		nameW := 0
-		for _, c := range r.Contexts {
-			nameW = max(nameW, ansi.StringWidth(c.Display))
-		}
-		nameW = min(nameW, 32)
-		for i, c := range r.Contexts {
-			label, marker, st := "           ", "  ", t.Dim
-			if i == 0 {
-				label = "contexts:  "
-			}
-			if i == b.cursor {
-				marker, st = "› ", t.Base
-			}
-			row := "  " + t.Dim.Render(label) + t.AccentText.Render(marker) +
-				st.Render(padRight(ansi.Truncate(c.Display, nameW, "…"), nameW)+"   "+c.Server)
-			if c.Problem != "" {
-				row += "  " + errText.Render("✗ "+c.Problem)
-			}
-			body = append(body, row)
-		}
-	}
-
+	var review []string
 	if r != nil && r.NeedsReview() {
-		body = append(body, "")
+		review = append(review, "")
 		if !b.review {
-			add(0, warnText, "This kubeconfig needs a review: ctrl+s shows what connecting with it does.")
+			add(&review, 0, warnText, "This kubeconfig needs a review: ctrl+s shows what connecting with it does.")
 		} else {
-			add(0, warnText, "Check what connecting with it does:")
+			add(&review, 0, warnText, "Check what connecting with it does:")
 			for _, e := range r.Exec {
-				add(2, t.Base, "• user "+e.User+" logs in by running this command, every time kubetui connects:")
-				add(6, t.Base, strings.Join(append([]string{e.Command}, e.Args...), " "))
+				add(&review, 2, t.Base, "• user "+e.User+" logs in by running this command, every time kubetui connects:")
+				add(&review, 6, t.Base, strings.Join(append([]string{e.Command}, e.Args...), " "))
 				if len(e.EnvNames) > 0 {
-					add(6, t.Dim, "with env "+strings.Join(e.EnvNames, ", ")+" (values hidden)")
+					add(&review, 6, t.Dim, "with env "+strings.Join(e.EnvNames, ", ")+" (values hidden)")
 				}
 				if e.InteractiveMode != "" {
-					add(6, t.Dim, "interactive mode: "+e.InteractiveMode)
+					add(&review, 6, t.Dim, "interactive mode: "+e.InteractiveMode)
 				}
 			}
 			for _, a := range r.AuthProviders {
@@ -493,42 +521,111 @@ func (m *Model) renderPasteBox(h int) string {
 				if issuer == "" {
 					issuer = "its issuer"
 				}
-				add(2, t.Base, "• user "+a.User+" logs in with the "+a.Name+" auth-provider: it contacts "+issuer+" and writes refreshed tokens into the saved file")
+				add(&review, 2, t.Base, "• user "+a.User+" logs in with the "+a.Name+" auth-provider: it contacts "+issuer+" and writes refreshed tokens into the saved file")
 			}
 			for _, f := range r.LocalFiles {
-				add(2, t.Base, "• reads "+f+" on this computer and sends what is in it to the server")
+				add(&review, 2, t.Base, "• reads "+f+" on this computer and sends what is in it to the server")
 			}
 			for _, c := range r.Insecure {
-				add(2, t.Base, "• skips TLS verification for cluster "+c+" (insecure-skip-tls-verify)")
+				add(&review, 2, t.Base, "• skips TLS verification for cluster "+c+" (insecure-skip-tls-verify)")
 			}
 		}
 	}
 
-	if b.err != nil {
-		body = append(body, "")
-		add(0, errText, "✗ "+singleLine(b.err.Error()))
+	// contexts lists every context, or with only set just the selected one and
+	// how many more there are. A problem goes on its own lines under the name,
+	// wrapped rather than cut at the edge.
+	contexts := func(only bool) []string {
+		if r == nil {
+			return nil
+		}
+		nameW := 0
+		for _, c := range r.Contexts {
+			nameW = max(nameW, ansi.StringWidth(c.Display))
+		}
+		nameW = min(nameW, 32)
+		var out []string
+		for i, c := range r.Contexts {
+			if only && i != b.cursor {
+				continue
+			}
+			label, marker, st := "           ", "  ", t.Dim
+			if len(out) == 0 {
+				label = "contexts:  "
+			}
+			if i == b.cursor {
+				marker, st = "› ", t.Base
+			}
+			out = append(out, "  "+t.Dim.Render(label)+t.AccentText.Render(marker)+
+				st.Render(padRight(ansi.Truncate(c.Display, nameW, "…"), nameW)+"   "+c.Server))
+			if c.Problem != "" {
+				add(&out, 13, errText, "✗ "+c.Problem) // under the name
+			}
+		}
+		if only {
+			add(&out, 13, t.Dim, fmt.Sprintf("%d more (↑↓)", len(r.Contexts)-1))
+		}
+		return out
 	}
 
-	keys := "ctrl+s save · esc cancel"
-	switch {
-	case b.review:
-		keys = "ctrl+s I've read this, save and connect · esc cancel"
-	case r != nil && r.NeedsReview():
-		keys = "ctrl+s review · esc cancel"
+	var tail []string
+	if b.err != nil {
+		tail = append(tail, "")
+		add(&tail, 0, errText, "✗ "+singleLine(b.err.Error()))
 	}
-	if r != nil && len(r.Contexts) > 1 {
-		keys = "↑↓ context · " + keys
+
+	assemble := func(ctxs []string) []string {
+		body := append(append([]string{}, head...), review...)
+		if len(ctxs) > 0 && len(review) > 0 {
+			body = append(body, "")
+		}
+		return append(append(body, ctxs...), tail...)
 	}
-	// The keys always show, wrapped rather than cut, since ctrl+s can mean "I've
-	// read this". On a short screen the middle is cut instead, and says so.
-	foot := strings.Join(wrap(0, t.Faint, keys), "\n")
-	room := h - 1 - strings.Count(foot, "\n") - 1 // a blank line, then the keys
-	if room < 1 {
-		return fitBlock(foot, m.width, h)
+	reviewEnd := len(head) + len(review) // the review is body[len(head):reviewEnd]
+
+	// cut says the review does not fit: the footer then says so rather than
+	// offer ctrl+s. The keys always show, wrapped rather than cut.
+	foot := func(cut bool) string {
+		keys := "ctrl+s save · esc cancel"
+		switch {
+		case b.review && cut:
+			keys = "make the window taller to see the whole review · esc cancel"
+		case b.review:
+			keys = "ctrl+s I've read this, save and connect · esc cancel"
+		case r != nil && r.NeedsReview():
+			keys = "ctrl+s review · esc cancel"
+		}
+		if r != nil && len(r.Contexts) > 1 {
+			keys = "↑↓ context · " + keys
+		}
+		return strings.Join(wrap(0, t.Faint, keys), "\n")
 	}
-	if len(body) > room {
-		more := len(body) - room + 1
-		body = append(body[:room-1], "  "+warnText.Render(fmt.Sprintf("… %d more lines (make the window taller)", more)))
+	// lay fits the body into the room the footer leaves: the whole list of
+	// contexts, else the collapsed one, and on a short screen the start of the
+	// body and a line saying how much is cut. It reports whether the review is
+	// all in it.
+	lay := func(foot string) (string, bool) {
+		room := h - 1 - strings.Count(foot, "\n") - 1 // a blank line, then the keys
+		if room < 1 {
+			return fitBlock(foot, m.width, h), len(review) == 0
+		}
+		body := assemble(contexts(false))
+		if len(body) > room && r != nil && len(r.Contexts) > 1 {
+			body = assemble(contexts(true))
+		}
+		whole := true
+		if len(body) > room {
+			more := len(body) - room + 1
+			whole = reviewEnd <= room-1
+			body = append(body[:room-1], "  "+warnText.Render(fmt.Sprintf("… %d more lines (make the window taller)", more)))
+		}
+		return fitBlock(strings.Join(body, "\n")+"\n\n"+foot, m.width, h), whole
 	}
-	return fitBlock(strings.Join(body, "\n")+"\n\n"+foot, m.width, h)
+	// Whether the review fits is decided with the footer that offers ctrl+s,
+	// the one it would be read with.
+	box, reviewWhole = lay(foot(false))
+	if b.review && !reviewWhole {
+		box, _ = lay(foot(true))
+	}
+	return box, reviewWhole
 }

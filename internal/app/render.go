@@ -74,11 +74,7 @@ func (m *Model) render() string {
 	crumb := m.renderBreadcrumb()
 	footer := m.renderFooter()
 
-	contentH := m.height - 1 - headerHeight - 1 - 1
-	if contentH < 1 {
-		contentH = 1
-	}
-	content := m.renderContent(contentH)
+	content := m.renderContent(m.contentHeight())
 
 	frame := strings.Join([]string{cmd, header, crumb, content, footer}, "\n")
 
@@ -109,7 +105,18 @@ func (m *Model) renderNoSession() string {
 	if m.toast != nil {
 		foot = m.renderToast()
 	}
-	return strings.Join([]string{title, m.renderContent(max(m.height-2, 1)), foot}, "\n")
+	return strings.Join([]string{title, m.renderContent(m.contentHeight()), foot}, "\n")
+}
+
+// contentHeight is the height render gives the content area, which holds the
+// page, the dialogs and the paste box: the screen less the title and toast
+// lines before the first connect, less the command bar, header, breadcrumb
+// and footer after it.
+func (m *Model) contentHeight() int {
+	if m.beforeConnect() {
+		return max(m.height-2, 1)
+	}
+	return max(m.height-1-headerHeight-1-1, 1)
 }
 
 // overlayPalette splices the command palette box onto the frame's lines starting

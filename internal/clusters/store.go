@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/14f3v/kubectl-tui/internal/action/cp"
 )
@@ -113,10 +114,24 @@ func (s *Store) PastedFiles() ([]string, error) {
 // DeletePaste removes a pasted kubeconfig.
 func (s *Store) DeletePaste(file string) error { return os.Remove(s.PastePath(file)) }
 
-// slug makes a file-name-safe stem on every OS: lowercase, spaces to dashes.
-// Leading dots are trimmed so the file is never hidden from PastedFiles.
+// maxStem caps a pasted file's stem in bytes, far below any file system's
+// limit on a name, so no name makes the save fail as "file name too long".
+const maxStem = 64
+
+// slug makes a file-name-safe stem on every OS: lowercase, spaces to dashes,
+// at most maxStem bytes, cut at a rune boundary before the Windows rules trim
+// any dot or space the cut leaves at the end. Leading dots are trimmed so the
+// file is never hidden from PastedFiles.
 func slug(name string) string {
-	s := cp.WindowsFileName(strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), " ", "-"))
+	s := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), " ", "-")
+	if len(s) > maxStem {
+		cut := maxStem
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut]
+	}
+	s = cp.WindowsFileName(s)
 	if s = strings.TrimLeft(s, "."); s == "" {
 		return "cluster"
 	}

@@ -38,9 +38,14 @@ type ConfirmRequest struct {
 // On a valid enter the root runs Action(value) as a command and dismisses; esc
 // cancels. Initial pre-fills the field.
 type PromptRequest struct {
-	Title    string
-	Label    string
-	Initial  string
+	Title   string
+	Label   string
+	Initial string
+	// OneLine refuses a paste that holds a line break, with a toast, rather
+	// than flattening it into the field: what the prompt asks for (a path) has
+	// none, and such a paste is most likely a whole file, which must not be
+	// drawn in the field or end up in an error.
+	OneLine  bool
 	Validate func(string) error
 	Action   func(string) tea.Msg
 }

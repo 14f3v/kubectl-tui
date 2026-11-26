@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -632,5 +633,297 @@ func TestApprovedExecComesFromTheEntry(t *testing.T) {
 	}
 	if got := approvedExec(s, ref); !slices.Equal(got, []string{"aws"}) {
 		t.Fatalf("approved = %v, want [aws]", got)
+	}
+}
+
+// manyCtxExec has six contexts on one exec user and a CA file: on a short
+// screen a list of contexts drawn before the review pushed the login command
+// out of view while ctrl+s still meant "I've read this".
+const manyCtxExec = `apiVersion: v1
+kind: Config
+current-context: c1
+clusters:
+- name: k
+  cluster:
+    server: https://example.invalid:6443
+    certificate-authority: /etc/kubetui-probe/ca.crt
+users:
+- name: sso
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: definitely-not-aws
+      args: [--run, curl-evil]
+      env:
+      - {name: AWS_PROFILE, value: x}
+contexts:
+- {name: c1, context: {cluster: k, user: sso}}
+- {name: c2, context: {cluster: k, user: sso}}
+- {name: c3, context: {cluster: k, user: sso}}
+- {name: c4, context: {cluster: k, user: sso}}
+- {name: c5, context: {cluster: k, user: sso}}
+- {name: c6, context: {cluster: k, user: sso}}
+`
+
+// reviewBox opens the paste box over a Session at width×height, pastes text
+// and shows its review.
+func reviewBox(t *testing.T, width, height int, text string) *Model {
+	t.Helper()
+	m, _, _, _ := connected(t, fastServer(t))
+	m.store = savedStore(t, "")
+	m.width, m.height = width, height
+	m.Update(view.OpenPasteBox{})
+	pasteIn(t, m, text)
+	if cmd := press(m, ctrlKey('s')); cmd != nil || !m.paste.review {
+		t.Fatalf("ctrl+s did not show the review: err = %v", m.paste.err)
+	}
+	return m
+}
+
+// ctrl+s approves only a review the user can see whole. On 80×24 under the
+// header (16 lines) the review comes first, so the command shows and ctrl+s
+// approves it. With a little more room the contexts collapse to the selected
+// one. On a screen too short for the review, ctrl+s does nothing and the footer
+// says to make the window taller.
+func TestPasteBoxReviewIsWholeOrNotApproved(t *testing.T) {
+	const lastItem = "sends what is in it to the server" // the review's last line
+	m := reviewBox(t, 80, 24, manyCtxExec)
+	v := screen(m)
+	for _, want := range []string{"definitely-not-aws --run curl-evil", "AWS_PROFILE", "/etc/kubetui-probe/ca.crt", "I've read this"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("80×24: the screen has no %q:\n%s", want, v)
+		}
+	}
+	if !strings.Contains(strings.Join(strings.Fields(v), " "), lastItem) {
+		t.Errorf("80×24: the review's last line is cut:\n%s", v)
+	}
+	ask := press(m, ctrlKey('s'))
+	if ask == nil {
+		t.Fatal("80×24: ctrl+s on a review shown whole did not approve it")
+	}
+	if _, ok := ask().(view.PromptRequest); !ok {
+		t.Error("80×24: ctrl+s did not go on to the name")
+	}
+
+	m = reviewBox(t, 80, 30, manyCtxExec)
+	v = screen(m)
+	for _, want := range []string{"› c1", "5 more (↑↓)"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("80×30: the screen has no %q:\n%s", want, v)
+		}
+	}
+	if strings.Contains(v, "c2") {
+		t.Errorf("80×30: the contexts did not collapse to the selected one:\n%s", v)
+	}
+	if strings.Index(v, "definitely-not-aws") > strings.Index(v, "› c1") {
+		t.Errorf("80×30: the contexts come before the review:\n%s", v)
+	}
+
+	m = reviewBox(t, 80, 14, manyCtxExec)
+	v = screen(m)
+	if strings.Contains(v, "I've read this") || !strings.Contains(v, "make the window taller to see the whole review") {
+		t.Errorf("80×14: the footer does not say the review is cut:\n%s", v)
+	}
+	if cmd := press(m, ctrlKey('s')); cmd != nil || m.prompt != nil {
+		t.Fatal("80×14: ctrl+s approved a review that is cut off the screen")
+	}
+
+	// At every height, ctrl+s is offered only with the whole review on screen,
+	// and it approves exactly when it is offered.
+	for h := 1; h <= 40; h++ {
+		m.Update(tea.WindowSizeMsg{Width: 80, Height: h})
+		v := screen(m)
+		offered := strings.Contains(v, "I've read this")
+		shown := strings.Contains(v, "definitely-not-aws --run curl-evil") && strings.Contains(strings.Join(strings.Fields(v), " "), lastItem)
+		if offered && !shown {
+			t.Errorf("80×%d: ctrl+s is offered with the review cut:\n%s", h, v)
+		}
+		if offered != m.reviewWhole() {
+			t.Errorf("80×%d: the footer offers ctrl+s = %v, but it approves = %v", h, offered, m.reviewWhole())
+		}
+	}
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	if cmd := press(m, ctrlKey('s')); cmd == nil {
+		t.Fatal("80×40: ctrl+s did not approve once the review fits")
+	}
+
+	// With no size yet nothing is drawn, so nothing was read.
+	m = reviewBox(t, 80, 24, manyCtxExec)
+	m.width, m.height = 0, 0
+	if cmd := press(m, ctrlKey('s')); cmd != nil {
+		t.Fatal("ctrl+s approved a review before the screen had a size")
+	}
+}
+
+// At launch, with the whole screen but the title and toast lines, a paste of
+// a dozen contexts still shows its review first.
+func TestPasteBoxReviewBeforeManyContexts(t *testing.T) {
+	var many strings.Builder
+	many.WriteString(strings.Split(manyCtxExec, "contexts:\n")[0] + "contexts:\n")
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&many, "- {name: c%02d, context: {cluster: k, user: sso}}\n", i)
+	}
+	m := pasteBoxModel(t)
+	m.width, m.height = 80, 24
+	pasteIn(t, m, many.String())
+	press(m, ctrlKey('s'))
+	if v := boxView(m); !strings.Contains(v, "definitely-not-aws --run curl-evil") || !strings.Contains(v, "I've read this") {
+		t.Errorf("the review is not whole on the launch screen:\n%s", v)
+	}
+}
+
+// A context's problem is wrapped onto its own indented lines, not cut at the
+// edge of the screen.
+func TestPasteBoxWrapsContextProblem(t *testing.T) {
+	m := pasteBoxModel(t)
+	m.width, m.height = 80, 40
+	pasteIn(t, m, manyCtxExec)
+	v := boxView(m)
+	joined := strings.Join(strings.Fields(v), " ")
+	if !strings.Contains(joined, "✗ invalid configuration:") || !strings.Contains(joined, "no such file or directory") {
+		t.Errorf("the problem is not shown whole:\n%s", v)
+	}
+	for _, line := range strings.Split(v, "\n") {
+		if strings.Contains(line, "✗") && strings.Contains(line, "c1") {
+			t.Errorf("the problem shares the context's line, where it is cut: %q", line)
+		}
+	}
+}
+
+// A second paste while the box's own name prompt is open would have drawn the
+// kubeconfig, token included, across the prompt, and enter would have made it
+// the file name: the save error quoted it. It is refused.
+func TestPasteIntoNamePromptIsRefused(t *testing.T) {
+	m := pasteBoxModel(t)
+	pasteIn(t, m, pasteTwo)
+	m.Update(press(m, ctrlKey('s'))())
+	if m.prompt == nil {
+		t.Fatal("the name prompt did not open")
+	}
+	for _, p := range []string{pasteTwo, "tok-SECRET-" + strings.Repeat("x", 300)} {
+		m.Update(tea.PasteMsg{Content: p})
+		if m.prompt.buf != "prod" {
+			t.Errorf("the prompt took the paste: %q", m.prompt.buf)
+		}
+		if want := "the box already holds the kubeconfig; type a name"; m.toast == nil || m.toast.Text != want {
+			t.Errorf("toast = %+v, want %q", m.toast, want)
+		}
+		if v := screen(m); strings.Contains(strings.ReplaceAll(v, " ", ""), "tok-SECRET") {
+			t.Errorf("the token is on the screen:\n%s", v)
+		}
+	}
+	// A short paste of a name is taken, a trailing line break and all.
+	m.Update(tea.PasteMsg{Content: "team-a\n"})
+	if got := strings.TrimSpace(m.prompt.buf); got != "team-a" {
+		t.Errorf("a pasted name gave %q, want team-a", m.prompt.buf)
+	}
+	save := deliver(t, m, press(m, tea.KeyPressMsg{Code: tea.KeyEnter}))
+	res := save()
+	if ps, ok := res.(pasteSaved); !ok || ps.err != nil || filepath.Base(ps.ref.Path) != "team-a.yaml" {
+		t.Errorf("save = %+v, want team-a.yaml", res)
+	}
+}
+
+// The name is one line of at most 64 characters, and its file name is capped
+// too, so no name can make the save fail with "file name too long".
+func TestNamePromptValidatesName(t *testing.T) {
+	m := pasteBoxModel(t)
+	pasteIn(t, m, pasteTwo)
+	req, ok := press(m, ctrlKey('s'))().(view.PromptRequest)
+	if !ok || req.Validate == nil {
+		t.Fatal("no name prompt with a check")
+	}
+	for name, ok := range map[string]bool{
+		"prod":                   true,
+		strings.Repeat("é", 64):  true,
+		strings.Repeat("é", 65):  false,
+		"two\nlines":             false,
+		"esc\x1b[2J":             false,
+		"   ":                    false,
+		strings.Repeat("x", 300): false,
+	} {
+		if err := req.Validate(name); (err == nil) != ok {
+			t.Errorf("Validate(%q) = %v, want ok = %v", name, err, ok)
+		}
+	}
+}
+
+// The f prompt asks for a path, which has no line break: a paste with one is
+// refused rather than flattened into the field.
+func TestFilePromptRefusesLineBreaks(t *testing.T) {
+	m := New(Config{Store: savedStore(t, "")})
+	m.width, m.height = 120, 40
+	p := view.NewClusterPicker(m.theme, nil, true)
+	m.pushPage(p)
+	m.Update(view.ClustersLoaded{})
+	_, f := m.handleKey(textKey('f'))
+	m.Update(f())
+	if m.prompt == nil {
+		t.Fatal("f did not open the path prompt")
+	}
+	m.Update(tea.PasteMsg{Content: "apiVersion: v1\nkind: Config\nusers:\n- {name: u, user: {token: tok-SECRET}}\n"})
+	if m.prompt.buf != "" || m.toast == nil {
+		t.Fatalf("buf = %q, toast = %+v; want the paste refused with a toast", m.prompt.buf, m.toast)
+	}
+	if strings.Contains(screen(m), "tok-SECRET") {
+		t.Errorf("the token is on the screen:\n%s", screen(m))
+	}
+	m.Update(tea.PasteMsg{Content: "/tmp/dev.yaml\n"})
+	if got := strings.TrimSpace(m.prompt.buf); got != "/tmp/dev.yaml" {
+		t.Errorf("a pasted path gave %q, want /tmp/dev.yaml", m.prompt.buf)
+	}
+}
+
+// Reviewing a file some of whose contexts are already recorded keeps the names
+// they have; only the unnamed ones take the file's stem.
+func TestPasteBoxReviewKeepsNames(t *testing.T) {
+	s := savedStore(t, "")
+	file, err := s.SavePaste("team", []byte(pasteTwo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	named := k8s.ClusterRef{Source: k8s.SourcePasted, Path: s.PastePath(file), Context: "prod"}
+	if err := s.Update(clusters.KeyFor(named, ""), func(e *clusters.Entry) { e.Name = "production" }); err != nil {
+		t.Fatal(err)
+	}
+	r, err := clusters.Inspect([]byte(pasteTwo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ps := recordPaste(s, file, "team", r, "dev", false); ps.err != nil {
+		t.Fatal(ps.err)
+	}
+	entries, _ := s.Entries()
+	got := map[string]string{}
+	for _, e := range entries {
+		got[e.Context] = e.Name
+	}
+	if got["prod"] != "production" || got["dev"] != "team" {
+		t.Errorf("names = %v, want prod kept as production and dev named team", got)
+	}
+}
+
+// A paste under 1 MiB that is not a kubeconfig says so, with no parse of any
+// later text needed.
+func TestPasteBoxSaysNotAKubeconfig(t *testing.T) {
+	for name, text := range map[string]string{
+		"prose":        "remember the milk\n",
+		"secret":       "apiVersion: v1\nkind: Secret\nmetadata: {name: s}\ndata: {token: c2VjcmV0}\n",
+		"half a meg":   strings.Repeat("a: b\n", 100_000),
+		"yaml no kind": "clusters: []\nusers: []\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := pasteBoxModel(t)
+			pasteIn(t, m, text)
+			if !errors.Is(m.paste.err, clusters.ErrNotKubeconfig) {
+				t.Fatalf("err = %v, want %v", m.paste.err, clusters.ErrNotKubeconfig)
+			}
+			if v := boxView(m); !strings.Contains(v, "✗ this doesn't look like a kubeconfig") {
+				t.Errorf("the box does not say so:\n%s", v)
+			}
+			if cmd := press(m, ctrlKey('s')); cmd != nil || m.prompt != nil {
+				t.Error("ctrl+s acted on text that is not a kubeconfig")
+			}
+		})
 	}
 }

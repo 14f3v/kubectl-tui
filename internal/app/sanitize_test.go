@@ -88,7 +88,7 @@ func TestPastedNamesAreSanitizedOnScreen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ps := recordPaste(s, file, "evil", r, r.Contexts[0].Name)
+	ps := recordPaste(s, file, "evil", r, r.Contexts[0].Name, true)
 	want := k8s.ClusterRef{Source: k8s.SourcePasted, Path: s.PastePath(file), Context: evilContext}
 	if ps.err != nil || ps.ref != want {
 		t.Fatalf("recorded %+v (%v), want a connect to %+v", ps.ref, ps.err, want)
