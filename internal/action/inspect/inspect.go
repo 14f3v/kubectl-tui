@@ -10,6 +10,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/describe"
@@ -135,14 +136,21 @@ func render(obj any) (string, *secretValues, error) {
 
 // Describe runs the kubectl describer for a kind and object, returning its text.
 // It makes its own API calls (describe aggregates events and related objects), so
-// callers should run it as a command, not inline in Update.
+// callers should run it as a command, not inline in Update. A Secret is
+// described with every value shown as its size (see secretDescriber).
 func Describe(cfg *rest.Config, kind, namespace, name string) (string, error) {
 	gk, ok := GroupKindFor(kind)
 	if !ok {
 		return "", fmt.Errorf("describe not supported for %q", kind)
 	}
-	d, ok := describe.DescriberFor(gk, cfg)
-	if !ok {
+	var d describe.ResourceDescriber
+	if gk == (schema.GroupKind{Group: "", Kind: "Secret"}) {
+		cs, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			return "", err
+		}
+		d = secretDescriber(cs)
+	} else if d, ok = describe.DescriberFor(gk, cfg); !ok {
 		return "", fmt.Errorf("no describer for %s", gk.Kind)
 	}
 	return d.Describe(namespace, name, describe.DescriberSettings{ShowEvents: true})

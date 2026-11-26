@@ -9,6 +9,7 @@ package inspect
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -17,8 +18,12 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/kubectl/pkg/describe"
 	"sigs.k8s.io/yaml"
 )
 
@@ -213,4 +218,44 @@ func (v *secretValues) restore(edited []byte) ([]byte, error) {
 		md["resourceVersion"] = v.resourceVersion
 	}
 	return json.Marshal(obj)
+}
+
+// secretDescriber is kubectl's Secret describer, reading through cs, with the
+// one value it prints in clear text sized like the rest. kubectl prints each
+// data value as its size, except data.token of a Secret of type
+// kubernetes.io/service-account-token, which it prints whole: a bearer token
+// for the account, on screen under d. sizedTokenSecrets swaps that value for
+// the text "N bytes" as the describer reads it, so the page shows the line
+// kubectl prints for any other value, and nothing else changes.
+func secretDescriber(cs kubernetes.Interface) describe.ResourceDescriber {
+	return &describe.SecretDescriber{Interface: sizedTokenClient{cs}}
+}
+
+// sizedTokenClient is cs with its Secrets read through sizedTokenSecrets.
+type sizedTokenClient struct{ kubernetes.Interface }
+
+func (c sizedTokenClient) CoreV1() corev1client.CoreV1Interface {
+	return sizedTokenCore{c.Interface.CoreV1()}
+}
+
+type sizedTokenCore struct{ corev1client.CoreV1Interface }
+
+func (c sizedTokenCore) Secrets(namespace string) corev1client.SecretInterface {
+	return sizedTokenSecrets{c.CoreV1Interface.Secrets(namespace)}
+}
+
+// sizedTokenSecrets returns a service-account-token Secret with its token
+// replaced by its size. The Secret is the one decoded for this call, so the
+// change reaches nothing else.
+type sizedTokenSecrets struct{ corev1client.SecretInterface }
+
+func (s sizedTokenSecrets) Get(ctx context.Context, name string, opts metav1.GetOptions) (*corev1.Secret, error) {
+	secret, err := s.SecretInterface.Get(ctx, name, opts)
+	if err != nil || secret == nil || secret.Type != corev1.SecretTypeServiceAccountToken {
+		return secret, err
+	}
+	if tok, ok := secret.Data[corev1.ServiceAccountTokenKey]; ok {
+		secret.Data[corev1.ServiceAccountTokenKey] = []byte(fmt.Sprintf("%d bytes", len(tok)))
+	}
+	return secret, nil
 }
