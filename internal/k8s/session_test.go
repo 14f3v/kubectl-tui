@@ -39,7 +39,7 @@ func writeKubeconfig(t *testing.T, yaml string) string {
 
 func TestIdentityFollowsContextOverride(t *testing.T) {
 	path := writeKubeconfig(t, twoContexts)
-	s, err := NewSession(t.Context(), path, "b", false, func(tea.Msg) {})
+	s, err := NewSession(t.Context(), ClusterRef{Source: SourceFile, Path: path, Context: "b"}, Options{Sink: func(tea.Msg) {}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +50,24 @@ func TestIdentityFollowsContextOverride(t *testing.T) {
 	}
 	if _, cur := s.Contexts(); cur != "b" {
 		t.Errorf("current = %q, want b", cur)
+	}
+}
+
+// The ref's context wins over the file's current-context ("a"), so the Session
+// talks to the cluster the ref names and carries that ref for a later reconnect.
+func TestNewSessionPinsRefContext(t *testing.T) {
+	path := writeKubeconfig(t, twoContexts)
+	ref := ClusterRef{Source: SourceFile, Path: path, Context: "b"}
+	s, err := NewSession(t.Context(), ref, Options{Sink: func(tea.Msg) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Dispose()
+	if s.Ref != ref {
+		t.Errorf("Ref = %+v, want %+v", s.Ref, ref)
+	}
+	if s.RestCfg.Host != "https://b.example" {
+		t.Errorf("RestCfg.Host = %q, want https://b.example", s.RestCfg.Host)
 	}
 }
 

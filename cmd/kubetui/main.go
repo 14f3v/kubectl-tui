@@ -7,11 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/14f3v/kubectl-tui/internal/app"
 	"github.com/14f3v/kubectl-tui/internal/config"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
 )
 
 // version is stamped at build time: -ldflags "-X main.version=v1.2.3".
@@ -43,11 +45,10 @@ func main() {
 	}
 
 	model := app.New(app.Config{
-		Sink:            sink,
-		Config:          cfg,
-		KubeconfigPath:  *kubeconfigFlag,
-		ContextOverride: *ctxFlag,
-		StartKind:       *kindFlag,
+		Sink:      sink,
+		Config:    cfg,
+		Start:     startRef(*kubeconfigFlag, *ctxFlag),
+		StartKind: *kindFlag,
 	})
 	program = tea.NewProgram(model)
 
@@ -59,6 +60,28 @@ func main() {
 	if code != 0 {
 		os.Exit(code)
 	}
+}
+
+// startRef names the cluster to connect to at launch from the --kubeconfig and
+// --context flags. Without --context it pins the kubeconfig's current-context
+// now, so a `kubectl config use-context` run later cannot move a reconnect to
+// another cluster. When there is no current context to pin (no kubeconfig, or
+// one that cannot be read), the context stays empty and the bootstrap reports
+// the problem.
+func startRef(kubeconfig, contextName string) k8s.ClusterRef {
+	ref := k8s.ClusterRef{Source: k8s.SourceKubeconfig, Context: contextName}
+	if kubeconfig != "" {
+		ref.Source, ref.Path = k8s.SourceFile, kubeconfig
+		if abs, err := filepath.Abs(kubeconfig); err == nil {
+			ref.Path = abs
+		}
+	}
+	if ref.Context == "" {
+		if _, current, err := k8s.ListContexts(ref.Path); err == nil {
+			ref.Context = current
+		}
+	}
+	return ref
 }
 
 // exitStatus maps the error from Program.Run to the process exit code and

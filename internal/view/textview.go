@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/14f3v/kubectl-tui/internal/k8s"
 	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
@@ -43,9 +44,9 @@ type PromptRequest struct {
 	Action   func(string) tea.Msg
 }
 
-// SwitchContextRequest asks the root model to switch to another kubeconfig
-// context (rebuilding the Session). Emitted by the context picker.
-type SwitchContextRequest struct{ Name string }
+// SwitchContextRequest asks the root model to switch to the cluster Ref names
+// (rebuilding the Session). Emitted by the context picker.
+type SwitchContextRequest struct{ Ref k8s.ClusterRef }
 
 // ExecRequest asks the root model to hand the terminal to a child process through
 // the TerminalGate. Exactly one of Command (an interactive tea.ExecCommand, e.g.

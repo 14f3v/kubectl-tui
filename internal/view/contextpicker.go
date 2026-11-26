@@ -13,9 +13,11 @@ import (
 
 // contextPickerPage lists the kubeconfig contexts so the user can switch without
 // typing the exact name. Pushed by ":ctx" with no argument. Selecting a context
-// emits a SwitchContextRequest; selecting the current one is a no-op.
+// emits a SwitchContextRequest for that context in the same kubeconfig as the
+// session; selecting the current one is a no-op.
 type contextPickerPage struct {
 	theme    style.Theme
+	ref      k8s.ClusterRef // the session's; a pick keeps its source and path
 	contexts []string
 	current  string
 	cursor   int
@@ -32,7 +34,7 @@ func NewContextPicker(sess *k8s.Session, theme style.Theme) *contextPickerPage {
 			break
 		}
 	}
-	return &contextPickerPage{theme: theme, contexts: names, current: current, cursor: cursor}
+	return &contextPickerPage{theme: theme, ref: sess.Ref, contexts: names, current: current, cursor: cursor}
 }
 
 func (p *contextPickerPage) Init() tea.Cmd     { return nil }
@@ -75,7 +77,8 @@ func (p *contextPickerPage) Update(m tea.Msg) (Page, tea.Cmd) {
 		if name == p.current {
 			return p, toast("already on context "+name, msg.LevelInfo)
 		}
-		return p, func() tea.Msg { return SwitchContextRequest{Name: name} }
+		ref := k8s.ClusterRef{Source: p.ref.Source, Path: p.ref.Path, Context: name}
+		return p, func() tea.Msg { return SwitchContextRequest{Ref: ref} }
 	}
 	return p, nil
 }

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/14f3v/kubectl-tui/internal/k8s"
 	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
@@ -44,6 +45,19 @@ func TestParseCommand(t *testing.T) {
 		if got := parseCommand(c.in); got != c.want {
 			t.Errorf("parseCommand(%q) = %+v, want %+v", c.in, got, c.want)
 		}
+	}
+}
+
+// ":ctx <name>" names another context in the active cluster's kubeconfig, so a
+// switch from a --kubeconfig file stays in that file.
+func TestCtxCommandKeepsTheActiveKubeconfig(t *testing.T) {
+	m := &Model{theme: style.Default(), ref: k8s.ClusterRef{Source: k8s.SourceFile, Path: "/k/config", Context: "a"}}
+	if _, cmd := m.runCommand("ctx b"); cmd == nil {
+		t.Fatal("ctx b returned no bootstrap command")
+	}
+	want := k8s.ClusterRef{Source: k8s.SourceFile, Path: "/k/config", Context: "b"}
+	if m.ref != want {
+		t.Errorf("ref = %+v, want %+v", m.ref, want)
 	}
 }
 

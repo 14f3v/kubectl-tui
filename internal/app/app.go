@@ -46,11 +46,12 @@ const (
 
 // Config parameterizes the root model.
 type Config struct {
-	Sink            engine.Sink
-	Config          config.Config
-	KubeconfigPath  string
-	ContextOverride string
-	StartKind       string
+	Sink   engine.Sink
+	Config config.Config
+	// Start is the cluster to connect to at launch. Its context is pinned by the
+	// caller, so a reconnect never follows the file's current-context elsewhere.
+	Start     k8s.ClusterRef
+	StartKind string
 }
 
 // Model is the root model.
@@ -67,8 +68,9 @@ type Model struct {
 	clusterMem float64
 
 	sess    *k8s.Session
-	pages   []view.Page // stack; top is active
-	fatal   error       // unrecoverable bootstrap error
+	ref     k8s.ClusterRef // the cluster the Session connects to (or is connecting to)
+	pages   []view.Page    // stack; top is active
+	fatal   error          // unrecoverable bootstrap error
 	booting bool
 
 	width, height int
@@ -122,6 +124,7 @@ func New(cfg Config) *Model {
 		cfg:     cfg,
 		theme:   theme,
 		sink:    cfg.Sink,
+		ref:     cfg.Start,
 		gate:    action.NewTerminalGate(),
 		booting: true,
 	}
@@ -129,17 +132,25 @@ func New(cfg Config) *Model {
 
 // Init requests the session bootstrap.
 func (m *Model) Init() tea.Cmd {
-	return bootstrapCmd(m.sink, m.cfg.KubeconfigPath, m.cfg.ContextOverride, m.cfg.Config.ReadOnly)
+	return bootstrapCmd(m.sink, m.ref, m.sessionOptions())
 }
 
-// bootstrapCmd builds a Session off the UI goroutine and reports the result.
-func bootstrapCmd(sink engine.Sink, kubeconfigPath, ctxOverride string, readOnly bool) tea.Cmd {
+// sessionOptions are the Session settings that come from the config rather than
+// from the cluster being connected to.
+func (m *Model) sessionOptions() k8s.Options {
+	return k8s.Options{ReadOnly: m.cfg.Config.ReadOnly}
+}
+
+// bootstrapCmd builds a Session for ref off the UI goroutine and reports the
+// result. The Session's snapshots go to sink, whatever opts.Sink holds.
+func bootstrapCmd(sink engine.Sink, ref k8s.ClusterRef, opts k8s.Options) tea.Cmd {
+	opts.Sink = sink
 	return func() tea.Msg {
-		sess, err := k8s.NewSession(context.Background(), kubeconfigPath, ctxOverride, readOnly, sink)
+		sess, err := k8s.NewSession(context.Background(), ref, opts)
 		if err != nil {
 			return msg.SessionError{Err: err}
 		}
-		_ = sess.RefreshServerVersion() // best-effort; empty version is fine
+		_ = sess.RefreshServerVersion(sess.Context()) // best-effort; empty version is fine
 		return msg.SessionReady{Session: sess}
 	}
 }
@@ -200,7 +211,7 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		return m, nil
 
 	case view.SwitchContextRequest:
-		return m.switchContext(t.Name)
+		return m.switchContext(t.Ref)
 
 	case view.ExecRequest:
 		return m.handleExecRequest(t)
@@ -356,10 +367,9 @@ func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(page.Init(), page.OnEnter())
 }
 
-// switchContext disposes the current Session and bootstraps one for the named
-// kubeconfig context. All informers, log streams, and forwards die with the old
-// Session's context.
-func (m *Model) switchContext(name string) (tea.Model, tea.Cmd) {
+// switchContext disposes the current Session and bootstraps one for ref. All
+// informers, log streams, and forwards die with the old Session's context.
+func (m *Model) switchContext(ref k8s.ClusterRef) (tea.Model, tea.Cmd) {
 	for _, p := range m.pages {
 		p.OnLeave()
 	}
@@ -371,8 +381,8 @@ func (m *Model) switchContext(name string) (tea.Model, tea.Cmd) {
 	m.booting = true
 	m.mode = modeNone
 	m.inputBuf = ""
-	m.cfg.ContextOverride = name
-	return m, bootstrapCmd(m.sink, m.cfg.KubeconfigPath, name, m.cfg.Config.ReadOnly)
+	m.ref = ref
+	return m, bootstrapCmd(m.sink, ref, m.sessionOptions())
 }
 
 // jumpNamespace switches the active page to a namespace: "0" is all namespaces,
@@ -461,26 +471,26 @@ func (m *Model) retryActive() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(p.OnEnter(), toastCmd("retrying "+p.Title(), msg.LevelInfo))
 }
 
-// reconnect disposes the Session and builds a fresh one for the same context,
-// which re-runs the exec credential plugin. The context name comes from the
-// configured override rather than Identity.Context: the latter is derived from
-// the merged kubeconfig and can name a different context than the one actually in
-// use, which would silently move the user to another cluster.
+// reconnect disposes the Session and builds a fresh one for the same ClusterRef,
+// which re-runs the exec credential plugin. The ref pins the context by name, so
+// a `kubectl config use-context` run elsewhere since the connect cannot move the
+// user to another cluster.
 func (m *Model) reconnect() (tea.Model, tea.Cmd) {
 	if m.sess == nil {
 		return m, nil
 	}
 	// Reconnecting tears down every port-forward with it, so say so first.
 	if n := m.sess.Forwards.Count(); n > 0 {
+		ref := m.ref // the confirm's action runs as a Cmd, off the UI goroutine
 		return m, func() tea.Msg {
 			return view.ConfirmRequest{
 				Title:  "reconnect",
 				Prompt: fmt.Sprintf("re-authenticate and rebuild the session? this closes %d active port-forward(s)", n),
-				Action: func() tea.Msg { return view.SwitchContextRequest{Name: m.cfg.ContextOverride} },
+				Action: func() tea.Msg { return view.SwitchContextRequest{Ref: ref} },
 			}
 		}
 	}
-	return m.switchContext(m.cfg.ContextOverride)
+	return m.switchContext(m.ref)
 }
 
 func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -855,7 +865,8 @@ func (m *Model) runCommand(buf string) (tea.Model, tea.Cmd) {
 			}
 			return m.pushPage(view.NewContextPicker(m.sess, m.theme))
 		}
-		return m.switchContext(cmd.arg)
+		// Same kubeconfig as the active cluster, another context in it.
+		return m.switchContext(k8s.ClusterRef{Source: m.ref.Source, Path: m.ref.Path, Context: cmd.arg})
 	case "apply":
 		return m.applyCommand()
 	case "explain":
