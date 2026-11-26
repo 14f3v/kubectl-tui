@@ -137,7 +137,7 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	if info.IsDir() {
-		if res.Skipped, err = writeTarDir(tw, srcLocal, destBase); err != nil {
+		if res.Skipped, err = writeTarDir(tw, srcLocal, destBase, runtime.GOOS); err != nil {
 			tw.Close()
 			return res, err
 		}
@@ -147,7 +147,7 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 			tw.Close()
 			return res, fmt.Errorf("cannot read %q: %w", srcLocal, rerr)
 		}
-		if werr := writeTarFile(tw, destBase, int64(info.Mode().Perm()), data); werr != nil {
+		if werr := writeTarFile(tw, destBase, uploadMode(info.Mode(), runtime.GOOS), data); werr != nil {
 			tw.Close()
 			return res, werr
 		}
@@ -225,8 +225,9 @@ func writeTarFile(tw *tar.Writer, name string, mode int64, data []byte) error {
 // paths relative to root so the caller can say so rather than let it vanish.
 //
 // A file that Go reports as only ModeIrregular is tried as a regular one (see
-// uploadable), and left out only if it cannot be read.
-func writeTarDir(tw *tar.Writer, root, prefix string) (skipped []string, err error) {
+// uploadable), and left out only if it cannot be read. goos selects the header
+// modes (see uploadMode).
+func writeTarDir(tw *tar.Writer, root, prefix, goos string) (skipped []string, err error) {
 	err = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -258,9 +259,30 @@ func writeTarDir(tw *tar.Writer, root, prefix string) (skipped []string, err err
 			}
 			return fmt.Errorf("cannot read %q: %w", p, err)
 		}
-		return writeTarFile(tw, path.Join(prefix, rel), int64(info.Mode().Perm()), data)
+		return writeTarFile(tw, path.Join(prefix, rel), uploadMode(info.Mode(), goos), data)
 	})
 	return skipped, err
+}
+
+// uploadMode is the permission written into the tar header for an uploaded entry.
+// A Windows mode says nothing about Unix permissions: Go synthesizes it from the
+// read-only attribute alone (os/types_windows.go), as 0666, or 0444 when
+// read-only, and adds 0111 only to directories. GNU and BusyBox tar running as
+// root in the pod apply header modes as they are, so an upload from Windows would
+// land world-writable. On Windows it is therefore the conventional 0644 for a
+// file and 0755 for a directory (directories get no header of their own today;
+// the pod's tar creates them). Elsewhere the entry's own bits are kept, as
+// before. Nothing can say which Windows files are meant to be executable, so an
+// uploaded script needs chmod +x in the pod, as with kubectl cp.
+func uploadMode(m fs.FileMode, goos string) int64 {
+	switch {
+	case goos != "windows":
+		return int64(m.Perm())
+	case m.IsDir():
+		return 0o755
+	default:
+		return 0o644
+	}
 }
 
 // uploadable reports whether an entry found while walking an upload should be

@@ -331,7 +331,7 @@ func TestWriteTarDirRoundTrip(t *testing.T) {
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	skipped, err := writeTarDir(tw, src, "payload")
+	skipped, err := writeTarDir(tw, src, "payload", runtime.GOOS)
 	if err != nil {
 		t.Fatalf("writeTarDir: %v", err)
 	}
@@ -601,7 +601,7 @@ func TestWriteTarDirReportsSkipped(t *testing.T) {
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	skipped, err := writeTarDir(tw, src, "payload")
+	skipped, err := writeTarDir(tw, src, "payload", runtime.GOOS)
 	if err != nil {
 		t.Fatalf("writeTarDir: %v", err)
 	}
@@ -625,6 +625,60 @@ func TestWriteTarDirReportsSkipped(t *testing.T) {
 	}
 	if want := []string{"payload/real.txt"}; !slices.Equal(names, want) {
 		t.Errorf("archived %q, want %q", names, want)
+	}
+}
+
+func TestUploadMode(t *testing.T) {
+	cases := []struct {
+		mode fs.FileMode
+		goos string
+		want int64
+	}{
+		{0o666, "windows", 0o644},
+		{0o444, "windows", 0o644},
+		{fs.ModeIrregular | 0o666, "windows", 0o644},
+		{fs.ModeDir | 0o777, "windows", 0o755},
+		{0o755, "linux", 0o755},
+		{0o600, "darwin", 0o600},
+		{fs.ModeDir | 0o750, "linux", 0o750},
+	}
+	for _, c := range cases {
+		if got := uploadMode(c.mode, c.goos); got != c.want {
+			t.Errorf("uploadMode(%v, %s) = %o, want %o", c.mode, c.goos, got, c.want)
+		}
+	}
+}
+
+// TestWriteTarDirHeaderModes checks the header modes a directory upload carries:
+// 0644 under Windows rules whatever the file's own bits, and the file's own bits
+// otherwise.
+func TestWriteTarDirHeaderModes(t *testing.T) {
+	src := t.TempDir()
+	file := filepath.Join(src, "run.sh")
+	mustWrite(t, file, "#!/bin/sh\n")
+	if err := os.Chmod(file, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for goos, want := range map[string]int64{"windows": 0o644, "linux": int64(fi.Mode().Perm())} {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		if _, err := writeTarDir(tw, src, "payload", goos); err != nil {
+			t.Fatalf("writeTarDir(%s): %v", goos, err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		hdr, err := tar.NewReader(&buf).Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Mode != want {
+			t.Errorf("%s: header mode = %o, want %o", goos, hdr.Mode, want)
+		}
 	}
 }
 
