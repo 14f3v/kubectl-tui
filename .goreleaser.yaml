@@ -24,7 +24,7 @@ archives:
   - id: kubetui
     formats: [tar.gz]
     # Windows gets a zip: every Windows version opens one without extra tools, and
-    # the winget publisher (see the Scoop note at the end) only installs from zips.
+    # the winget publisher (see the Scoop note at the end) takes zips, not tarballs.
     format_overrides:
       - goos: windows
         formats: [zip]
