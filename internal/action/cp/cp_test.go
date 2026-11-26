@@ -628,6 +628,44 @@ func TestWriteTarDirReportsSkipped(t *testing.T) {
 	}
 }
 
+// TestWriteTarDirFollowsLinkedRoot uploads a directory through a symlink to it,
+// as CopyToPod does when the user names one (os.Stat follows it there). The tree
+// it points to must be archived, not reported as one skipped link. Like
+// TestWriteTarDirReportsSkipped it skips where a symlink cannot be created.
+func TestWriteTarDirFollowsLinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	mustWrite(t, filepath.Join(real, "a.txt"), "A")
+	if err := os.Mkdir(filepath.Join(real, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(real, "sub", "b.txt"), "B")
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	skipped, err := writeTarDir(tw, link, "payload", runtime.GOOS)
+	if err != nil {
+		t.Fatalf("writeTarDir: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("skipped = %q, want nothing skipped", skipped)
+	}
+	out := t.TempDir()
+	if _, err := extractTar(&buf, out, "payload", runtime.GOOS); err != nil {
+		t.Fatalf("extractTar: %v", err)
+	}
+	want := map[string]string{"payload/a.txt": "A", "payload/sub/b.txt": "B"}
+	if got := collectFiles(t, out); !maps.Equal(got, want) {
+		t.Errorf("archived %v, want %v", got, want)
+	}
+}
+
 func TestUploadMode(t *testing.T) {
 	cases := []struct {
 		mode fs.FileMode

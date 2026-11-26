@@ -227,7 +227,19 @@ func writeTarFile(tw *tar.Writer, name string, mode int64, data []byte) error {
 // A file that Go reports as only ModeIrregular is tried as a regular one (see
 // uploadable), and left out only if it cannot be read. goos selects the header
 // modes (see uploadMode).
+//
+// root itself is followed when it is a symlink (or, on Windows, a junction) to a
+// directory, as CopyToPod's os.Stat already did to call it one. filepath.Walk
+// would otherwise Lstat it as a link and stop there, uploading nothing. A
+// trailing separator makes Lstat resolve the last element on Unix (POSIX path
+// resolution) and on Windows (os/stat_windows.go lstatNolog), so the walk starts
+// in the directory it points to. Links further down are still left out.
 func writeTarDir(tw *tar.Writer, root, prefix, goos string) (skipped []string, err error) {
+	if li, lerr := os.Lstat(root); lerr == nil && !li.IsDir() {
+		if si, serr := os.Stat(root); serr == nil && si.IsDir() {
+			root += string(filepath.Separator)
+		}
+	}
 	err = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -243,8 +255,8 @@ func writeTarDir(tw *tar.Writer, root, prefix, goos string) (skipped []string, e
 		rel = filepath.ToSlash(rel)
 		shown := rel
 		if rel == "." {
-			// root itself, which Lstat does not see as a directory when it is a
-			// symlink or junction to one; name it rather than report ".".
+			// root itself, when it is not a directory even once followed;
+			// name it rather than report ".".
 			shown = filepath.Base(root)
 		}
 		if !uploadable(info.Mode()) {
