@@ -1,6 +1,8 @@
-// Package inspect implements the read-only inspect actions: rendering a cached
-// object as YAML and running kubectl-style describe. Both return plain text that
-// the caller shows in a scrollable text page.
+// Package inspect implements the inspect actions: rendering a cached object as
+// YAML and running kubectl-style describe. Both return plain text that the
+// caller shows in a scrollable text page. EditYAML renders the same YAML for the
+// edit buffer, and for a Secret it also returns a Restore that puts the masked
+// values back into the saved buffer before the edit is applied.
 package inspect
 
 import (
