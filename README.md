@@ -266,9 +266,9 @@ Open with `l`. On a **workload**, logs from all matching pods are merged with co
 
 ### Secrets
 
-The secrets table only shows the type and data-key count. `enter` opens a reveal view where keys are masked; `enter` on a key toggles its cleartext value in memory. The YAML view shows each value as `<redacted: N bytes of KEY>`, and describe (`d`) shows each as its size, a service-account token included.
+The secrets table only shows the type and data-key count. `enter` opens a reveal view where keys are masked; `enter` on a key toggles its cleartext value in memory. The YAML view shows each value as `<redacted: N bytes of KEY>`, and describe (`d`) shows each as its size, a service-account token included. The `:apply` preview shows a Secret's values as `<redacted: N bytes>`, with `, changed` on each value the apply would change.
 
-`e` edits a Secret with its values masked the same way, so they are never written to the editor's temp file. Values you leave as placeholders are kept: kubetui puts them back from memory before applying. To change a value, replace its placeholder with the new value in base64, or add it under `stringData` as plain text. A placeholder that is not under its own key, because the key was renamed or the placeholder was moved, copied or swapped, stops the apply with an error, and nothing is applied. If the Secret changed while the editor was open, the apply fails with a conflict instead of overwriting the newer values.
+`e` edits a Secret with its values masked as in the YAML view, so they are never written to the editor's temp file. Values you leave as placeholders are kept: kubetui puts them back from memory before applying. To change a value, replace its placeholder with the new value in base64, or add it under `stringData` as plain text. A placeholder that is not under its own key, because the key was renamed or the placeholder was moved, copied or swapped, stops the apply with an error, and nothing is applied. If the Secret changed while the editor was open, the apply fails with a conflict instead of overwriting the newer values.
 
 ### Identity
 
