@@ -470,6 +470,56 @@ func TestExtractTarReportsWindowsClashes(t *testing.T) {
 	}
 }
 
+func TestExtractMode(t *testing.T) {
+	cases := []struct {
+		hdr  int64
+		goos string
+		want os.FileMode
+	}{
+		{0o400, "windows", 0o600},
+		{0o444, "windows", 0o644},
+		{0o755, "windows", 0o755},
+		{0o400, "linux", 0o400},
+		{0o444, "darwin", 0o444},
+		{0o4755, "linux", 0o755}, // setuid and friends are never applied
+	}
+	for _, c := range cases {
+		if got := extractMode(c.hdr, c.goos); got != c.want {
+			t.Errorf("extractMode(%o, %s) = %o, want %o", c.hdr, c.goos, got, c.want)
+		}
+	}
+}
+
+// TestExtractTarRedownloadsReadOnlyOnWindows downloads a 0400 file twice, as a
+// user re-fetching a Secret's key would, and over a file an earlier download
+// left read-only. With Windows rules both must succeed and leave the file
+// writable. os.Chmod and the owner-write bit mean the same thing on every host
+// for this purpose, so the test runs everywhere.
+func TestExtractTarRedownloadsReadOnlyOnWindows(t *testing.T) {
+	dir := t.TempDir()
+	for i, body := range []string{"first", "second"} {
+		archive := buildTar(t, tarEntry{name: "tls.key", body: body, mode: 0o400})
+		if _, err := extractTar(archive, dir, "tls.key", "windows"); err != nil {
+			t.Fatalf("download %d: %v", i+1, err)
+		}
+	}
+	target := filepath.Join(dir, "tls.key")
+	assertFile(t, target, "second")
+	if fi, err := os.Stat(target); err != nil || fi.Mode().Perm()&0o200 == 0 {
+		t.Errorf("downloaded file is not writable: %v, %v", fi.Mode(), err)
+	}
+
+	stale := filepath.Join(t.TempDir(), "ca.crt")
+	mustWrite(t, stale, "old")
+	if err := os.Chmod(stale, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractTar(buildTar(t, tarEntry{name: "ca.crt", body: "new"}), stale, "ca.crt", "windows"); err != nil {
+		t.Fatalf("download over a read-only file: %v", err)
+	}
+	assertFile(t, stale, "new")
+}
+
 // tarEntry is one member of an in-memory test archive. A name ending in "/" is a
 // directory marker, as GNU tar writes them; mode defaults to 0o644.
 type tarEntry struct {

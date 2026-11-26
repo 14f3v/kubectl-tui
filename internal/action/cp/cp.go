@@ -326,7 +326,10 @@ func extractTar(r io.Reader, dst, srcBase, goos string) (Result, error) {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return res, fmt.Errorf("create dir for %q: %w", target, err)
 		}
-		if err := writeExtractedFile(target, os.FileMode(hdr.Mode).Perm(), tr); err != nil {
+		if goos == "windows" {
+			clearReadOnly(target)
+		}
+		if err := writeExtractedFile(target, extractMode(hdr.Mode, goos), tr); err != nil {
 			return res, err
 		}
 		wrote = true
@@ -404,6 +407,35 @@ func resolveExtractTarget(dst, rel, goos string) (target string, renamed bool, e
 		return "", false, fmt.Errorf("tar entry %q escapes destination directory", rel)
 	}
 	return target, renamed, nil
+}
+
+// extractMode is the permission a downloaded file is created with: the pod's own
+// bits, except that on Windows the owner-write bit is always kept. The only
+// permission a Windows file carries is the read-only attribute, which Go sets
+// whenever that bit is clear (syscall.Open), so a pod file at 0400 or 0444 (a
+// Secret mounted with defaultMode 0400, a 0444 file shipped in the image) would
+// arrive read-only, and the next download over it would fail with "Access is
+// denied", aborting a directory part-way. kubectl cp never sets download modes at
+// all (os.Create). Other systems keep the exact bits, as before.
+func extractMode(hdrMode int64, goos string) os.FileMode {
+	mode := os.FileMode(hdrMode).Perm()
+	if goos == "windows" {
+		mode |= 0o200
+	}
+	return mode
+}
+
+// clearReadOnly makes an existing regular file at target owner-writable again so
+// a download can replace one that an earlier download left read-only. On Windows
+// os.Chmod only toggles FILE_ATTRIBUTE_READONLY (syscall.Chmod), which is exactly
+// what blocks the overwrite. A failure is left for the open that follows to
+// report.
+func clearReadOnly(target string) {
+	fi, err := os.Lstat(target)
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o200 != 0 {
+		return
+	}
+	_ = os.Chmod(target, fi.Mode().Perm()|0o200)
 }
 
 // writeExtractedFile creates target with mode and copies the tar entry body into
