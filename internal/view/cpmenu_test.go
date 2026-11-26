@@ -25,3 +25,18 @@ func TestDownloadToast(t *testing.T) {
 		t.Errorf("clash download toast = %q, want the loss before the renames", clash.Text)
 	}
 }
+
+func TestUploadToast(t *testing.T) {
+	plain := uploadToast("web", cp.Result{})
+	if plain.Text != "uploaded to web" || plain.Level != msg.LevelSuccess {
+		t.Errorf("plain upload toast = %+v", plain)
+	}
+	one := uploadToast("web", cp.Result{Skipped: []string{"link"}})
+	if one.Text != "uploaded to web · skipped 1 (not a regular file): link" || one.Level != msg.LevelWarn {
+		t.Errorf("one-skip upload toast = %+v", one)
+	}
+	many := uploadToast("web", cp.Result{Skipped: []string{"a", "b", "c", "d", "e"}})
+	if !strings.Contains(many.Text, "skipped 5") || !strings.HasSuffix(many.Text, "a, b, c, …") {
+		t.Errorf("many-skip upload toast = %q, want the count and the first three names", many.Text)
+	}
+}

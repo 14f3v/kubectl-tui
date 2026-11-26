@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path"
@@ -96,15 +97,35 @@ func splitPodRef(ref string) (namespace, pod string) {
 	return "", ref
 }
 
+// Result reports what a copy did beyond succeeding, so the caller can say so when
+// the files on disk are not a byte-for-byte mirror of the source.
+type Result struct {
+	// Skipped lists, relative to the uploaded directory, the entries an upload
+	// left out because they are not regular files: symlinks, sockets, devices,
+	// and placeholders that could not be read.
+	Skipped []string
+
+	// Renamed counts downloaded files written under a different name because
+	// theirs is not valid on Windows (see WindowsFileName).
+	Renamed int
+	// Overwritten lists the archive names of downloaded files that replaced an
+	// earlier, different entry because Windows sees the two as one file: their
+	// names differ only in case ("Makefile", "makefile") or became equal when
+	// renamed ("a:b", "a_b"). Only the later one is on disk.
+	Overwritten []string
+}
+
 // CopyToPod uploads a local file or directory tree to dstRemote inside the
 // container. It builds a tar archive whose top-level entry name is the basename of
 // dstRemote, then unpacks it with `tar -xmf - -C <dir(dstRemote)>` so the content
 // lands exactly at dstRemote. An empty container targets the pod's first container
-// (resolved server-side). It blocks until the transfer completes.
-func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, ns, pod, container, srcLocal, dstRemote string) error {
+// (resolved server-side). It blocks until the transfer completes. Entries of a
+// directory that are not regular files are left out and listed in Result.Skipped.
+func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, ns, pod, container, srcLocal, dstRemote string) (Result, error) {
+	var res Result
 	info, err := os.Stat(srcLocal)
 	if err != nil {
-		return fmt.Errorf("cannot read local source %q: %w", srcLocal, err)
+		return res, fmt.Errorf("cannot read local source %q: %w", srcLocal, err)
 	}
 
 	// The archive is named by the destination's basename and extracted into the
@@ -116,23 +137,23 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	if info.IsDir() {
-		if err := writeTarDir(tw, srcLocal, destBase); err != nil {
+		if res.Skipped, err = writeTarDir(tw, srcLocal, destBase); err != nil {
 			tw.Close()
-			return err
+			return res, err
 		}
 	} else {
 		data, rerr := os.ReadFile(srcLocal)
 		if rerr != nil {
 			tw.Close()
-			return fmt.Errorf("cannot read %q: %w", srcLocal, rerr)
+			return res, fmt.Errorf("cannot read %q: %w", srcLocal, rerr)
 		}
 		if werr := writeTarFile(tw, destBase, int64(info.Mode().Perm()), data); werr != nil {
 			tw.Close()
-			return werr
+			return res, werr
 		}
 	}
 	if err := tw.Close(); err != nil {
-		return fmt.Errorf("finalize tar: %w", err)
+		return res, fmt.Errorf("finalize tar: %w", err)
 	}
 
 	cmd := []string{"tar", "-xmf", "-", "-C", destDir}
@@ -143,22 +164,9 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 		Stderr: &stderr,
 	})
 	if err != nil {
-		return wrapTarErr("upload", err, stderr.String())
+		return res, wrapTarErr("upload", err, stderr.String())
 	}
-	return nil
-}
-
-// Result reports what a copy did beyond succeeding, so the caller can say so when
-// the files on disk are not a byte-for-byte mirror of the source.
-type Result struct {
-	// Renamed counts downloaded files written under a different name because
-	// theirs is not valid on Windows (see WindowsFileName).
-	Renamed int
-	// Overwritten lists the archive names of downloaded files that replaced an
-	// earlier, different entry because Windows sees the two as one file: their
-	// names differ only in case ("Makefile", "makefile") or became equal when
-	// renamed ("a:b", "a_b"). Only the later one is on disk.
-	Overwritten []string
+	return res, nil
 }
 
 // CopyFromPod downloads srcRemote from the container into dstLocal. It runs
@@ -211,15 +219,19 @@ func writeTarFile(tw *tar.Writer, name string, mode int64, data []byte) error {
 }
 
 // writeTarDir walks a local directory tree and writes every regular file into tw
-// under prefix (the archive-relative name of the directory root). Non-regular
-// files (symlinks, sockets, devices) are skipped, mirroring the conservative
-// subset kubectl cp reliably handles across container tar implementations.
-func writeTarDir(tw *tar.Writer, root, prefix string) error {
-	return filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+// under prefix (the archive-relative name of the directory root). Anything else
+// (symlinks, sockets, devices, pipes) is left out, the conservative subset that
+// unpacks the same with every container tar, and returned as slash-separated
+// paths relative to root so the caller can say so rather than let it vanish.
+//
+// A file that Go reports as only ModeIrregular is tried as a regular one (see
+// uploadable), and left out only if it cannot be read.
+func writeTarDir(tw *tar.Writer, root, prefix string) (skipped []string, err error) {
+	err = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
+		if info.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(root, p)
@@ -227,13 +239,42 @@ func writeTarDir(tw *tar.Writer, root, prefix string) error {
 			return err
 		}
 		// tar paths are always slash-separated regardless of the host OS.
-		name := path.Join(prefix, filepath.ToSlash(rel))
+		rel = filepath.ToSlash(rel)
+		shown := rel
+		if rel == "." {
+			// root itself, which Lstat does not see as a directory when it is a
+			// symlink or junction to one; name it rather than report ".".
+			shown = filepath.Base(root)
+		}
+		if !uploadable(info.Mode()) {
+			skipped = append(skipped, shown)
+			return nil
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
+			if !info.Mode().IsRegular() {
+				skipped = append(skipped, shown)
+				return nil
+			}
 			return fmt.Errorf("cannot read %q: %w", p, err)
 		}
-		return writeTarFile(tw, name, int64(info.Mode().Perm()), data)
+		return writeTarFile(tw, path.Join(prefix, rel), int64(info.Mode().Perm()), data)
 	})
+	return skipped, err
+}
+
+// uploadable reports whether an entry found while walking an upload should be
+// read and archived as a regular file. Besides regular files that includes a
+// file whose only type bit is ModeIrregular. That is how Windows reports every
+// reparse point it has no more specific mode for (os/types_windows.go): OneDrive
+// and other Cloud Files placeholders, WOF-compressed system files and HSM stubs
+// among them. They read like any file (opening a placeholder downloads it), so
+// skipping them dropped files from a directory upload in a OneDrive-backed
+// Documents or Desktop folder without a word. One that cannot be read (an app
+// execution alias, a junction) is still left out. Other systems do not report
+// ordinary files as ModeIrregular.
+func uploadable(m fs.FileMode) bool {
+	return m.IsRegular() || m.Type() == fs.ModeIrregular
 }
 
 // extractTar reads the archive that `tar -cf - -C <dir> <srcBase>` produced in the

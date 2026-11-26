@@ -331,8 +331,12 @@ func TestWriteTarDirRoundTrip(t *testing.T) {
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := writeTarDir(tw, src, "payload"); err != nil {
+	skipped, err := writeTarDir(tw, src, "payload")
+	if err != nil {
 		t.Fatalf("writeTarDir: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("skipped = %q, want nothing skipped", skipped)
 	}
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
@@ -579,6 +583,72 @@ func collectFiles(t *testing.T, root string) map[string]string {
 		t.Fatalf("walk %q: %v", root, err)
 	}
 	return got
+}
+
+// TestWriteTarDirReportsSkipped checks that what an upload leaves out is reported
+// by path rather than dropped silently, and that only the regular files are
+// archived. It needs a symlink, which Windows only lets privileged or developer-
+// mode accounts create, so it skips where that fails.
+func TestWriteTarDirReportsSkipped(t *testing.T) {
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "real.txt"), "real")
+	if err := os.Mkdir(filepath.Join(src, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../real.txt", filepath.Join(src, "sub", "link.txt")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	skipped, err := writeTarDir(tw, src, "payload")
+	if err != nil {
+		t.Fatalf("writeTarDir: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"sub/link.txt"}; !slices.Equal(skipped, want) {
+		t.Errorf("skipped = %q, want %q", skipped, want)
+	}
+	var names []string
+	tr := tar.NewReader(&buf)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, hdr.Name)
+	}
+	if want := []string{"payload/real.txt"}; !slices.Equal(names, want) {
+		t.Errorf("archived %q, want %q", names, want)
+	}
+}
+
+// TestUploadable pins which walked entries are read as files. A bare
+// ModeIrregular is how Windows reports a OneDrive placeholder, so it must be
+// tried; every other special type, alone or with ModeIrregular, is left out.
+func TestUploadable(t *testing.T) {
+	cases := []struct {
+		mode fs.FileMode
+		want bool
+	}{
+		{0o644, true},
+		{fs.ModeIrregular | 0o666, true},
+		{fs.ModeSymlink | 0o777, false},
+		{fs.ModeSymlink | fs.ModeIrregular, false},
+		{fs.ModeSocket, false},
+		{fs.ModeNamedPipe, false},
+		{fs.ModeDevice | fs.ModeCharDevice, false},
+	}
+	for _, c := range cases {
+		if got := uploadable(c.mode); got != c.want {
+			t.Errorf("uploadable(%v) = %v, want %v", c.mode, got, c.want)
+		}
+	}
 }
 
 func TestToSlashDir(t *testing.T) {

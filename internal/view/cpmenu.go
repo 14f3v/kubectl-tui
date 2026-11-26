@@ -94,12 +94,35 @@ func (p *cpMenuPage) upload() tea.Cmd {
 				if !ok {
 					return msg.Toast{Text: "expected: localPath remotePath", Level: msg.LevelError}
 				}
-				if err := cp.CopyToPod(p.sess.Context(), p.sess.RestCfg, p.sess.CS, p.namespace, p.pod, p.container, local, remote); err != nil {
+				res, err := cp.CopyToPod(p.sess.Context(), p.sess.RestCfg, p.sess.CS, p.namespace, p.pod, p.container, local, remote)
+				if err != nil {
 					return msg.Toast{Text: err.Error(), Level: msg.LevelError}
 				}
-				return msg.Toast{Text: "uploaded to " + pod, Level: msg.LevelSuccess}
+				return uploadToast(pod, res)
 			},
 		}
+	}
+}
+
+// uploadToast reports a finished upload, and warns when part of a directory was
+// left out (symlinks, devices, unreadable placeholders), naming the first few so
+// the user is not left assuming the whole tree arrived.
+func uploadToast(pod string, res cp.Result) msg.Toast {
+	n := len(res.Skipped)
+	if n == 0 {
+		return msg.Toast{Text: "uploaded to " + pod, Level: msg.LevelSuccess}
+	}
+	names := res.Skipped
+	if len(names) > 3 {
+		names = append(names[:3:3], "…")
+	}
+	why := "not regular files"
+	if n == 1 {
+		why = "not a regular file"
+	}
+	return msg.Toast{
+		Text:  fmt.Sprintf("uploaded to %s · skipped %d (%s): %s", pod, n, why, strings.Join(names, ", ")),
+		Level: msg.LevelWarn,
 	}
 }
 
