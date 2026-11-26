@@ -52,7 +52,11 @@ This is the "fire-and-observe" rule borrowed from the sibling Flutter app.
    server-side Table protocol is the documented future path for a generic CRD browser, not v1.
 5. **Hand-rolled windowed table.** `bubbles/table` cannot do per-cell styling or typed sort. We
    render only the visible window with a per-row cache keyed by (UID, data version, width,
-   selected). All width math uses `x/ansi`, never `len()`.
+   selected). All width math uses `x/ansi`, never `len()`. Every string that comes from a
+   kubeconfig (names, servers, connect errors) is drawn through `clusters.Sanitize`, which drops
+   control characters, so a pasted file cannot move the cursor or end the window title's OSC
+   sequence; the raw strings stay the identifiers (the context connected to, the key in
+   `state.yaml`).
 6. **`Remote[T]` envelope + sealed error taxonomy.** Rows are never cleared on failure; `Stale`
    keeps rendering; `Terminal` (401/403/TLS/exec-plugin failure) stops retrying and surfaces
    actionably.
