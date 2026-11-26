@@ -8,7 +8,7 @@ import (
 	"crypto/sha256"
 	"os"
 	"os/exec"
-	"strings"
+	"runtime"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -36,20 +36,12 @@ func WriteTemp(content string) (path string, sum [32]byte, err error) {
 	return f.Name(), sha256.Sum256([]byte(content)), nil
 }
 
-// Process builds the $EDITOR command for a file. It honors KUBE_EDITOR, then
-// EDITOR, falling back to vi, and splits a multi-word editor into program+args.
+// Process builds the $EDITOR command for a file: the editor command picks from
+// KUBE_EDITOR, EDITOR or the platform default, with the file as its last argument.
 // Bubble Tea wires stdin/stdout/stderr, so they are left unset here.
 func Process(path string) *exec.Cmd {
-	ed := os.Getenv("KUBE_EDITOR")
-	if ed == "" {
-		ed = os.Getenv("EDITOR")
-	}
-	if ed == "" {
-		ed = "vi"
-	}
-	parts := strings.Fields(ed)
-	args := append(parts[1:], path)
-	return exec.Command(parts[0], args...)
+	argv := command(os.Getenv, runtime.GOOS)
+	return exec.Command(argv[0], append(argv[1:], path)...)
 }
 
 // Apply reads the edited file, and if it differs from the original applies it
