@@ -51,8 +51,10 @@ func (s *Store) ClustersDir() string { return filepath.Join(s.dir, "clusters") }
 func (s *Store) PastePath(file string) string { return filepath.Join(s.ClustersDir(), file) }
 
 // SavePaste stores data under a file name derived from name and returns the
-// base name. A file that already holds exactly data is reused; a different one
-// with the same name makes this a "-2", "-3"... file.
+// base name. A pasted file that already holds exactly data is reused, whatever
+// it is named, so the same kubeconfig pasted again under another name is
+// relabelled rather than saved twice; a different one with the same name makes
+// this a "-2", "-3"... file.
 func (s *Store) SavePaste(name string, data []byte) (string, error) {
 	dir := s.ClustersDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -67,6 +69,9 @@ func (s *Store) SavePaste(name string, data []byte) (string, error) {
 		if err := writeAtomic(gi, []byte("*\n")); err != nil {
 			return "", err
 		}
+	}
+	if file, err := s.findPaste(data); err != nil || file != "" {
+		return file, err
 	}
 	base := slug(name)
 	for n := 1; ; n++ {
@@ -87,6 +92,21 @@ func (s *Store) SavePaste(name string, data []byte) (string, error) {
 			return file, nil
 		}
 	}
+}
+
+// findPaste returns the pasted file that holds exactly data, or "". A file
+// that cannot be read cannot be compared, and is passed over.
+func (s *Store) findPaste(data []byte) (string, error) {
+	files, err := s.PastedFiles()
+	if err != nil {
+		return "", err
+	}
+	for _, f := range files {
+		if existing, err := os.ReadFile(s.PastePath(f)); err == nil && bytes.Equal(existing, data) {
+			return f, nil
+		}
+	}
+	return "", nil
 }
 
 // PastedFiles lists the base names of pasted kubeconfigs, sorted. Lock files,

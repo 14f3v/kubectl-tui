@@ -927,3 +927,31 @@ func TestPasteBoxSaysNotAKubeconfig(t *testing.T) {
 		})
 	}
 }
+
+// Pasting a saved kubeconfig again under a new name relabels its rows rather
+// than saving a second copy.
+func TestPasteAgainRelabels(t *testing.T) {
+	s := savedStore(t, "")
+	save := func(name string) pasteSaved {
+		t.Helper()
+		r, err := clusters.Inspect([]byte(pasteTwo))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, ok := savePasteCmd(s, name, r, "prod")().(pasteSaved)
+		if !ok || res.err != nil {
+			t.Fatalf("save %s: %+v", name, res)
+		}
+		return res
+	}
+	first, second := save("alpha"), save("beta")
+	if first.ref != second.ref {
+		t.Errorf("second save connects to %+v, want the first file's %+v", second.ref, first.ref)
+	}
+	if files, _ := s.PastedFiles(); !slices.Equal(files, []string{"alpha.yaml"}) {
+		t.Errorf("files = %v, want only alpha.yaml", files)
+	}
+	if got := pastedLabels(loadedRows(t, loadClustersCmd(s)).Rows); !slices.Equal(got, []string{"beta / dev", "beta / prod"}) {
+		t.Errorf("labels = %v, want the rows relabelled beta", got)
+	}
+}

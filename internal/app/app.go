@@ -63,9 +63,10 @@ type Config struct {
 	Sink   engine.Sink
 	Config config.Config
 	Launch Launch
-	// Start is the cluster a direct launch connects to. Its context is pinned by
-	// the caller, so a reconnect never follows the file's current-context
-	// elsewhere.
+	// Start is the cluster a direct launch connects to. The caller names its
+	// context when it can, so a reconnect never follows the file's
+	// current-context elsewhere; a -kubeconfig file that had none to pin (a
+	// missing or unreadable one) leaves it empty, and the connect says why.
 	Start     k8s.ClusterRef
 	StartKind string
 	// StartKindExplicit is true when the user chose StartKind (-kind), even as

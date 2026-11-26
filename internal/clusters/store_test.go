@@ -166,3 +166,24 @@ func TestSlugCapsLength(t *testing.T) {
 		t.Errorf("SavePaste = %q, %v", file, err)
 	}
 }
+
+// The same kubeconfig pasted again under another name reuses its file: only
+// the file's own -2, -3... chain was compared, so it made a second file and
+// duplicate rows.
+func TestSavePasteReusesIdenticalContentUnderAnotherName(t *testing.T) {
+	s := openTemp(t)
+	a, err := s.SavePaste("alpha", []byte("same"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SavePaste("other", []byte("different")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.SavePaste("beta", []byte("same"))
+	if err != nil || b != a {
+		t.Fatalf("second save = %q (%v), want %q reused", b, err, a)
+	}
+	if files, _ := s.PastedFiles(); len(files) != 2 {
+		t.Fatalf("files = %v, want alpha's and other's", files)
+	}
+}

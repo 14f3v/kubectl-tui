@@ -109,10 +109,7 @@ func NewSession(parent context.Context, ref ClusterRef, opts Options) (*Session,
 			return nil, fmt.Errorf("load in-cluster config: %w", err)
 		}
 	} else {
-		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-		if ref.Path != "" {
-			loadingRules.ExplicitPath = ref.Path
-		}
+		loadingRules := loadingRules(ref.Path)
 		overrides := &clientcmd.ConfigOverrides{CurrentContext: ref.Context}
 		cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
 		restCfg, err = cc.ClientConfig()
