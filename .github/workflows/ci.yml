@@ -72,11 +72,13 @@ jobs:
           args: release --snapshot --clean
       # goreleaser would still succeed if the zip override stopped matching (the
       # Windows archives would just come out as tarballs), so check the outputs.
+      # `unzip -l <zip> kubetui.exe` exits 11 unless that exact top-level entry
+      # exists; no pipe, so no SIGPIPE under the runner's pipefail.
       - name: Check release archives
         run: |
           for arch in amd64 arm64; do
             zip=$(ls dist/kubetui_*_windows_${arch}.zip)
-            unzip -l "$zip" | grep -q ' kubetui.exe$'
+            unzip -l "$zip" kubetui.exe >/dev/null
           done
           ls dist/kubetui_*_linux_*.tar.gz dist/kubetui_*_darwin_*.tar.gz
           test -s dist/checksums.txt
