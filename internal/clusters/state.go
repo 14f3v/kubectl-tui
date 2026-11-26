@@ -171,6 +171,8 @@ func (s *Store) saveState(st State) error {
 // and writes the file atomically. Only that entry changes, so a second kubetui's
 // entries survive; the last writer wins per entry.
 func (s *Store) Update(k Key, fn func(*Entry)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	st, err := s.LoadState()
 	if err != nil {
 		return err
@@ -189,6 +191,8 @@ func (s *Store) Update(k Key, fn func(*Entry)) error {
 
 // Remove deletes the entry for k. An absent entry is not an error.
 func (s *Store) Remove(k Key) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	st, err := s.LoadState()
 	if err != nil {
 		return err

@@ -411,7 +411,7 @@ func TestRemoveConnectedEntryIsRefused(t *testing.T) {
 	fast := fastServer(t)
 	s := savedStore(t, "")
 	file, ref := savedPaste(t, s, fast, fast, fast)
-	m := New(Config{Sink: func(tea.Msg) {}, Start: ref("a"), StartKind: "portforwards", Store: s})
+	m := New(Config{Sink: func(tea.Msg) {}, Start: ref("a"), StartKind: "portforwards", StartKindExplicit: true, Store: s})
 	t.Cleanup(func() {
 		if m.sess != nil {
 			m.sess.Dispose()

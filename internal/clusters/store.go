@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/14f3v/kubectl-tui/internal/action/cp"
@@ -23,7 +24,13 @@ var ErrNoConfigDir = errors.New("no usable config directory")
 const pasteExt = ".yaml"
 
 // Store is kubetui's config folder; pasted kubeconfigs live in <dir>/clusters.
-type Store struct{ dir string }
+type Store struct {
+	dir string
+	// mu serializes this process's read-modify-writes of state.yaml: they run
+	// in background commands that can overlap, and two unordered rewrites would
+	// lose one's change.
+	mu sync.Mutex
+}
 
 // Open returns a Store rooted at dir, which must be an absolute path.
 func Open(dir string) (*Store, error) {

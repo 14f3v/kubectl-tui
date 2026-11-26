@@ -145,7 +145,7 @@ Then:
 |---|---|---|
 | `-kubeconfig <path>` | — | connect directly with this kubeconfig file (overrides `$KUBECONFIG` and `~/.kube/config`); kubetui remembers it in the cluster picker |
 | `-context <name>` | the file's current-context | connect directly to this context, of `-kubeconfig` or else of your default kubeconfig |
-| `-kind <kind>` | `pods` | initial resource view |
+| `-kind <kind>` | the view you left the cluster on, else `pods` | resource view the first cluster opens on; clusters you switch to later open where you left them |
 | `-version` | — | print version and exit |
 
 ---
@@ -215,6 +215,7 @@ An unknown `col:` is treated as literal text (so `nginx:1.25` matches that image
 
 - `0`–`9` — jump namespace: `0` = all namespaces, `1`–`9` = your configured favorites (see [Configuration](#configuration)).
 - `enter` on a **namespace** row — open that namespace's pods.
+- Each cluster opens where you left it: on the same view (`:deploy`, `:svc`, …) and namespace, after a switch, after `r` on the expired-credentials banner, and the next time you start kubetui. A cluster you have not used yet opens on pods in its context's namespace (all namespaces if the context names none). `-kind` picks the view of the first cluster only.
 - `:ctx` — open the **cluster picker**: every cluster kubetui knows (each context of your kubeconfig, kubeconfigs you pasted, and files you loaded), most recently used first, with `●` on the one you are on. `enter` connects, `p` pastes a kubeconfig, `f` loads a kubeconfig file by path, `ctrl+d` removes a saved entry and `esc` goes back.
   - `p` opens the **paste box**: paste a kubeconfig into it (the terminal's paste, e.g. `ctrl+shift+v` or right-click). The box never shows the text, only how much arrived, the contexts it found with their servers, and any problem; `↑`/`↓` picks the context to connect to. `ctrl+s` asks for a name (the context's, to start with), saves the kubeconfig in kubetui's own folder (see [Saved kubeconfigs](#saved-kubeconfigs)) and connects; `esc` cancels, asking first if anything was pasted. A kubeconfig that runs a login command, reads files on your computer, logs in through an auth-provider or skips TLS verification is shown for review first, with secret values hidden, and a second `ctrl+s` saves it. One that points to certificate or token files by a relative path is refused, since the path would break once saved; export a self-contained copy with `kubectl config view --raw --flatten --minify --context <name>`.
   - A file in that folder that kubetui has no record of (one copied in by hand, say) is listed as "needs review", and `enter` on it shows the same review before anything in it runs.
@@ -373,6 +374,8 @@ favorites:              # namespaces on digit keys 1-9
 ### Saved kubeconfigs
 
 Kubeconfigs you paste into kubetui are stored in **`clusters/`** next to the config file (`~/.config/kubetui/clusters/`, or `$XDG_CONFIG_HOME/kubetui/clusters/`). The folder is private to you (mode `0700`, files `0600` on Unix) and holds a `.gitignore` of `*` so a dotfiles repo never picks the credentials up. kubetui never writes `~/.kube/config`, your `$KUBECONFIG` files or a `--kubeconfig` file.
+
+Beside `clusters/`, **`state.yaml`** lists the clusters kubetui knows and, for each, when you last used it and the view and namespace you were on. It holds names, paths, positions and the login commands you approved for a pasted kubeconfig, never credentials. A missing one is fine, and a malformed one is moved aside to `state.yaml.bad`.
 
 ### Read-only mode
 

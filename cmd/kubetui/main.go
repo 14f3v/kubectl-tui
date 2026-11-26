@@ -51,9 +51,18 @@ func main() {
 		}
 	}
 
-	program = tea.NewProgram(app.New(cfg))
+	model := app.New(cfg)
+	program = tea.NewProgram(model)
 
 	_, err = program.Run()
+	// Where the user was in the cluster (view, namespace) is written a moment
+	// after each change; this writes the last one when the quit came first. q,
+	// ctrl+c, SIGINT/Ctrl+Break and SIGTERM (a Windows console close too) all
+	// end Run and get here. SIGHUP does not, nor does an exit during a pod
+	// shell; the debounced writes have saved all but the last moment by then.
+	if ferr := model.FlushState(); ferr != nil {
+		fmt.Fprintln(os.Stderr, "kubetui: saving state.yaml:", ferr)
+	}
 	code, report := exitStatus(err)
 	if report {
 		fmt.Fprintln(os.Stderr, "kubetui:", err)
@@ -89,7 +98,7 @@ func launchConfig(args []string, getwd func() (string, error)) (app.Config, erro
 			return err
 		})
 	contextName := fs.String("context", "", "connect to this context (default: the -kubeconfig file's current-context)")
-	kind := fs.String("kind", "", "initial resource view (default pods)")
+	kind := fs.String("kind", "", "resource view the first cluster opens on (default: the one you left it on, else pods)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return app.Config{}, err

@@ -1,9 +1,11 @@
 package clusters
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/14f3v/kubectl-tui/internal/k8s"
@@ -87,6 +89,32 @@ func TestUpdateKeepsOtherWritersEntries(t *testing.T) {
 	es, _ := a.Entries()
 	if len(es) != 2 {
 		t.Fatalf("got %+v", es)
+	}
+}
+
+// kubetui writes state.yaml from background commands that can overlap (a
+// debounced position, a switch's last-used time). Each must keep the others'
+// entries, as a second kubetui's are kept.
+func TestUpdateFromManyGoroutinesKeepsEveryEntry(t *testing.T) {
+	s := openTemp(t)
+	const n = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := range n {
+		wg.Go(func() {
+			k := Key{Source: k8s.SourceFile, Path: fmt.Sprintf("/f%d", i), Context: "c"}
+			errs <- s.Update(k, func(e *Entry) { e.Kind = "pods" })
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if es, _ := s.Entries(); len(es) != n {
+		t.Fatalf("%d entries after %d concurrent updates, want every one", len(es), n)
 	}
 }
 

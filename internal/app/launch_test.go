@@ -35,11 +35,12 @@ contexts:
 `
 
 // launchModel builds the root model as main does for a plain `kubetui`, with
-// store s, and runs Init. The port-forwards page starts no informer, so a
-// connect talks to nothing but the version probe.
+// store s, and runs Init. The first connect opens the port-forwards page, as
+// -kind portforwards would, and it starts no informer, so the connect talks to
+// nothing but the version probe.
 func launchModel(t *testing.T, s *clusters.Store) (*Model, tea.Cmd) {
 	t.Helper()
-	return launchWith(t, Config{Sink: func(tea.Msg) {}, Launch: LaunchPicker, StartKind: "portforwards", Store: s})
+	return launchWith(t, Config{Sink: func(tea.Msg) {}, Launch: LaunchPicker, StartKind: "portforwards", StartKindExplicit: true, Store: s})
 }
 
 // launchWith builds the root model from cfg at a usable size and runs Init.
@@ -98,7 +99,7 @@ func TestLaunchDirectWithKubeconfig(t *testing.T) {
 	fast := fastServer(t)
 	path := writeKubeconfig(t, fmt.Sprintf(threeClusters, fast, fast, fast))
 	ref := k8s.ClusterRef{Source: k8s.SourceFile, Path: path, Context: "b"}
-	m, connect := launchWith(t, Config{Sink: func(tea.Msg) {}, Launch: LaunchDirect, Start: ref, StartKind: "portforwards"})
+	m, connect := launchWith(t, Config{Sink: func(tea.Msg) {}, Launch: LaunchDirect, Start: ref, StartKind: "portforwards", StartKindExplicit: true})
 
 	if m.active() != nil {
 		t.Fatalf("a direct launch opened %T; it connects without asking", m.active())
@@ -253,7 +254,7 @@ func TestLaunchErrorReturnsToPicker(t *testing.T) {
 func TestLaunchDirectErrorOpensPicker(t *testing.T) {
 	s := savedStore(t, writeKubeconfig(t, fmt.Sprintf(brokenAndGood, fastServer(t))))
 	bad := k8s.ClusterRef{Source: k8s.SourceKubeconfig, Context: "bad"}
-	m, connect := launchWith(t, Config{Sink: func(tea.Msg) {}, Launch: LaunchDirect, Start: bad, StartKind: "portforwards", Store: s})
+	m, connect := launchWith(t, Config{Sink: func(tea.Msg) {}, Launch: LaunchDirect, Start: bad, StartKind: "portforwards", StartKindExplicit: true, Store: s})
 
 	load := deliver(t, m, connect)
 

@@ -104,6 +104,18 @@ type Model struct {
 	bootCancel context.CancelFunc // cancels the in-flight version probe
 	connecting *k8s.ClusterRef    // non-nil while a bootstrap is in flight
 
+	// Where the user is in the current cluster, kept for state.yaml. at changes
+	// with every view or namespace change; unsaved says it has not been written
+	// since. It is written saveDelay after the last change (saveToken
+	// debounces, like toastToken), at once when a connect replaces the
+	// cluster, and by FlushState on exit.
+	at        position
+	unsaved   bool
+	saveToken int
+	// startKindUsed is set once the first connect has opened its page: an
+	// explicit -kind applies to that one only.
+	startKindUsed bool
+
 	width, height int
 
 	mode     inputMode
@@ -248,7 +260,9 @@ func (m *Model) isCurrent(token int) bool {
 // which is the one slow step, so a newer pick can cut it short.
 //
 // For a pasted ref the store supplies the login commands the user approved when
-// saving it; the lookup reads a file, so it runs here and not in Update.
+// saving it, and for every ref what state.yaml remembers of it (the view and
+// namespace to restore); both reads are file IO, so they run here and not in
+// Update. The entry is read last, as late as it can be.
 func bootstrapCmd(ctx context.Context, token int, ref k8s.ClusterRef, opts k8s.Options, store *clusters.Store) tea.Cmd {
 	return func() tea.Msg {
 		if ref.Source == k8s.SourcePasted && store != nil {
@@ -259,8 +273,26 @@ func bootstrapCmd(ctx context.Context, token int, ref k8s.ClusterRef, opts k8s.O
 			return msg.SessionError{Err: err, Token: token, Ref: ref}
 		}
 		_ = sess.RefreshServerVersion(ctx) // best-effort; empty version is fine
-		return msg.SessionReady{Session: sess, Token: token}
+		ready := msg.SessionReady{Session: sess, Token: token}
+		if store != nil {
+			if e := savedEntry(store, clusters.KeyFor(ref, sess.Identity.Server)); e != nil {
+				ready.Saved = e
+			}
+		}
+		return ready
 	}
+}
+
+// savedEntry returns state.yaml's entry for key, or nil when it has none or
+// cannot be read: the cluster then opens as one never used.
+func savedEntry(store *clusters.Store, key clusters.Key) *clusters.Entry {
+	entries, _ := store.Entries()
+	for _, e := range entries {
+		if e.Key() == key {
+			return &e
+		}
+	}
+	return nil
 }
 
 // approvedExec returns the login commands approved for a pasted ref. An
@@ -324,6 +356,13 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 			m.toast = nil
 		}
 		return m, nil
+
+	case stateSaveMsg:
+		if t.token != m.saveToken || !m.unsaved || m.store == nil {
+			return m, nil // a later change re-armed it, or it is written already
+		}
+		m.unsaved = false
+		return m, saveCmd(m.store, m.at)
 
 	case msg.Navigate:
 		return m.navigate(t.Kind, t.Namespace)
@@ -719,7 +758,132 @@ func (m *Model) onSessionReady(t msg.SessionReady) (tea.Model, tea.Cmd) {
 	m.sess, m.ref = sess, sess.Ref
 	m.poller = metrics.NewPoller(sess.CS, sess.Metrics, sess.Disco, m.sink)
 	go m.poller.Run(sess.Context())
-	return m.navigate(m.cfg.StartKind, sess.Identity.Namespace)
+
+	// Open where the user left this cluster. Every connect comes through here:
+	// the first, a switch, and the reconnect behind the auth banner's r.
+	key := clusters.KeyFor(sess.Ref, sess.Identity.Server)
+	saved, _ := t.Saved.(*clusters.Entry)
+	kind, ns := m.startPosition(m.remembered(key, saved))
+	m.startKindUsed = true
+	var writes []position
+	if m.unsaved && m.at.key != key {
+		writes = append(writes, m.at) // where the user was in the cluster left behind
+	}
+	m.at = position{key: key, server: sess.Identity.Server}
+	mdl, nav := m.navigate(kind, ns)
+	if m.store == nil {
+		return mdl, nav
+	}
+	// Write the connect now rather than after the debounce, so the picker's
+	// last-used order has it: its time, and the position it opened on.
+	m.unsaved = false
+	return mdl, tea.Batch(nav, saveCmd(m.store, append(writes, m.at)...))
+}
+
+// position is where the user is in one cluster, as state.yaml records it.
+type position struct {
+	key    clusters.Key
+	server string // a file's server is kept for its row when the file goes missing
+	// kind and ns are the last navigate's; kind is "" until a page opened.
+	kind, ns string
+}
+
+// saveDelay is how long the view must stay put before its position is written.
+const saveDelay = 500 * time.Millisecond
+
+// stateSaveMsg is the debounce tick of recordPosition. Only the tick of the
+// latest change, the one whose token is current, writes.
+type stateSaveMsg struct{ token int }
+
+// recordPosition notes kind (canonical) and namespace ns as where the user is
+// in the current cluster and returns the debounce tick that writes it. With no
+// store the position is still kept in memory, which a reconnect returns to,
+// and there is nothing to write.
+func (m *Model) recordPosition(kind, ns string) tea.Cmd {
+	m.at.kind, m.at.ns = kind, ns
+	if m.store == nil {
+		return nil
+	}
+	m.unsaved = true
+	m.saveToken++
+	tok := m.saveToken
+	return tea.Tick(saveDelay, func(time.Time) tea.Msg { return stateSaveMsg{token: tok} })
+}
+
+// FlushState writes the position recorded since the last write. main calls it
+// once the program has stopped, so a quit inside the debounce still saves
+// where the user was.
+func (m *Model) FlushState() error {
+	if m.store == nil || !m.unsaved {
+		return nil
+	}
+	m.unsaved = false
+	return writePosition(m.store, m.at)
+}
+
+// remembered is the record to restore the cluster key names from: the entry
+// the bootstrap read, except on a reconnect to the cluster on screen, where the
+// position in memory is newer than any state.yaml may hold yet (its write can
+// still be on its way, or debounced).
+func (m *Model) remembered(key clusters.Key, saved *clusters.Entry) *clusters.Entry {
+	if key != m.at.key || m.at.kind == "" {
+		return saved
+	}
+	// LastUsed marks it used, so its namespace is restored too: it is the
+	// cluster on screen.
+	return &clusters.Entry{Kind: m.at.kind, Namespace: m.at.ns, LastUsed: time.Now()}
+}
+
+// startPosition is the view and namespace a cluster opens on, given what
+// state.yaml remembers of it (e may be nil). The view is an explicit -kind on
+// the run's first connect, else the remembered one while it is still a
+// first-class kind, else pods. The namespace is the remembered one once the
+// cluster has been used ("" there is all namespaces, a choice like any other),
+// else the context's, else all namespaces.
+func (m *Model) startPosition(e *clusters.Entry) (kind, ns string) {
+	kind = "pods"
+	switch {
+	case m.cfg.StartKindExplicit && !m.startKindUsed:
+		kind = m.cfg.StartKind
+	case e != nil:
+		if k, ok := view.ResolveKind(e.Kind); ok {
+			kind = k
+		}
+	}
+	switch {
+	case e != nil && !e.LastUsed.IsZero():
+		ns = e.Namespace
+	case m.sess != nil:
+		ns = m.sess.Identity.Namespace
+	}
+	return kind, ns
+}
+
+// saveCmd writes positions to state.yaml off the UI thread, in order. A failed
+// write is dropped: the position is a convenience, and a toast for it on every
+// view change would be noise. The next write tries again.
+func saveCmd(s *clusters.Store, ps ...position) tea.Cmd {
+	return func() tea.Msg {
+		for _, p := range ps {
+			_ = writePosition(s, p)
+		}
+		return nil
+	}
+}
+
+// writePosition records that the cluster p names was just used, and on which
+// view and namespace. A position with no page yet (an unknown -kind opened
+// none) keeps the remembered view and namespace.
+func writePosition(s *clusters.Store, p position) error {
+	return s.Update(p.key, func(e *clusters.Entry) {
+		e.LastUsed = time.Now()
+		if p.key.Source == k8s.SourceFile {
+			e.Server = p.server
+		}
+		if p.kind != "" {
+			e.Kind, e.Namespace = p.kind, p.ns
+		}
+	})
 }
 
 // onSessionError reports a failed bootstrap; it is never a dead end. A switch
@@ -753,11 +917,17 @@ func (m *Model) onSessionError(t msg.SessionError) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tick, open, route)
 }
 
-// navigate replaces the page stack with a fresh page for kind, scoped to
-// namespace ("" = all namespaces).
+// navigate replaces the page stack with a fresh page for kind (an alias such as
+// -kind deploy works too), scoped to namespace ("" = all namespaces). Every
+// change of base view or namespace comes through here, so this is where the
+// position is recorded, by its canonical kind: several base pages report an
+// empty Kind().
 func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	if m.sess == nil {
 		return m, nil
+	}
+	if k, ok := view.ResolveKind(kind); ok {
+		kind = k
 	}
 	page, ok := view.NewPage(kind, view.Deps{
 		Session:   m.sess,
@@ -780,7 +950,7 @@ func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	if m.poller != nil {
 		m.poller.SetNamespace(namespace)
 	}
-	return m, tea.Batch(page.Init(), page.OnEnter())
+	return m, tea.Batch(page.Init(), page.OnEnter(), m.recordPosition(kind, namespace))
 }
 
 // switchConfirmed is the yes to a switch that closes port-forwards; it starts the

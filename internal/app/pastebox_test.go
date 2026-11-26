@@ -450,7 +450,7 @@ func TestPasteBoxRefusesOversizedPaste(t *testing.T) {
 func TestPasteBoxSaveConnects(t *testing.T) {
 	fast := fastServer(t)
 	s := savedStore(t, "")
-	m := New(Config{Sink: func(tea.Msg) {}, StartKind: "portforwards", Store: s})
+	m := New(Config{Sink: func(tea.Msg) {}, StartKind: "portforwards", StartKindExplicit: true, Store: s})
 	t.Cleanup(func() {
 		m.cancelConnect()
 		if m.sess != nil {
@@ -529,7 +529,7 @@ func TestPasteBoxReviewsSavedFile(t *testing.T) {
 	if want := []string{"team / dev", "team / dev-sso"}; !slices.Equal(pastedLabels(before), want) {
 		t.Fatalf("unreviewed labels = %v, want %v", pastedLabels(before), want)
 	}
-	m := New(Config{Sink: func(tea.Msg) {}, StartKind: "portforwards", Store: s})
+	m := New(Config{Sink: func(tea.Msg) {}, StartKind: "portforwards", StartKindExplicit: true, Store: s})
 	t.Cleanup(func() {
 		m.cancelConnect()
 		if m.sess != nil {

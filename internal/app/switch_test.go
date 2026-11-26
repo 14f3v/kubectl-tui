@@ -83,9 +83,10 @@ func connected(t *testing.T, serverB string) (m *Model, a *k8s.Session, refB, re
 	ref := func(name string) k8s.ClusterRef {
 		return k8s.ClusterRef{Source: k8s.SourceFile, Path: path, Context: name}
 	}
-	// The port-forwards page starts no informer, so a swap talks to nothing but
-	// the version probe.
-	m = New(Config{Sink: func(tea.Msg) {}, Start: ref("a"), StartKind: "portforwards"})
+	// The launch opens the port-forwards page, which starts no informer, so it
+	// talks to nothing but the version probe. -kind is for the first connect
+	// only: a switch opens pods, whose watches the test server answers with 404.
+	m = New(Config{Sink: func(tea.Msg) {}, Start: ref("a"), StartKind: "portforwards", StartKindExplicit: true})
 	t.Cleanup(func() {
 		m.cancelConnect()
 		if m.sess != nil {

@@ -45,6 +45,10 @@ type SessionReady struct {
 	Session any
 	// Token is the bootstrap's; a result whose token is no longer current is stale.
 	Token int
+	// Saved is what state.yaml remembers of the cluster, a *clusters.Entry (nil
+	// when nothing), read by the bootstrap so the view to restore is at hand
+	// without IO in Update. Typed as any for the same reason as Session.
+	Saved any
 }
 
 // SessionError is delivered when a Session fails to bootstrap.
