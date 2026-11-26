@@ -73,17 +73,30 @@ The formula lives in [`14f3v/homebrew-tap`](https://github.com/14f3v/homebrew-ta
 
 ### Download a binary
 
-Grab the archive for your OS/arch from [Releases](https://github.com/14f3v/kubectl-tui/releases), extract it, and put `kubetui` on your `PATH`:
+Grab the archive for your OS/arch from [Releases](https://github.com/14f3v/kubectl-tui/releases), extract it, and put `kubetui` on your `PATH`. On Linux/macOS:
 
 ```bash
 install -m 0755 kubetui /usr/local/bin/kubetui
 ```
+
+On Windows, download `kubetui_<version>_windows_amd64.zip` (`windows_arm64` on Arm devices), extract it into a folder of its own and add that folder to your user `PATH`, e.g. in PowerShell:
+
+```powershell
+$dir = "$env:LOCALAPPDATA\Programs\kubetui"
+Expand-Archive .\kubetui_<version>_windows_amd64.zip -DestinationPath $dir
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+[Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User')
+```
+
+Then open a new terminal and run `kubetui`. See [Windows notes](#windows-notes) if SmartScreen blocks it.
 
 ### `go install`
 
 ```bash
 go install github.com/14f3v/kubectl-tui/cmd/kubetui@latest
 ```
+
+This works on Windows too, and installs `kubetui.exe` into Go's bin directory (`%USERPROFILE%\go\bin` by default).
 
 ### Build from source
 
@@ -94,6 +107,13 @@ git clone https://github.com/14f3v/kubectl-tui.git
 cd kubectl-tui
 go build -o kubetui ./cmd/kubetui
 ./kubetui
+```
+
+On Windows, name the binary `kubetui.exe` (`make build` does this for you):
+
+```powershell
+go build -o kubetui.exe ./cmd/kubetui
+.\kubetui.exe
 ```
 
 ---
@@ -314,7 +334,7 @@ The secrets table only shows the type and data-key count. `enter` opens a reveal
 
 ## Configuration
 
-kubetui reads an optional config file at **`~/.config/kubetui/config.yaml`** (or `$XDG_CONFIG_HOME/kubetui/config.yaml`). A missing or malformed file falls back to defaults.
+kubetui reads an optional config file at **`~/.config/kubetui/config.yaml`** (or `$XDG_CONFIG_HOME/kubetui/config.yaml`); on Windows that is `%USERPROFILE%\.config\kubetui\config.yaml`. A missing or malformed file falls back to defaults.
 
 ```yaml
 accent: indigo          # indigo | green | teal | pink | #RRGGBB
@@ -355,11 +375,25 @@ or an upload can change a container from the inside), and **`p` port-forward**.
 
 ## Requirements & authentication
 
-- **A kubeconfig.** Resolution order: `-kubeconfig` flag → `$KUBECONFIG` (colon-separated files are merged) → `~/.kube/config`. `-context` overrides the current-context; `:ctx` switches live.
+- **A kubeconfig.** Resolution order: `-kubeconfig` flag → `$KUBECONFIG` (a list of files, merged; separate them with `:` on Linux/macOS and `;` on Windows) → `~/.kube/config`. `-context` overrides the current-context; `:ctx` switches live.
 - **Standard auth is supported** — client certificates, tokens, OIDC, and **exec credential plugins** (Teleport `tsh`, `aws eks get-token`, `gke-gcloud-auth-plugin`, etc.) all work through client-go's normal config resolution.
 - **RBAC.** kubetui only does what your credentials allow; a forbidden resource shows a clear banner rather than failing. Mutating actions preflight a `SelfSubjectAccessReview` where possible.
 - **Metrics** (CPU/MEM columns, cluster gauges) require `metrics-server`; they're simply absent otherwise.
 - No cluster-side components are installed. The CRD browser uses the built-in Table protocol and discovery — the same APIs `kubectl get` uses.
+
+---
+
+## Windows notes
+
+kubetui is a native Windows console app. It needs a console that understands VT (ANSI) sequences, which means **Windows 10 1809+ or Windows Server 2019+**; in the legacy console mode ("Use legacy console" in the window's properties) it exits with a console-mode error.
+
+- **Terminal.** Use **Windows Terminal** (the default on current Windows 11). The classic console window that PowerShell and cmd open on older systems works, but its fonts lack some of the symbols kubetui draws, so they show as boxes. On a Chinese, Japanese or Korean system code page it also draws the table and border glyphs two cells wide, which misaligns columns and boxes. Windows Terminal has neither problem.
+- **Git Bash / mintty.** Recent Git for Windows releases run console programs on a pseudo console (ConPTY), and kubetui works there. Without one (an older Git Bash, or with pseudo console support turned off) you get a blank screen that ignores keys: run kubetui from Windows Terminal, or as `winpty kubetui`.
+- **kubeconfig.** Found the same way kubectl finds it (normally `%USERPROFILE%\.kube\config`). `KUBECONFIG` takes a `;`-separated list on Windows, not `:`.
+- **Config file.** `%XDG_CONFIG_HOME%\kubetui\config.yaml` if that variable is set, otherwise `%USERPROFILE%\.config\kubetui\config.yaml` — `%USERPROFILE%` even when `%HOME%` is set and kubectl reads its kubeconfig from there.
+- **Editor.** `e` and `:apply` open `KUBE_EDITOR`, else `EDITOR`, else Notepad. kubetui waits for the editor to exit, so a GUI editor needs its wait flag: `$env:EDITOR = 'code --wait'`. Quote a program path that has spaces: `$env:EDITOR = '"C:\Program Files\Notepad++\notepad++.exe" -multiInst'`.
+- **Paths in prompts.** The file-copy (`C`) and log-save prompts accept a quoted path, such as Explorer's **Copy as path** gives you.
+- **Unsigned binary.** Release binaries aren't code-signed. If SmartScreen stops `kubetui.exe` ("Windows protected your PC"), choose **More info → Run anyway**, or clear the download mark before extracting with `Unblock-File .\kubetui_<version>_windows_amd64.zip`.
 
 ---
 
