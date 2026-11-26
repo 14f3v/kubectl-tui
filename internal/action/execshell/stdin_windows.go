@@ -30,9 +30,11 @@ func newSessionStdin(in io.Reader) *sessionStdin {
 			err := windows.ReadConsole(windows.Handle(f.Fd()), &buf[0], uint32(len(buf)), &n, nil)
 			return int(n), err
 		}},
-		// CancelIoEx on the console handle is the call Bubble Tea's own console
-		// reader relies on to end its synchronous read (ultraviolet
-		// cancelreader_windows.go). Should it not end this ReadConsoleW, stop
+		// CancelIoEx on the console handle is meant to end the ReadConsoleW
+		// left parked when the session stops. ultraviolet's console reader
+		// cancels with the same call (cancelreader_windows.go), but its input
+		// loop peek-polls and never blocks in a read (terminal_reader_windows.go),
+		// so nothing upstream shows the call ending one. Should it not, stop
 		// gives up after stopWait and the parked read costs one key, as it always
 		// has, but still writes nothing to the closed stream.
 		cancel: func() { _ = windows.CancelIoEx(windows.Handle(f.Fd()), nil) },
