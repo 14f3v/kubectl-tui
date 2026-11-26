@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -639,14 +640,14 @@ func TestApprovedExecComesFromTheEntry(t *testing.T) {
 // manyCtxExec has six contexts on one exec user and a CA file: on a short
 // screen a list of contexts drawn before the review pushed the login command
 // out of view while ctrl+s still meant "I've read this".
-const manyCtxExec = `apiVersion: v1
+const manyCtxExecTmpl = `apiVersion: v1
 kind: Config
 current-context: c1
 clusters:
 - name: k
   cluster:
     server: https://example.invalid:6443
-    certificate-authority: /etc/kubetui-probe/ca.crt
+    certificate-authority: @CA@
 users:
 - name: sso
   user:
@@ -685,11 +686,22 @@ func reviewBox(t *testing.T, width, height int, text string) *Model {
 // approves it. With a little more room the contexts collapse to the selected
 // one. On a screen too short for the review, ctrl+s does nothing and the footer
 // says to make the window taller.
+// probeCA is an absolute CA path on this OS, short so the 80×24 layouts hold.
+// "/etc/..." is not absolute on Windows, where Inspect refuses it as relative.
+var probeCA = func() string {
+	if runtime.GOOS == "windows" {
+		return `C:\kubetui-probe\ca.crt`
+	}
+	return "/etc/kubetui-probe/ca.crt"
+}()
+
+var manyCtxExec = strings.Replace(manyCtxExecTmpl, "@CA@", probeCA, 1)
+
 func TestPasteBoxReviewIsWholeOrNotApproved(t *testing.T) {
 	const lastItem = "sends what is in it to the server" // the review's last line
 	m := reviewBox(t, 80, 24, manyCtxExec)
 	v := screen(m)
-	for _, want := range []string{"definitely-not-aws --run curl-evil", "AWS_PROFILE", "/etc/kubetui-probe/ca.crt", "I've read this"} {
+	for _, want := range []string{"definitely-not-aws --run curl-evil", "AWS_PROFILE", probeCA, "I've read this"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("80×24: the screen has no %q:\n%s", want, v)
 		}
