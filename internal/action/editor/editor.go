@@ -37,10 +37,11 @@ func WriteTemp(content string) (path string, sum [32]byte, err error) {
 }
 
 // Process builds the $EDITOR command for a file: the editor command picks from
-// KUBE_EDITOR, EDITOR or the platform default, with the file as its last argument.
-// Bubble Tea wires stdin/stdout/stderr, so they are left unset here.
+// KUBE_EDITOR, EDITOR or the platform default, split into program and arguments
+// with quotes honored, and the file as its last argument. Bubble Tea wires
+// stdin/stdout/stderr, so they are left unset here.
 func Process(path string) *exec.Cmd {
-	argv := command(os.Getenv, runtime.GOOS)
+	argv := command(os.Getenv, runtime.GOOS, isAbsProgram)
 	return exec.Command(argv[0], append(argv[1:], path)...)
 }
 
