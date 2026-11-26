@@ -158,8 +158,19 @@ func (c *Cmd) Run() (retErr error) {
 			TerminalSizeQueue: sizeQueue,
 		})
 	})
+	// A program in the pod that turned mouse reporting on (vim with mouse=a, htop,
+	// mc) turns it off on a clean exit, but not when the session is cut short by
+	// Ctrl+Break, a dropped connection or a killed pod. Bubble Tea only resets the
+	// mouse modes it set itself, and kubetui sets none, so switch them off here,
+	// while VT output is still on. Otherwise text selection stops working in the
+	// TUI and the user's own shell gets mouse escapes after kubetui exits.
+	fmt.Fprint(out, mouseReportingOff)
 	return sessionErr(ctx, err)
 }
+
+// mouseReportingOff resets X10/normal (1000), button-event (1002) and any-event
+// (1003) tracking and SGR encoding (1006).
+const mouseReportingOff = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
 
 // sessionErr turns what the stream returned into the error Run reports.
 func sessionErr(ctx context.Context, err error) error {
