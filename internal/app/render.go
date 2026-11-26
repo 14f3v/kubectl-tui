@@ -36,7 +36,8 @@ func (m *Model) View() tea.View {
 	return v
 }
 
-// windowTitle is "user@cluster — kubetui". Bubble Tea writes it inside an OSC 2
+// windowTitle is "user@cluster — kubetui", or for a paste saved under its own
+// name "user@name (context) — kubetui". Bubble Tea writes it inside an OSC 2
 // with no filtering, so every part from the kubeconfig goes through
 // clusters.Sanitize: a BEL in a user name would end the sequence and send the
 // rest, a clipboard write say, to the terminal raw.
@@ -49,11 +50,25 @@ func (m *Model) windowTitle() string {
 	if who == "" {
 		who = "kube"
 	}
-	where := clusters.Sanitize(id.Cluster)
-	if where == "" {
-		where = clusters.Sanitize(id.Context)
+	where, named := m.contextLabel(id.Context)
+	if !named {
+		if where = clusters.Sanitize(id.Cluster); where == "" {
+			where = clusters.Sanitize(id.Context)
+		}
 	}
 	return who + "@" + where + " — kubetui"
+}
+
+// contextLabel is how the header names the context on screen: "name (context)"
+// for a paste saved under a name of its own, which is what tells apart pastes
+// that all call their context "default", else the context. named says the
+// saved name is in it. Both parts are drawn through clusters.Sanitize.
+func (m *Model) contextLabel(context string) (label string, named bool) {
+	context = clusters.Sanitize(context)
+	if name := clusters.Sanitize(m.name); name != "" && name != context {
+		return name + " (" + context + ")", true
+	}
+	return context, false
 }
 
 func (m *Model) render() string {
@@ -96,7 +111,9 @@ func (m *Model) render() string {
 // has no picker while it connects, so it shows only that.
 func (m *Model) renderNoSession() string {
 	t := m.theme
-	if m.active() == nil && m.paste == nil && m.prompt == nil && m.confirm == nil {
+	// Help shows over the connect too: drawn behind it, ? would turn help on
+	// unseen, and the next q would only close it.
+	if m.active() == nil && m.paste == nil && m.prompt == nil && m.confirm == nil && !m.showHelp {
 		body := t.Base.Render("connecting to cluster…") + "\n\n" + t.Faint.Render("press q to cancel")
 		return m.renderCentered(body, t.Dim)
 	}
@@ -388,12 +405,17 @@ func (m *Model) renderHeader() string {
 	val := t.Base
 	dim := t.Dim
 
+	// Each value is cut to its column: a long context (an EKS ARN, or a
+	// paste's name before it) would otherwise wrap and push the rows below
+	// it out of the header.
+	cut := func(s string) string { return ansi.Truncate(orDash(s), max(wA-9, 1), "…") }
+	ctxLabel, _ := m.contextLabel(id.Context)
 	colA := []string{
-		kv("Context", orDash(id.Context), 9, labelA, val),
-		kv("Cluster", orDash(id.Cluster), 9, labelA, val),
-		kv("User", orDash(id.User), 9, labelA, val),
+		kv("Context", cut(ctxLabel), 9, labelA, val),
+		kv("Cluster", cut(id.Cluster), 9, labelA, val),
+		kv("User", cut(id.User), 9, labelA, val),
 		kv("Kubetui", Version, 9, labelA, dim),
-		kv("K8s Rev", orDash(id.K8sVersion), 9, labelA, dim),
+		kv("K8s Rev", cut(id.K8sVersion), 9, labelA, dim),
 	}
 
 	nsLabel := id.Namespace

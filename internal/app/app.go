@@ -92,10 +92,14 @@ type Model struct {
 
 	store *clusters.Store // nil: paste, load-file and saved state are off
 
-	sess  *k8s.Session
-	ref   k8s.ClusterRef // the cluster the Session connects to; at a direct launch, the one being connected to
-	pages []view.Page    // stack; top is active
-	fatal error          // an internal error the UI cannot recover from
+	sess *k8s.Session
+	ref  k8s.ClusterRef // the cluster the Session connects to; at a direct launch, the one being connected to
+	// name is what the user named the pasted cluster on screen, "" for any
+	// other source: many pastes share their context, cluster and user names
+	// (default, kubernetes-admin), and the header tells them apart by it.
+	name  string
+	pages []view.Page // stack; top is active
+	fatal error       // an internal error the UI cannot recover from
 
 	// A switch builds the new Session while the current one keeps running, and
 	// swaps it in only once it is ready. Each bootstrap carries a token; a result
@@ -821,6 +825,10 @@ func (m *Model) onSessionReady(t msg.SessionReady) (tea.Model, tea.Cmd) {
 	// the first, a switch, and the reconnect behind the auth banner's r.
 	key := clusters.KeyFor(sess.Ref, sess.Identity.Server)
 	saved, _ := t.Saved.(*clusters.Entry)
+	m.name = ""
+	if saved != nil && sess.Ref.Source == k8s.SourcePasted {
+		m.name = saved.Name
+	}
 	kind, ns := m.startPosition(m.remembered(key, saved))
 	m.startKindUsed = true
 	var writes []position
