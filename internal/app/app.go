@@ -101,13 +101,15 @@ type confirmState struct {
 
 // promptState holds an active modal text-input dialog (e.g. scale replicas). buf
 // is the live input; errMsg shows the last validation failure until resolved.
+// prefilled is true while buf still holds the request's Initial value untouched.
 type promptState struct {
-	title    string
-	label    string
-	buf      string
-	errMsg   string
-	validate func(string) error
-	action   func(string) tea.Msg
+	title     string
+	label     string
+	buf       string
+	prefilled bool
+	errMsg    string
+	validate  func(string) error
+	action    func(string) tea.Msg
 }
 
 // New builds the root model.
@@ -194,7 +196,7 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		return m, nil
 
 	case view.PromptRequest:
-		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, validate: t.Validate, action: t.Action}
+		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, prefilled: t.Initial != "", validate: t.Validate, action: t.Action}
 		return m, nil
 
 	case view.SwitchContextRequest:
@@ -601,10 +603,12 @@ func (m *Model) handlePromptKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			r := []rune(m.prompt.buf)
 			m.prompt.buf = string(r[:len(r)-1])
 		}
+		m.prompt.prefilled = false
 		m.prompt.errMsg = ""
 		return m, nil
 	case "ctrl+u":
 		m.prompt.buf = ""
+		m.prompt.prefilled = false
 		m.prompt.errMsg = ""
 		return m, nil
 	default:
@@ -622,7 +626,20 @@ func (m *Model) promptInsert(s string) {
 		return
 	}
 	m.prompt.buf += s
+	m.prompt.prefilled = false
 	m.prompt.errMsg = ""
+}
+
+// promptPaste is promptInsert for a paste, except that a paste replaces a value
+// the prompt opened with and nobody has touched yet. Every prefilled value is a
+// whole answer (a log path, an image, a replica count), so a pasted one belongs
+// in its place: appended, Explorer's "Copy as path" would turn the log-save
+// default into `%TEMP%\web.log"C:\Users\me\web.log"`.
+func (m *Model) promptPaste(s string) {
+	if s != "" && m.prompt.prefilled {
+		m.prompt.buf = ""
+	}
+	m.promptInsert(s)
 }
 
 // handlePaste delivers a bracketed paste. Bubble Tea turns bracketed paste on by
@@ -636,7 +653,7 @@ func (m *Model) handlePaste(p tea.PasteMsg) (tea.Model, tea.Cmd) {
 	case m.panicInfo != "" || m.fatal != nil:
 		return m, nil
 	case m.prompt != nil:
-		m.promptInsert(singleLine(p.Content))
+		m.promptPaste(singleLine(p.Content))
 		return m, nil
 	case m.confirm != nil:
 		return m, nil

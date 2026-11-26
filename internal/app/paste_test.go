@@ -86,6 +86,38 @@ func TestPasteFillsThePrompt(t *testing.T) {
 	}
 }
 
+// A paste replaces the value a prompt opened with, as long as nobody has edited
+// it: pasting Explorer's "Copy as path" into the log-save prompt must give that
+// path, not the default with it stuck on the end. Once the user has typed, a
+// paste appends like any other input.
+func TestPasteReplacesAnUntouchedPrefill(t *testing.T) {
+	m := &Model{}
+	m.Update(view.PromptRequest{Title: "Save logs", Label: "Path", Initial: `C:\Temp\web-0.log`})
+
+	m.Update(tea.PasteMsg{Content: `"C:\Users\me\web.log"`})
+	if got, want := m.prompt.buf, `"C:\Users\me\web.log"`; got != want {
+		t.Fatalf("paste over the prefill: buf = %q, want %q", got, want)
+	}
+	m.Update(tea.PasteMsg{Content: "x"})
+	if got, want := m.prompt.buf, `"C:\Users\me\web.log"x`; got != want {
+		t.Errorf("second paste: buf = %q, want %q (appended)", got, want)
+	}
+
+	m.Update(view.PromptRequest{Title: "Scale web", Label: "Replicas", Initial: "3"})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m.Update(tea.PasteMsg{Content: "12"})
+	if got, want := m.prompt.buf, "12"; got != want {
+		t.Errorf("paste after an edit: buf = %q, want %q", got, want)
+	}
+
+	m.Update(view.PromptRequest{Title: "Scale web", Label: "Replicas", Initial: "3"})
+	m.Update(tea.KeyPressMsg{Code: '0', Text: "0"})
+	m.Update(tea.PasteMsg{Content: "5"})
+	if got, want := m.prompt.buf, "305"; got != want {
+		t.Errorf("paste after typing: buf = %q, want %q", got, want)
+	}
+}
+
 // A paste into the "/" filter applies it live and refreshes the suggestions, the
 // same side effects as typing each character.
 func TestPasteFillsTheFilterLive(t *testing.T) {
