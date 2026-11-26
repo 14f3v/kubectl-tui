@@ -191,29 +191,54 @@ func pastedUnreadable(entries []Entry, file, path, stem string) []Row {
 	return rows
 }
 
+// Listing is what Collect found.
+type Listing struct {
+	Rows []Row
+	// Current is the default kubeconfig's current-context, "" when it has
+	// none: on a first launch, with no row used yet, the picker starts on it.
+	Current string
+	// Warnings say what could not be read, for the picker to show; the rows
+	// list everything that could.
+	Warnings []string
+}
+
 // Collect reads every source and builds the rows. s may be nil, in which case
 // only the default kubeconfig (and in-cluster) is listed. A pasted entry whose
 // file is gone is removed from the state.
-func Collect(s *Store) ([]Row, error) {
+//
+// Nothing it reads blocks the listing: a source that cannot be read lists no
+// rows of its own and adds a warning. An unreadable state.yaml lists every
+// pasted file as needing review, which is the safe direction (nothing in one
+// runs until it is reviewed again, and Store.Update still refuses to write over
+// a state it cannot read), and remembered files are not listed.
+func Collect(s *Store) Listing {
+	var l Listing
 	in := Inputs{}
-	// An unreadable default kubeconfig just lists nothing.
-	in.Kubeconfig, _, _ = k8s.ListContexts("")
+	ctxs, current, err := k8s.ListContexts("")
+	if err != nil {
+		l.Warnings = append(l.Warnings, "could not read your kubeconfig, so its clusters are not listed: "+SafeLoadError(err))
+	} else {
+		in.Kubeconfig, l.Current = ctxs, current
+	}
 	if len(in.Kubeconfig) == 0 {
 		_, err := rest.InClusterConfig()
 		in.InCluster = err == nil
 	}
 	if s == nil {
-		return Build(in), nil
+		l.Rows = Build(in)
+		return l
 	}
 	in.PastedDir = s.ClustersDir()
 
 	entries, err := s.Entries()
 	if err != nil {
-		return nil, err
+		entries = nil
+		l.Warnings = append(l.Warnings, "could not read state.yaml, so pasted clusters need review and remembered files are not listed: "+Sanitize(err.Error()))
 	}
 	files, err := s.PastedFiles()
-	if err != nil {
-		return nil, err
+	listed := err == nil
+	if !listed {
+		l.Warnings = append(l.Warnings, "could not list the pasted kubeconfigs: "+Sanitize(err.Error()))
 	}
 	in.Pasted = map[string][]k8s.ContextInfo{}
 	for _, f := range files {
@@ -236,7 +261,9 @@ func Collect(s *Store) ([]Row, error) {
 			}
 			in.Files[e.Path] = ctxs
 		case k8s.SourcePasted:
-			if _, ok := in.Pasted[e.File]; !ok {
+			// Only a listing that worked shows a file is gone: an unreadable
+			// folder lists none, and its records must survive it.
+			if _, ok := in.Pasted[e.File]; !ok && listed {
 				// Best effort: the row is dropped either way.
 				_ = s.Remove(e.Key())
 			}
@@ -251,7 +278,8 @@ func Collect(s *Store) ([]Row, error) {
 		}
 		in.Entries = append(in.Entries, e)
 	}
-	return Build(in), nil
+	l.Rows = Build(in)
+	return l
 }
 
 // Match returns the rows whose label or context name equals name exactly, as

@@ -72,9 +72,6 @@ func loadedRows(t *testing.T, cmd tea.Cmd) view.ClustersLoaded {
 	t.Helper()
 	for _, m := range messages(cmd) {
 		if l, ok := m.(view.ClustersLoaded); ok {
-			if l.Err != nil {
-				t.Fatalf("listing clusters: %v", l.Err)
-			}
 			return l
 		}
 	}
@@ -516,5 +513,27 @@ func TestEscOnPickerCancelsConnect(t *testing.T) {
 	}
 	if m.sess != a || disposed(a) {
 		t.Error("esc on the picker left the current cluster")
+	}
+}
+
+// f takes a path the way a shell would: a leading ~/ is the home folder.
+func TestAddKubeconfigFileExpandsHome(t *testing.T) {
+	s := savedStore(t, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	data := fmt.Sprintf(threeClusters, "https://a.example", "https://b.example", "https://c.example")
+	if err := os.WriteFile(filepath.Join(home, "dev.yaml"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Config{Store: s})
+	_, add := m.Update(view.AddKubeconfigFile{Path: "~/dev.yaml"})
+	m.Update(add())
+	if m.toast != nil {
+		t.Fatalf("toast %q, want the file added", m.toast.Text)
+	}
+	entries, err := s.Entries()
+	if err != nil || len(entries) != 3 || entries[0].Path != filepath.Join(home, "dev.yaml") {
+		t.Errorf("entries = %+v (%v), want three at %s", entries, err, filepath.Join(home, "dev.yaml"))
 	}
 }

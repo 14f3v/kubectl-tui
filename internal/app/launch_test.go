@@ -2,7 +2,9 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -82,9 +84,6 @@ func launchLoad(t *testing.T, cmd tea.Cmd) launchRows {
 	run(cmd)
 	select {
 	case l := <-found:
-		if l.loaded.Err != nil {
-			t.Fatalf("listing clusters: %v", l.loaded.Err)
-		}
 		return l
 	case <-time.After(5 * time.Second):
 		t.Fatal("the launch did not load the cluster rows")
@@ -206,6 +205,10 @@ func TestLaunchEmptyWithoutStoreStaysOnPicker(t *testing.T) {
 	if m.picker() == nil {
 		t.Fatalf("the active page is %T, want the cluster picker", m.active())
 	}
+	// It says why before any key is pressed, and does not offer the paste.
+	if v := screen(m); !strings.Contains(v, "saved clusters are off: no config folder") || strings.Contains(v, "press p") {
+		t.Errorf("the picker does not say why saved clusters are off:\n%s", v)
+	}
 	_, p := m.handleKey(textKey('p'))
 	if p == nil {
 		t.Fatal("p in the launch picker did nothing")
@@ -325,5 +328,118 @@ func TestHeaderWithoutSession(t *testing.T) {
 	}()
 	if h := ansi.Strip(m.renderHeader()); !strings.Contains(h, "Context") {
 		t.Errorf("header = %q, want its labels with no values", h)
+	}
+}
+
+// currentIsLast is a kubeconfig whose current-context sorts last.
+const currentIsLast = `apiVersion: v1
+kind: Config
+current-context: zz-dev
+clusters:
+- name: k
+  cluster: {server: "https://example.invalid"}
+users:
+- name: u
+  user: {token: t}
+contexts:
+- {name: a-prod, context: {cluster: k, user: u}}
+- {name: zz-dev, context: {cluster: k, user: u}}
+`
+
+// On a first launch nothing has been used, and plain `kubetui` used to connect
+// to the kubeconfig's current-context: enter still does.
+func TestLaunchCursorOnCurrentContext(t *testing.T) {
+	m, launch := launchModel(t, savedStore(t, writeKubeconfig(t, currentIsLast)))
+	m.Update(launchLoad(t, launch))
+	v := pickerView(t, m)
+	if !strings.Contains(v, "▶ zz-dev") {
+		t.Errorf("the cursor is not on the current-context zz-dev:\n%s", v)
+	}
+	_, pick := m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	want := k8s.ClusterRef{Source: k8s.SourceKubeconfig, Context: "zz-dev"}
+	if req, ok := pick().(view.SwitchContextRequest); !ok || req.Ref != want {
+		t.Errorf("enter = %#v, want a connect to %+v", req, want)
+	}
+}
+
+// An unreadable state.yaml never blocks launch: the kubeconfig's contexts are
+// listed, and the picker says why the saved clusters look new.
+func TestLaunchWithUnreadableState(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("permission bits do not stop reads here")
+	}
+	s := savedStore(t, writeKubeconfig(t, currentIsLast))
+	p := filepath.Join(s.Dir(), "state.yaml")
+	if err := os.WriteFile(p, []byte("version: 1\nclusters: []\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+	m, launch := launchModel(t, s)
+	m.Update(launchLoad(t, launch))
+	v := screen(m)
+	for _, want := range []string{"a-prod", "▶ zz-dev", "could not read state.yaml"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("the launch screen has no %q:\n%s", want, v)
+		}
+	}
+	if m.paste != nil {
+		t.Error("the paste box opened over the rows")
+	}
+}
+
+// A default kubeconfig that does not load used to leave the picker empty, or
+// open the paste box, with no word on why. The picker stays and says why.
+func TestLaunchBadKubeconfigSaysWhy(t *testing.T) {
+	bad := writeKubeconfig(t, "apiVersion: v1\nkind: Config\nusers:\n- {name: u, user: {token: tok-SECRET-1}}\n- {name: u, user: {token: tok-SECRET-2}}\n")
+	m, launch := launchModel(t, savedStore(t, bad))
+	m.Update(launchLoad(t, launch))
+	if m.paste != nil {
+		t.Fatal("the paste box opened over the reason the kubeconfig's clusters are missing")
+	}
+	v := screen(m)
+	if !strings.Contains(v, "could not read your kubeconfig") {
+		t.Errorf("the picker does not say the kubeconfig could not be read:\n%s", v)
+	}
+	if strings.Contains(v, "tok-SECRET") {
+		t.Errorf("the reason shows the token:\n%s", v)
+	}
+}
+
+// `kubetui -context typo` has no row to show its error on: it stays above the
+// table after the toast is gone, until the next connect.
+func TestLaunchDirectErrorOutlivesToast(t *testing.T) {
+	fast := fastServer(t)
+	s := savedStore(t, writeKubeconfig(t, fmt.Sprintf(threeClusters, fast, fast, fast)))
+	typo := k8s.ClusterRef{Source: k8s.SourceKubeconfig, Context: "typo"}
+	m, connect := launchWith(t, Config{Sink: func(tea.Msg) {}, Launch: LaunchDirect, Start: typo, StartKind: "portforwards", StartKindExplicit: true, Store: s})
+	load := deliver(t, m, connect)
+	m.Update(launchLoad(t, load))
+	m.Update(toastExpireMsg{token: m.toastToken})
+	if m.toast != nil {
+		t.Fatal("the toast did not expire")
+	}
+	v := screen(m)
+	if !strings.Contains(v, `✗ connect typo: load kubeconfig: context "typo" does not exist`) {
+		t.Errorf("the error is gone with the toast:\n%s", v)
+	}
+	_, pick := m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	deliver(t, m, pick)
+	if v := screen(m); strings.Contains(v, "typo") {
+		t.Errorf("the next connect did not clear the error:\n%s", v)
+	}
+}
+
+// Help at launch lists only what works there: esc goes nowhere.
+func TestLaunchHelpHasNoEsc(t *testing.T) {
+	fast := fastServer(t)
+	m, launch := launchModel(t, savedStore(t, writeKubeconfig(t, fmt.Sprintf(threeClusters, fast, fast, fast))))
+	m.Update(launchLoad(t, launch))
+	m.handleKey(textKey('?'))
+	v := screen(m)
+	if !strings.Contains(v, "kubetui — keys") {
+		t.Fatalf("help is not on the screen:\n%s", v)
+	}
+	if strings.Contains(v, "esc") {
+		t.Errorf("help at launch offers esc:\n%s", v)
 	}
 }

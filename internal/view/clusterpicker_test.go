@@ -345,3 +345,94 @@ func TestPickerSanitizesKubeconfigText(t *testing.T) {
 		clean("kubeconfig toast", tm.Text)
 	}
 }
+
+// The cursor starts on the connected row; else, with any row used, on the most
+// recently used one; else, on a first launch, on the default kubeconfig's
+// current-context, which is where kubetui with no flags used to connect.
+func TestPickerCursorStart(t *testing.T) {
+	a, z := pickRow("a-prod", k8s.SourceKubeconfig), pickRow("zz-dev", k8s.SourceKubeconfig)
+	pasted := pickRow("zz-dev", k8s.SourcePasted) // the same name in a paste is not it
+	pasted.Label = "b-paste / zz-dev"
+	load := func(cur *k8s.ClusterRef, current string, rows ...clusters.Row) clusters.Row {
+		t.Helper()
+		p := NewClusterPicker(style.Default(), cur, cur == nil)
+		np, _ := p.Update(ClustersLoaded{Rows: rows, Current: current})
+		r, _ := np.(*clusterPickerPage).selected()
+		return r
+	}
+	if got := load(nil, "zz-dev", a, pasted, z); got.Ref != z.Ref {
+		t.Errorf("first launch: cursor on %+v, want the current-context zz-dev", got.Ref)
+	}
+	if got := load(nil, "", a, z); got.Ref != a.Ref {
+		t.Errorf("no current-context: cursor on %+v, want the first row", got.Ref)
+	}
+	used := a
+	used.LastUsed = time.Now().Add(-time.Hour)
+	if got := load(nil, "zz-dev", z, used); got.Ref != used.Ref {
+		t.Errorf("a row used: cursor on %+v, want the most recently used a-prod", got.Ref)
+	}
+	cur := a.Ref
+	if got := load(&cur, "zz-dev", a, z); got.Ref != a.Ref {
+		t.Errorf("from :ctx: cursor on %+v, want the connected a-prod", got.Ref)
+	}
+}
+
+// Banner lines stand above the table: why saved clusters are off, what could
+// not be read, and a connect error for a cluster with no row, which the next
+// connect clears.
+func TestPickerBanner(t *testing.T) {
+	a := pickRow("a", k8s.SourceKubeconfig)
+	p := NewClusterPicker(style.Default(), nil, true)
+	p.Update(ClustersLoaded{Rows: []clusters.Row{a}, Banner: []BannerLine{
+		{Text: "saved clusters are off: no home"},
+		{Text: "could not read state.yaml\x1b]0;x\a", Warn: true},
+	}})
+	out := ansi.Strip(p.View(120, 20))
+	head := strings.Index(out, "NAME")
+	for _, want := range []string{"saved clusters are off: no home", "could not read state.yaml]0;x"} {
+		if i := strings.Index(out, want); i < 0 || i > head {
+			t.Errorf("no %q above the table:\n%s", want, out)
+		}
+	}
+
+	typo := k8s.ClusterRef{Source: k8s.SourceKubeconfig, Context: "typo"}
+	p.Update(ClusterConnectFailed{Ref: typo, Err: `load kubeconfig: context "typo" does not exist`})
+	out = ansi.Strip(p.View(120, 20))
+	want := `✗ connect typo: load kubeconfig: context "typo" does not exist`
+	if i := strings.Index(out, want); i < 0 || i > strings.Index(out, "NAME") {
+		t.Errorf("the error for a cluster with no row is not above the table:\n%s", out)
+	}
+	p.SetConnecting(&a.Ref)
+	if out = ansi.Strip(p.View(120, 20)); strings.Contains(out, "typo") {
+		t.Errorf("the next connect did not clear the error:\n%s", out)
+	}
+}
+
+// With saved clusters off, the picker says so without a key pressed, and its
+// empty state does not offer the paste that is off.
+func TestPickerSaysWhySavedClustersAreOff(t *testing.T) {
+	p := NewClusterPicker(style.Default(), nil, true)
+	p.Update(ClustersLoaded{NoStore: "saved clusters are off: no home", Banner: []BannerLine{{Text: "saved clusters are off: no home"}}})
+	out := ansi.Strip(p.View(120, 20))
+	if !strings.Contains(out, "saved clusters are off: no home") {
+		t.Errorf("no word on why:\n%s", out)
+	}
+	if strings.Contains(out, "press p") {
+		t.Errorf("the empty state offers paste, which is off:\n%s", out)
+	}
+}
+
+// At launch esc has nowhere to go back to, so the keys (and help) leave it out.
+func TestPickerKeysAtLaunch(t *testing.T) {
+	for _, atLaunch := range []bool{true, false} {
+		hasEsc := false
+		for _, k := range NewClusterPicker(style.Default(), nil, atLaunch).Keys() {
+			if k.Help().Key == "esc" {
+				hasEsc = true
+			}
+		}
+		if hasEsc == atLaunch {
+			t.Errorf("at launch = %v: esc listed = %v", atLaunch, hasEsc)
+		}
+	}
+}

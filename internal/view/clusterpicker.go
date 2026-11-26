@@ -2,11 +2,14 @@ package view
 
 import (
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/14f3v/kubectl-tui/internal/clusters"
@@ -25,12 +28,15 @@ type clusterPickerPage struct {
 	atLaunch   bool
 	rows       []clusters.Row
 	loaded     bool
-	loadErr    error
+	banner     []BannerLine
 	noStore    string
 	cursor     int
 	connecting *k8s.ClusterRef
-	errs       map[k8s.ClusterRef]string
-	now        func() time.Time
+	// errs holds why a connect failed, by ref. One whose row is listed shows
+	// under it until that row connects again; one with no row (a -context
+	// the kubeconfig does not have) shows above the table until any connect.
+	errs map[k8s.ClusterRef]string
+	now  func() time.Time
 }
 
 // NewClusterPicker builds an empty picker; rows arrive as a ClustersLoaded. At
@@ -39,12 +45,29 @@ func NewClusterPicker(theme style.Theme, current *k8s.ClusterRef, atLaunch bool)
 	return &clusterPickerPage{theme: theme, current: current, atLaunch: atLaunch, errs: map[k8s.ClusterRef]string{}, now: time.Now}
 }
 
-// SetConnecting marks the row whose connect is in flight; nil clears it.
+// SetConnecting marks the row whose connect is in flight; nil clears it. A new
+// connect clears its own row's error and every error that has no row.
 func (p *clusterPickerPage) SetConnecting(ref *k8s.ClusterRef) {
 	p.connecting = ref
-	if ref != nil {
-		delete(p.errs, *ref)
+	if ref == nil {
+		return
 	}
+	delete(p.errs, *ref)
+	for r := range p.errs {
+		if !p.listed(r) {
+			delete(p.errs, r)
+		}
+	}
+}
+
+// listed reports whether ref has a row.
+func (p *clusterPickerPage) listed(ref k8s.ClusterRef) bool {
+	for _, r := range p.rows {
+		if r.Ref == ref {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *clusterPickerPage) Init() tea.Cmd     { return nil }
@@ -57,14 +80,19 @@ func (p *clusterPickerPage) OnEnter() tea.Cmd  { return nil }
 func (p *clusterPickerPage) OnLeave()          {}
 func (p *clusterPickerPage) Summary() Summary  { return Summary{Total: len(p.rows)} }
 
+// Keys lists the picker's keys. At launch esc has nowhere to go back to (help
+// already lists q), so it is left out.
 func (p *clusterPickerPage) Keys() []key.Binding {
-	return []key.Binding{
+	keys := []key.Binding{
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "connect")),
 		key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "paste kubeconfig")),
 		key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "load file")),
 		key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl-d", "remove")),
-		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 	}
+	if !p.atLaunch {
+		keys = append(keys, key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")))
+	}
+	return keys
 }
 
 func (p *clusterPickerPage) isCurrent(r clusters.Row) bool {
@@ -74,24 +102,43 @@ func (p *clusterPickerPage) isCurrent(r clusters.Row) bool {
 func (p *clusterPickerPage) Update(m tea.Msg) (Page, tea.Cmd) {
 	switch t := m.(type) {
 	case ClustersLoaded:
-		p.rows, p.loadErr, p.noStore, p.loaded = t.Rows, t.Err, t.NoStore, true
+		p.rows, p.banner, p.noStore, p.loaded = t.Rows, t.Banner, t.NoStore, true
 		want := p.current
 		if t.Select != nil {
 			want = t.Select
 		}
-		p.cursor = 0
-		for i, r := range p.rows {
-			if want != nil && r.Ref == *want {
-				p.cursor = i
-				break
-			}
-		}
+		p.cursor = p.startRow(want, t.Current)
 	case ClusterConnectFailed:
 		p.errs[t.Ref] = t.Err
 	case tea.KeyPressMsg:
 		return p, p.onKey(t.String())
 	}
 	return p, nil
+}
+
+// startRow is the row the cursor starts on: want's, if listed; else the most
+// recently used row; else, when nothing has been used yet, the default
+// kubeconfig's current-context, which is where plain kubetui connected before
+// it had a picker; else the first.
+func (p *clusterPickerPage) startRow(want *k8s.ClusterRef, current string) int {
+	recent := -1
+	for i, r := range p.rows {
+		if want != nil && r.Ref == *want {
+			return i
+		}
+		if !r.LastUsed.IsZero() && (recent < 0 || r.LastUsed.After(p.rows[recent].LastUsed)) {
+			recent = i
+		}
+	}
+	if recent >= 0 {
+		return recent
+	}
+	for i, r := range p.rows {
+		if current != "" && r.Source == k8s.SourceKubeconfig && r.Ref.Context == current {
+			return i
+		}
+	}
+	return 0
 }
 
 func (p *clusterPickerPage) onKey(k string) tea.Cmd {
@@ -253,14 +300,44 @@ func (p *clusterPickerPage) View(width, height int) string {
 	}
 	fit := func(s string) string { return ansi.Truncate(s, width, "") }
 
+	// The banner stands above the table and does not scroll: it says why
+	// something is missing from it.
+	var banner []string
+	note := func(st lipgloss.Style, s string) {
+		for _, l := range strings.Split(ansi.Wrap(strings.Join(strings.Fields(clusters.Sanitize(s)), " "), max(width-4, 10), ""), "\n") {
+			banner = append(banner, fit("  "+st.Render(l)))
+		}
+	}
+	warn := lipgloss.NewStyle().Foreground(t.Pal.Warn)
+	for _, b := range p.banner {
+		st := t.Faint
+		if b.Warn {
+			st = warn
+		}
+		note(st, b.Text)
+	}
+	var unlisted []k8s.ClusterRef
+	for ref := range p.errs {
+		if !p.listed(ref) {
+			unlisted = append(unlisted, ref)
+		}
+	}
+	sort.Slice(unlisted, func(i, j int) bool { return RefName(unlisted[i]) < RefName(unlisted[j]) })
+	for _, ref := range unlisted {
+		note(warn, "✗ connect "+RefName(ref)+": "+p.errs[ref])
+	}
+	if len(banner) > 0 {
+		banner = append(banner, "")
+	}
+
 	var lines []string
 	lines = append(lines, fit(t.ColHeader.Render(row("  ", "NAME", "SOURCE", "SERVER", "LAST USED"))))
 	cursorLine := 1
 	switch {
-	case p.loadErr != nil:
-		lines = append(lines, fit(t.Faint.Render("  could not list clusters: "+clusters.Sanitize(p.loadErr.Error()))))
 	case !p.loaded:
 		lines = append(lines, fit(t.Faint.Render("  loading…")))
+	case len(p.rows) == 0 && p.noStore != "":
+		lines = append(lines, fit(t.Faint.Render("  (no clusters in your kubeconfig)")))
 	case len(p.rows) == 0:
 		lines = append(lines, fit(t.Faint.Render("  (no clusters; press p to paste a kubeconfig)")))
 	}
@@ -302,7 +379,9 @@ func (p *clusterPickerPage) View(width, height int) string {
 	}
 	hint := fit(t.Faint.Render("  enter connect · p paste kubeconfig · f load file · ctrl+d remove · " + quit))
 
-	body := height - 2 // blank line and footer
+	// The banner gives way to the table, which always keeps a line.
+	banner = banner[:min(len(banner), max(height-3, 0))]
+	body := height - 2 - len(banner) // blank line and footer
 	if body < 1 {
 		return hint
 	}
@@ -310,5 +389,18 @@ func (p *clusterPickerPage) View(width, height int) string {
 		off := max(0, min(cursorLine-body+2, len(lines)-body))
 		lines = lines[off : off+body]
 	}
-	return strings.Join(lines, "\n") + "\n\n" + hint
+	return strings.Join(append(banner, lines...), "\n") + "\n\n" + hint
+}
+
+// RefName is how a connect error names the cluster it was for: its context,
+// else its file, else its source. An in-cluster ref names no context, and a
+// file with no current-context to pin names none either.
+func RefName(ref k8s.ClusterRef) string {
+	switch {
+	case ref.Context != "":
+		return clusters.Sanitize(ref.Context)
+	case ref.Path != "":
+		return clusters.Sanitize(filepath.Base(ref.Path))
+	}
+	return string(ref.Source)
 }

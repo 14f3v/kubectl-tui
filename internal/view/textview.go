@@ -54,14 +54,25 @@ type PromptRequest struct {
 // (rebuilding the Session). Emitted by the context picker.
 type SwitchContextRequest struct{ Ref k8s.ClusterRef }
 
-// ClustersLoaded delivers the picker's rows. NoStore says why paste, load-file
-// and the saved state are off ("" when they are on). Select, if set, is the row
-// to put the cursor on; otherwise it goes on the connected cluster's row.
+// ClustersLoaded delivers the picker's rows. Banner holds the standing notes
+// drawn above the table: why saved clusters are off, and what could not be
+// read. NoStore says why paste, load-file and the saved state are off ("" when
+// they are on). Select, if set, is the row to put the cursor on; otherwise it
+// goes on the connected cluster's row, else the most recently used one, else
+// the row of Current, the default kubeconfig's current-context.
 type ClustersLoaded struct {
 	Rows    []clusters.Row
-	Err     error
+	Banner  []BannerLine
 	NoStore string
 	Select  *k8s.ClusterRef
+	Current string
+}
+
+// BannerLine is one standing note above the picker's table, drawn faint, or in
+// the warning colour when Warn is set.
+type BannerLine struct {
+	Text string
+	Warn bool
 }
 
 // OpenPasteBox asks the root model to open the paste-a-kubeconfig box.

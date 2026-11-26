@@ -196,8 +196,9 @@ func (m *Model) launchPicker(sel *k8s.ClusterRef) tea.Cmd {
 	_, push := m.pushPage(view.NewClusterPicker(m.theme, nil, true))
 	s := m.store
 	return tea.Batch(push, func() tea.Msg {
-		rows, err := clusters.Collect(s)
-		return launchRows{loaded: view.ClustersLoaded{Rows: rows, Err: err, Select: sel}}
+		l := listed(clusters.Collect(s))
+		l.Select = sel
+		return launchRows{loaded: l}
 	})
 }
 
@@ -209,11 +210,17 @@ type launchRows struct{ loaded view.ClustersLoaded }
 // onLaunchRows hands the launch picker its rows. With none to pick and a store
 // to save into, it opens the paste box: on a machine with no kubeconfig that is
 // the one thing to do, and it replaces the old "could not connect" dead end.
+// When something could not be read it stays on the picker, whose banner says
+// what: the box would cover why the user's clusters are missing.
 func (m *Model) onLaunchRows(l view.ClustersLoaded) (tea.Model, tea.Cmd) {
-	l.NoStore = m.noStoreReason()
+	l = m.withStoreNote(l)
 	route := m.routeToPage(l)
+	warned := false
+	for _, b := range l.Banner {
+		warned = warned || b.Warn
+	}
 	switch {
-	case len(l.Rows) > 0, l.Err != nil, m.store == nil, m.picker() == nil:
+	case len(l.Rows) > 0, warned, m.store == nil, m.picker() == nil:
 		return m, route
 	case m.paste != nil, m.prompt != nil, m.confirm != nil:
 		return m, route // the user is already doing something else
@@ -394,8 +401,7 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		return m.switchContext(t.Ref)
 
 	case view.ClustersLoaded:
-		t.NoStore = m.noStoreReason()
-		return m, m.routeToPage(t)
+		return m, m.routeToPage(m.withStoreNote(t))
 
 	case launchRows:
 		return m.onLaunchRows(t.loaded)
@@ -520,10 +526,28 @@ func (m *Model) pushPage(p view.Page) (tea.Model, tea.Cmd) {
 // loadClustersCmd reads every cluster source off the UI thread. With no store,
 // only the default kubeconfig (and in-cluster) is listed.
 func loadClustersCmd(s *clusters.Store) tea.Cmd {
-	return func() tea.Msg {
-		rows, err := clusters.Collect(s)
-		return view.ClustersLoaded{Rows: rows, Err: err}
+	return func() tea.Msg { return listed(clusters.Collect(s)) }
+}
+
+// listed is the picker's message for what Collect found: its rows, the default
+// kubeconfig's current-context, and a warning line for each source it could
+// not read.
+func listed(l clusters.Listing) view.ClustersLoaded {
+	out := view.ClustersLoaded{Rows: l.Rows, Current: l.Current}
+	for _, w := range l.Warnings {
+		out.Banner = append(out.Banner, view.BannerLine{Text: w, Warn: true})
 	}
+	return out
+}
+
+// withStoreNote adds to l what only the model knows: that paste, load-file and
+// the saved state are off, and why, both for p and f to say and as a standing
+// line above the table. Without it the reason showed only once p was pressed.
+func (m *Model) withStoreNote(l view.ClustersLoaded) view.ClustersLoaded {
+	if l.NoStore = m.noStoreReason(); l.NoStore != "" {
+		l.Banner = append([]view.BannerLine{{Text: l.NoStore}}, l.Banner...)
+	}
+	return l
 }
 
 // clusterPicker is the cluster picker page as the root model drives it. The
@@ -576,19 +600,15 @@ func (m *Model) noStoreReason() string {
 	return "saved clusters are off: " + why
 }
 
-// ctxLookup is every cluster row, listed to resolve ":ctx <name>".
+// ctxLookup is every cluster, listed to resolve ":ctx <name>".
 type ctxLookup struct {
-	name string
-	rows []clusters.Row
-	err  error
+	name   string
+	loaded view.ClustersLoaded
 }
 
 // lookupClusterCmd lists every cluster off the UI thread, for ":ctx <name>".
 func lookupClusterCmd(s *clusters.Store, name string) tea.Cmd {
-	return func() tea.Msg {
-		rows, err := clusters.Collect(s)
-		return ctxLookup{name: name, rows: rows, err: err}
-	}
+	return func() tea.Msg { return ctxLookup{name: name, loaded: listed(clusters.Collect(s))} }
 }
 
 // onCtxLookup resolves ":ctx <name>" against every cluster's display name. One
@@ -596,10 +616,7 @@ func lookupClusterCmd(s *clusters.Store, name string) tea.Cmd {
 // through Update, port-forward confirm included); several open the picker on the
 // first; none says so.
 func (m *Model) onCtxLookup(t ctxLookup) (tea.Model, tea.Cmd) {
-	if t.err != nil {
-		return m.showToast(msg.Toast{Text: "list clusters: " + t.err.Error(), Level: msg.LevelError})
-	}
-	matches := clusters.Match(t.rows, t.name)
+	matches := clusters.Match(t.loaded.Rows, t.name)
 	switch len(matches) {
 	case 0:
 		return m.showToast(msg.Toast{Text: fmt.Sprintf("no cluster named %q", t.name), Level: msg.LevelWarn})
@@ -614,7 +631,8 @@ func (m *Model) onCtxLookup(t ctxLookup) (tea.Model, tea.Cmd) {
 	}
 	mdl, push := m.openPicker()
 	first := matches[0].Ref
-	loaded := view.ClustersLoaded{Rows: t.rows, NoStore: m.noStoreReason(), Select: &first}
+	loaded := m.withStoreNote(t.loaded)
+	loaded.Select = &first
 	return mdl, tea.Batch(push, m.routeToPage(loaded))
 }
 
@@ -637,9 +655,14 @@ func (m *Model) addKubeconfigFile(path string) (tea.Model, tea.Cmd) {
 // addFileCmd remembers a kubeconfig file exactly as --kubeconfig does: one file
 // entry per context, by absolute path, so the entry still works when kubetui
 // starts in another folder. The file is not copied, so later edits to it are
-// picked up. It must load as a kubeconfig with at least one context.
+// picked up. It must load as a kubeconfig with at least one context. A leading
+// ~/ is the home folder, as in a shell, since that is how most people type it.
 func addFileCmd(s *clusters.Store, path string) tea.Cmd {
 	return func() tea.Msg {
+		path, err := expandHome(path)
+		if err != nil {
+			return clustersChanged{err: err}
+		}
 		abs, err := filepath.Abs(path)
 		if err != nil {
 			return clustersChanged{err: err}
@@ -662,6 +685,22 @@ func addFileCmd(s *clusters.Store, path string) tea.Cmd {
 		}
 		return clustersChanged{}
 	}
+}
+
+// expandHome replaces a leading ~/ (or ~\ on Windows) with the home folder.
+func expandHome(path string) (string, error) {
+	rest, ok := strings.CutPrefix(path, "~/")
+	if !ok && filepath.Separator != '/' {
+		rest, ok = strings.CutPrefix(path, "~"+string(filepath.Separator))
+	}
+	if !ok {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("expand ~: %w", err)
+	}
+	return filepath.Join(home, rest), nil
 }
 
 // forgetCluster removes a picker row's source, unless the connected cluster (or
@@ -943,19 +982,12 @@ func (m *Model) onSessionError(t msg.SessionError) (tea.Model, tea.Cmd) {
 	if m.picker() != nil {
 		return m, m.routeToPage(failed)
 	}
-	name := clusters.Sanitize(ref.Context)
-	if name == "" {
-		name = string(ref.Source) // an in-cluster ref names no context
-		if ref.Path != "" {
-			name = clusters.Sanitize(filepath.Base(ref.Path)) // a file with no current-context to pin
-		}
-	}
-	_, tick := m.showToast(msg.Toast{Text: "connect " + name + ": " + why, Level: msg.LevelError})
+	_, tick := m.showToast(msg.Toast{Text: "connect " + view.RefName(ref) + ": " + why, Level: msg.LevelError})
 	if m.sess != nil {
 		return m, tick
 	}
-	// The toast stays the only word on it when the ref has no row, such as a
-	// -context the kubeconfig does not have.
+	// A ref with no row, such as a -context the kubeconfig does not have, has
+	// its error above the picker's table, where it stays after the toast.
 	open := m.launchPicker(&ref)
 	route := m.routeToPage(failed) // to the picker just opened
 	return m, tea.Batch(tick, open, route)
