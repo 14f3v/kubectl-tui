@@ -130,3 +130,23 @@ func TestDeletePaste(t *testing.T) {
 		t.Fatalf("still exists: %v", err)
 	}
 }
+
+func TestSavePasteLeadingDotIsListed(t *testing.T) {
+	s := openTemp(t)
+	for _, name := range []string{".dev", "..", "..."} {
+		file, err := s.SavePaste(name, []byte("apiVersion: v1\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file == "" || file[0] == '.' {
+			t.Fatalf("name %q saved as hidden %q", name, file)
+		}
+	}
+	files, err := s.PastedFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("pasted files not listed")
+	}
+}
