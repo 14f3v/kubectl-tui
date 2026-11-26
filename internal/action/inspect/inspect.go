@@ -90,9 +90,30 @@ func GroupKindFor(kind string) (schema.GroupKind, bool) {
 // unstructured from the dynamic client, renders with its values masked (see
 // secretYAML).
 func YAML(obj any) (string, error) {
+	s, _, err := render(obj)
+	return s, err
+}
+
+// EditYAML renders an object for the edit buffer. The text is what YAML shows,
+// so a Secret's values are masked there too and never reach the temp file the
+// editor gets. For a Secret it also returns a Restore that holds the masked
+// values in memory and puts them back into the saved buffer before it is
+// applied. For any other object the Restore is nil and the buffer is applied
+// as saved.
+func EditYAML(obj any) (string, Restore, error) {
+	s, masked, err := render(obj)
+	if err != nil || masked == nil {
+		return s, nil, err
+	}
+	return s, masked.restore, nil
+}
+
+// render is the body of YAML and EditYAML. It returns, for a Secret, the values
+// it masked.
+func render(obj any) (string, *secretValues, error) {
 	ro, ok := obj.(runtime.Object)
 	if !ok {
-		return "", fmt.Errorf("object is not a runtime.Object (%T)", obj)
+		return "", nil, fmt.Errorf("object is not a runtime.Object (%T)", obj)
 	}
 	clone := ro.DeepCopyObject()
 	if clone.GetObjectKind().GroupVersionKind().Empty() {
@@ -105,9 +126,9 @@ func YAML(obj any) (string, error) {
 	}
 	b, err := yaml.Marshal(clone)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return string(b), nil
+	return string(b), nil, nil
 }
 
 // Describe runs the kubectl describer for a kind and object, returning its text.

@@ -1,7 +1,10 @@
 package inspect
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"maps"
 	"strings"
 	"testing"
 
@@ -9,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/yaml"
 )
 
 // secretValuesUnderTest are the values every fixture Secret holds. None of them,
@@ -178,5 +182,293 @@ func TestYAML_LeavesOtherKindsAlone(t *testing.T) {
 	}
 	if !strings.Contains(out, "path: kv/db") {
 		t.Errorf("a custom kind named Secret was masked:\n%s", out)
+	}
+}
+
+// editAndRestore renders obj for editing, changes the buffer text with edit as a
+// user would, converts it to JSON as the edit action does, and runs the Restore.
+// It returns the JSON before and after the Restore.
+func editAndRestore(t *testing.T, obj runtime.Object, edit func(string) string) (in, out []byte, err error) {
+	t.Helper()
+	text, restore, err := EditYAML(obj)
+	if err != nil {
+		t.Fatalf("EditYAML: %v", err)
+	}
+	if restore == nil {
+		t.Fatal("EditYAML returned no Restore for a Secret")
+	}
+	in, err = yaml.YAMLToJSON([]byte(edit(text)))
+	if err != nil {
+		t.Fatalf("edited buffer is not YAML: %v\n%s", err, edit(text))
+	}
+	out, err = restore(in)
+	return in, out, err
+}
+
+func decode(t *testing.T, b []byte) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("restored JSON does not parse: %v\n%s", err, b)
+	}
+	return m
+}
+
+func TestRestore(t *testing.T) {
+	// Placeholder lines exactly as the buffer holds them for typedSecret.
+	const (
+		password = "  password: '<redacted: 7 bytes>'\n"
+		tlsCrt   = "  tls.crt: '<redacted: 27 bytes>'\n"
+		token    = "  token: '<redacted: 18 bytes>'\n"
+		rv       = "  resourceVersion: \"41\"\n"
+	)
+	original := map[string]any{}
+	for k, v := range secretValuesUnderTest {
+		original[k] = b64(v)
+	}
+	with := func(changes map[string]any) map[string]any {
+		m := maps.Clone(original)
+		for k, v := range changes {
+			if v == nil {
+				delete(m, k)
+			} else {
+				m[k] = v
+			}
+		}
+		return m
+	}
+	replace := func(old, new string) func(string) string {
+		return func(s string) string {
+			if !strings.Contains(s, old) {
+				panic("fixture text not in the buffer: " + old)
+			}
+			return strings.Replace(s, old, new, 1)
+		}
+	}
+
+	cases := []struct {
+		name           string
+		edit           func(string) string
+		wantData       map[string]any // nil: no data in the result
+		wantStringData map[string]any
+		wantRV         string
+		wantErr        string
+		sentAsTyped    bool // nothing restored, so the JSON must go through byte for byte
+	}{
+		{
+			name:     "a label added keeps every value",
+			edit:     replace("    app: db\n", "    app: db\n    tier: backend\n"),
+			wantData: original, wantRV: "41",
+		},
+		{
+			name:     "a changed value is sent as typed",
+			edit:     replace(password, "  password: "+b64("correct-horse")+"\n"),
+			wantData: with(map[string]any{"password": b64("correct-horse")}), wantRV: "41",
+		},
+		{
+			name:     "a deleted key is left out",
+			edit:     replace(tlsCrt, ""),
+			wantData: with(map[string]any{"tls.crt": nil}), wantRV: "41",
+		},
+		{
+			name:     "a new key with real base64 is added",
+			edit:     replace("data:\n", "data:\n  extra: "+b64("more")+"\n"),
+			wantData: with(map[string]any{"extra": b64("more")}), wantRV: "41",
+		},
+		{
+			name:           "stringData added passes through",
+			edit:           func(s string) string { return s + "stringData:\n  plain: hello\n" },
+			wantData:       original,
+			wantStringData: map[string]any{"plain": "hello"},
+			wantRV:         "41",
+		},
+		{
+			name:     "a deleted resourceVersion is put back",
+			edit:     replace(rv, ""),
+			wantData: original, wantRV: "41",
+		},
+		{
+			name:     "a retyped resourceVersion is put back",
+			edit:     replace(rv, "  resourceVersion: \"99\"\n"),
+			wantData: original, wantRV: "41",
+		},
+		{
+			name: "every value replaced is sent as typed",
+			edit: func(s string) string {
+				s = replace(password, "  password: "+b64("a")+"\n")(s)
+				s = replace(tlsCrt, "  tls.crt: "+b64("b")+"\n")(s)
+				s = replace(token, "  token: "+b64("c")+"\n")(s)
+				return replace(rv, "")(s)
+			},
+			wantData:    map[string]any{"password": b64("a"), "tls.crt": b64("b"), "token": b64("c")},
+			sentAsTyped: true,
+		},
+		{
+			name:        "data removed altogether is sent as typed",
+			edit:        replace("data:\n"+password+tlsCrt+token, ""),
+			wantRV:      "41",
+			sentAsTyped: true,
+		},
+		{
+			name:    "a renamed key that kept its placeholder",
+			edit:    replace("  password:", "  passwd:"),
+			wantErr: "data.passwd is still redacted — enter a base64 value, or use stringData",
+		},
+		{
+			name:    "a new key with a placeholder",
+			edit:    replace("data:\n", "data:\n  extra: '<redacted: 7 bytes>'\n"),
+			wantErr: "data.extra is still redacted",
+		},
+		{
+			name:    "a placeholder with its size retyped",
+			edit:    replace("<redacted: 7 bytes>", "<redacted: 8 bytes>"),
+			wantErr: "data.password has a placeholder that is not its own — enter a base64 value, or use stringData",
+		},
+		{
+			name: "two placeholders swapped",
+			edit: func(s string) string {
+				s = replace("<redacted: 7 bytes>", "<swap>")(s)
+				s = replace("<redacted: 18 bytes>", "<redacted: 7 bytes>")(s)
+				return replace("<swap>", "<redacted: 18 bytes>")(s)
+			},
+			wantErr: "data.password has a placeholder that is not its own",
+		},
+		{
+			name: "a placeholder moved into stringData",
+			edit: func(s string) string {
+				return replace(password, "")(s) + "stringData:\n  password: '<redacted: 7 bytes>'\n"
+			},
+			wantErr: "stringData.password is a redacted placeholder — enter the plain value",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in, out, err := editAndRestore(t, typedSecret(), c.edit)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("Restore error = %v, want %q", err, c.wantErr)
+				}
+				if out != nil {
+					t.Errorf("Restore returned a body to apply alongside its error: %s", out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Restore: %v", err)
+			}
+			if c.sentAsTyped && !bytes.Equal(in, out) {
+				t.Errorf("nothing was restored, yet the JSON changed:\n in  %s\n out %s", in, out)
+			}
+			got := decode(t, out)
+			gotData, _ := got["data"].(map[string]any)
+			if c.wantData == nil && gotData != nil || !maps.Equal(gotData, c.wantData) {
+				t.Errorf("data = %v, want %v", gotData, c.wantData)
+			}
+			if gotSD, _ := got["stringData"].(map[string]any); !maps.Equal(gotSD, c.wantStringData) {
+				t.Errorf("stringData = %v, want %v", gotSD, c.wantStringData)
+			}
+			if gotRV, _, _ := unstructured.NestedString(got, "metadata", "resourceVersion"); gotRV != c.wantRV {
+				t.Errorf("resourceVersion = %q, want %q", gotRV, c.wantRV)
+			}
+			if bytes.Contains(out, []byte("<redacted")) {
+				t.Errorf("a placeholder survived into the body to apply: %s", out)
+			}
+		})
+	}
+}
+
+// The edit buffer is the yaml view's text, so the same masking keeps values off
+// disk. Only a Secret gets a Restore; anything else is applied as saved.
+func TestEditYAML_MatchesYAML(t *testing.T) {
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cfg", Namespace: "demo"}, Data: map[string]string{"k": "v"}}
+	for name, c := range map[string]struct {
+		obj     runtime.Object
+		restore bool
+	}{
+		"typed Secret":        {typedSecret(), true},
+		"unstructured Secret": {unstructuredSecret(), true},
+		"ConfigMap":           {cm, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			view, err := YAML(c.obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edit, restore, err := EditYAML(c.obj)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if edit != view {
+				t.Errorf("edit buffer differs from the yaml view:\n%s\n---\n%s", edit, view)
+			}
+			if (restore != nil) != c.restore {
+				t.Errorf("Restore present = %v, want %v", restore != nil, c.restore)
+			}
+			assertNoValues(t, edit)
+		})
+	}
+}
+
+// A Secret read from the dynamic client restores the same way.
+func TestRestore_UnstructuredSecret(t *testing.T) {
+	_, out, err := editAndRestore(t, unstructuredSecret(), func(s string) string {
+		return strings.Replace(s, "    app: db\n", "    app: db\n    tier: backend\n", 1)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := decode(t, out)["data"].(map[string]any)
+	for k, v := range secretValuesUnderTest {
+		if data[k] != b64(v) {
+			t.Errorf("data.%s = %v, want the original %s", k, data[k], b64(v))
+		}
+	}
+}
+
+func TestRestore_SecretWithoutData(t *testing.T) {
+	for name, data := range map[string]map[string][]byte{"nil data": nil, "empty data": {}} {
+		t.Run(name, func(t *testing.T) {
+			s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "demo", ResourceVersion: "7"}, Data: data}
+			addLabel := func(t string) string {
+				return strings.Replace(t, "  name: empty\n", "  labels:\n    a: b\n  name: empty\n", 1)
+			}
+			in, out, err := editAndRestore(t, s, addLabel)
+			if err != nil || !bytes.Equal(in, out) {
+				t.Errorf("label edit: err=%v, changed=%v, want it sent as typed", err, !bytes.Equal(in, out))
+			}
+			_, _, err = editAndRestore(t, s, func(t string) string {
+				return t + "data:\n  k: '<redacted: 0 bytes>'\n"
+			})
+			if err == nil || !strings.Contains(err.Error(), "data.k is still redacted") {
+				t.Errorf("placeholder on a Secret that had no data: err=%v", err)
+			}
+		})
+	}
+}
+
+// Restore re-encodes the object, which must not round integers through float64.
+func TestRestore_KeepsIntegersExact(t *testing.T) {
+	s := typedSecret()
+	s.Generation = 1<<53 + 1 // not representable as a float64
+	_, out, err := editAndRestore(t, s, func(t string) string { return t })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte(`"generation":9007199254740993`)) {
+		t.Errorf("generation was not kept exact: %s", out)
+	}
+}
+
+// A body that is not an object has nothing to restore and goes to the server,
+// which rejects it with its own message.
+func TestRestore_NotAnObject(t *testing.T) {
+	_, restore, err := EditYAML(typedSecret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range []string{"null", "[]", `"text"`} {
+		if out, err := restore([]byte(in)); err != nil || string(out) != in {
+			t.Errorf("restore(%s) = %s, %v; want it unchanged", in, out, err)
+		}
 	}
 }
