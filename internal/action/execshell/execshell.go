@@ -6,11 +6,13 @@ package execshell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/kubectl/pkg/util/interrupt"
 	"k8s.io/kubectl/pkg/util/term"
 )
 
@@ -103,11 +106,16 @@ func (c *Cmd) Run() (retErr error) {
 		out = os.Stdout
 	}
 
+	// ctx is cancelled before Run returns only by a termination signal that
+	// interruptParent turns into the end of the session.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// TryDev lets Safe fall back to /dev/tty for raw mode when the passed input is
 	// not itself a terminal fd. Only wrap a non-nil size queue: MonitorSize returns
 	// nil when the output is not a terminal, and sizeBridge{nil}.Next() — polled
 	// from a goroutine inside remotecommand — would otherwise panic.
-	tty := term.TTY{In: in, Out: out, Raw: true, TryDev: true}
+	tty := term.TTY{In: in, Out: out, Raw: true, TryDev: true, Parent: interruptParent(runtime.GOOS, cancel)}
 	var sizeQueue remotecommand.TerminalSizeQueue
 	if tty.IsTerminalIn() {
 		if q := tty.MonitorSize(tty.GetSize()); q != nil {
@@ -143,13 +151,17 @@ func (c *Cmd) Run() (retErr error) {
 		// TTY.In stays in, so Safe still sees the console.
 		stdin := newSessionStdin(in)
 		defer stdin.stop()
-		return exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
+		return exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdin:             stdin,
 			Stdout:            out,
 			Tty:               true,
 			TerminalSizeQueue: sizeQueue,
 		})
 	})
+	if ctx.Err() != nil {
+		// Otherwise the toast reads "session ended: context canceled".
+		return errors.New("shell interrupted (Ctrl+Break)")
+	}
 	// Exit 127 means the container runtime could not find a shell at all — the
 	// image has no sh (distroless/scratch/static binary). Make that actionable.
 	if err != nil && strings.Contains(err.Error(), "exit code 127") {
@@ -172,6 +184,33 @@ func saveCrashStack(c *Cmd, r any) string {
 	fmt.Fprintf(f, "\n=== %s exec %s/%s container=%q ===\npanic: %v\n%s\n",
 		time.Now().UTC().Format(time.RFC3339), c.namespace, c.pod, c.container, r, debug.Stack())
 	return path
+}
+
+// interruptParent decides what a termination signal does while the pod owns the
+// terminal. With no Parent, tty.Safe restores the terminal and calls os.Exit(1)
+// (kubectl util/interrupt). On unix that is the answer to a hangup or a kill,
+// and raw mode keeps ^C from being a signal at all, so it stays that way there.
+//
+// On Windows the signal is usually a keystroke. Ctrl+Break arrives as a console
+// control event even in raw mode, and Go reports it as SIGINT, as it reports the
+// console closing as SIGTERM (runtime os_windows.go ctrlHandler). Exiting there
+// took kubetui and every port-forward down with the shell, and skipped the
+// deletion of a node-debug pod, which holds the host root. So on Windows the
+// signal cancels the stream instead: Run returns, Bubble Tea takes the console
+// back and the caller's cleanup runs. A closing console still ends the process
+// shortly after (Go parks the control handler to give signal handlers that
+// time), but the cleanup now gets that time rather than none.
+//
+// cancel has to be one of the Parent's notify funcs. Safe builds
+// Chain(parent, restore), whose notify list ends with parent.Close and whose
+// final is parent.Signal; Close spends the parent's once, so when
+// parent.Signal runs it does nothing. cancel is the final as well, so no
+// ordering can ever fall through to the os.Exit default.
+func interruptParent(goos string, cancel context.CancelFunc) *interrupt.Handler {
+	if goos != "windows" {
+		return nil
+	}
+	return interrupt.New(func(os.Signal) { cancel() }, cancel)
 }
 
 // newFallbackExecutor builds a WebSocket-primary, SPDY-secondary executor,

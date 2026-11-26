@@ -1,9 +1,14 @@
 package execshell
 
 import (
+	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"k8s.io/kubectl/pkg/util/interrupt"
 	"k8s.io/kubectl/pkg/util/term"
 )
 
@@ -69,5 +74,51 @@ func TestSizeBridgeNilInner(t *testing.T) {
 func TestSizeBridgeStoppedInner(t *testing.T) {
 	if got := (sizeBridge{nilQueue{}}).Next(); got != nil {
 		t.Fatalf("got %+v, want nil when inner queue is stopped", got)
+	}
+}
+
+// TestInterruptParentKeepsUnixExitOnSignal pins that nothing changes off
+// Windows: with no Parent, a hangup or kill during a shell still restores the
+// terminal and exits, as it always has.
+func TestInterruptParentKeepsUnixExitOnSignal(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+		if h := interruptParent(goos, func() {}); h != nil {
+			t.Fatalf("%s: got a Parent, which would change what a signal does there", goos)
+		}
+	}
+}
+
+// TestInterruptParentEndsTheSessionOnWindows drives the handler tty.Safe builds
+// (kubectl util/term: Chain(Parent, restore).Run(fn)) through a Ctrl+Break. The
+// session must end with the terminal restored and the process alive; a wrong
+// Parent either never cancels the stream, so this times out, or reaches the
+// os.Exit(1) default, which kills the test binary and fails the run.
+func TestInterruptParentEndsTheSessionOnWindows(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	restored := false
+	h := interrupt.Chain(interruptParent("windows", cancel), func() { restored = true })
+	err := h.Run(func() error {
+		go h.Signal(os.Interrupt)
+		select { // the stream, until its context is cancelled
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			return errors.New("the signal never cancelled the stream")
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want the stream's context.Canceled", err)
+	}
+	if !restored {
+		t.Fatal("the terminal was not restored")
+	}
+
+	// Whatever order a future kubectl calls them in, the Parent alone must not
+	// exit either.
+	var cancelled bool
+	interruptParent("windows", func() { cancelled = true }).Signal(os.Interrupt)
+	if !cancelled {
+		t.Fatal("Parent.Signal did not cancel the stream")
 	}
 }
