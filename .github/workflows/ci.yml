@@ -20,7 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # windows-latest's image has MinGW gcc on PATH, so cgo (and with it -race)
+        # works there without extra setup.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -30,8 +32,10 @@ jobs:
           cache: true
       - name: Vet
         run: go vet ./...
+      # Same timeout as `make race`: race-instrumented tests run slowest on the
+      # Windows runner.
       - name: Test (race)
-        run: go test -race -timeout 120s ./...
+        run: go test -race -timeout 180s ./...
       - name: Build
         run: go build ./...
 
@@ -58,7 +62,22 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
+      # A snapshot release runs the whole pipeline (every archive, checksums, the
+      # Homebrew formula) into dist/ but publishes nothing, so it needs no tokens:
+      # the tap token is only read at publish time. `build` alone would stop
+      # before the archives and never exercise the Windows zip override.
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
-          args: build --snapshot --clean
+          args: release --snapshot --clean
+      # goreleaser would still succeed if the zip override stopped matching (the
+      # Windows archives would just come out as tarballs), so check the outputs.
+      - name: Check release archives
+        run: |
+          for arch in amd64 arm64; do
+            zip=$(ls dist/kubetui_*_windows_${arch}.zip)
+            unzip -l "$zip" | grep -q ' kubetui.exe$'
+          done
+          ls dist/kubetui_*_linux_*.tar.gz dist/kubetui_*_darwin_*.tar.gz
+          test -s dist/checksums.txt
+          test -s dist/homebrew/Formula/kubetui.rb
