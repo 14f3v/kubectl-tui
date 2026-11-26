@@ -76,7 +76,8 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:$PATH"
 cd "$(git rev-parse --show-toplevel)"
 # TRAILER must match the current session's required trailers verbatim:
-TRAILER=$'\nCo-Authored-By: <model> <noreply@anthropic.com>\nClaude-Session: <session-url>'
+# (The leading blank line makes git and GitHub parse them as trailers.)
+TRAILER=$'\n\nCo-Authored-By: <model> <noreply@anthropic.com>\nClaude-Session: <session-url>'
 commit() { git add $1; printf '%s%s\n' "$2" "$TRAILER" | git commit -q -F -; git log --oneline -1; }
 
 commit "path/to/a.go path/to/a_test.go" \
@@ -132,7 +133,9 @@ go build ./... && go test ./... 2>&1 | grep -E "FAIL" || echo GREEN
 
 Releases are tag-driven. `.github/workflows/release.yml` runs
 `goreleaser release --clean` on any `v*` tag and publishes a GitHub Release with
-binaries (linux/darwin × amd64/arm64), archives, checksums, and a changelog.
+binaries (linux/darwin/windows × amd64/arm64; tar.gz, zip for Windows),
+checksums, and a changelog. CI's snapshot job builds the same archives on every
+PR, so a broken archive config fails before a tag does.
 `.goreleaser.yaml` marks pre-release tags (e.g. `v1.0.0-rc1`) as prereleases.
 
 Cut a release from a green `main`:
@@ -147,9 +150,10 @@ Watch it: `gh run watch $(gh run list --workflow release.yml -L1 --json database
 then `gh release view v0.1.0`.
 
 Setup note: the release job needs **Settings → Actions → General → Workflow
-permissions → Read and write**, or the release upload 403s. A Homebrew tap (the
-commented `brews:` block in `.goreleaser.yaml`) additionally needs a PAT with
-write access to a `homebrew-tap` repo, wired in as a secret.
+permissions → Read and write**, or the release upload 403s. The Homebrew tap
+(the `brews:` block in `.goreleaser.yaml`) needs `HOMEBREW_TAP_TOKEN`, a PAT with
+write access to `14f3v/homebrew-tap`. The commented `scoops:` block lists what a
+Scoop bucket for Windows would need before it is switched on.
 
 ## Gotchas learned here
 
