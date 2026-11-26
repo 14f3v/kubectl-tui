@@ -149,14 +149,17 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 
 // CopyFromPod downloads srcRemote from the container into dstLocal. It runs
 // `tar -cf - -C <dir(srcRemote)> <base(srcRemote)>` in the pod, reads the tar off
-// stdout, and extracts it under dstLocal. When dstLocal is an existing directory
-// the entries are written beneath it using their in-archive names; otherwise a
-// single-file archive is written directly to dstLocal. An empty container targets
-// the pod's first container. It blocks until the transfer completes.
+// stdout, and extracts it according to dstLocal: into an existing directory the
+// copy lands beneath it under its own name; a file is written to dstLocal itself;
+// and a directory copied to a path that does not exist yet becomes that path (see
+// extractTar). An empty container targets the pod's first container. It blocks
+// until the transfer completes.
 func CopyFromPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, ns, pod, container, srcRemote, dstLocal string) error {
 	srcDir := toSlashDir(srcRemote)
 	srcBase := path.Base(filepath.ToSlash(strings.TrimRight(srcRemote, "/")))
-	if srcBase == "" || srcBase == "." || srcBase == "/" {
+	// ".." would make tar emit names that climb out of srcDir, which no archive
+	// entry can be matched against; it names no file to copy any more than "." does.
+	if srcBase == "" || srcBase == "." || srcBase == ".." || srcBase == "/" {
 		return fmt.Errorf("remote source %q has no file name to copy", srcRemote)
 	}
 
@@ -170,7 +173,7 @@ func CopyFromPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface,
 		return wrapTarErr("download", err, stderr.String())
 	}
 
-	return extractTar(&stdout, dstLocal)
+	return extractTar(&stdout, dstLocal, srcBase)
 }
 
 // writeTarFile writes a single regular-file entry (name, mode, data) into tw. It
@@ -219,18 +222,33 @@ func writeTarDir(tw *tar.Writer, root, prefix string) error {
 	})
 }
 
-// extractTar reads a tar stream and writes its regular-file entries to disk. If
-// dst is an existing directory the entries are placed beneath it by their archive
-// names; otherwise the (single) entry is written to dst directly. Entry names are
-// sanitized so a malicious archive cannot escape the destination via ".." or an
-// absolute path (the classic tar-slip guard).
-func extractTar(r io.Reader, dst string) error {
-	dstIsDir := false
-	if fi, err := os.Stat(dst); err == nil && fi.IsDir() {
-		dstIsDir = true
-	}
+// extractTar reads the archive that `tar -cf - -C <dir> <srcBase>` produced in the
+// pod and writes its regular-file entries to disk. Whether the copy is a single
+// file or a tree is decided from the archive, not from dst: srcBase is a tree when
+// it arrives as a directory entry or has entries beneath it. Where it lands then
+// depends on dst:
+//
+//   - dst is an existing directory: entries are placed beneath it by their archive
+//     names, so the copy lands at dst/<srcBase>.
+//   - dst does not exist: a file is written to dst itself, and a tree becomes dst,
+//     with the leading srcBase stripped from every name, as kubectl cp does.
+//   - dst is an existing file: a file overwrites it; a tree is refused before
+//     anything is written, so the file is never truncated.
+//
+// dst alone cannot decide it: a tree copied to a path that does not exist yet
+// looks like a single file, and every entry would be written to dst itself, each
+// truncating the last, leaving one file behind a success toast.
+//
+// Entry names are sanitized so a malicious archive cannot escape the destination
+// via ".." or an absolute path (the classic tar-slip guard), and an entry that is
+// not srcBase or beneath it is rejected as a corrupted archive, as kubectl does.
+func extractTar(r io.Reader, dst, srcBase string) error {
+	fi, statErr := os.Stat(dst)
+	dstIsDir := statErr == nil && fi.IsDir()
+	dstIsFile := statErr == nil && !fi.IsDir()
 
 	tr := tar.NewReader(r)
+	shape := shapeUnknown
 	wrote := false
 	for {
 		hdr, err := tr.Next()
@@ -240,15 +258,41 @@ func extractTar(r io.Reader, dst string) error {
 		if err != nil {
 			return fmt.Errorf("read tar: %w", err)
 		}
-		// Skip directory markers; parent dirs are created for each file as needed.
-		if hdr.Typeflag == tar.TypeDir {
-			continue
-		}
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA { //nolint:staticcheck // TypeRegA kept for pre-POSIX archives
+		isDir := hdr.Typeflag == tar.TypeDir
+		if !isDir && hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA { //nolint:staticcheck // TypeRegA kept for pre-POSIX archives
 			continue
 		}
 
-		target, err := resolveExtractTarget(dst, dstIsDir, hdr.Name)
+		rel, err := archiveRel(hdr.Name, srcBase)
+		if err != nil {
+			return err
+		}
+		entryShape := shapeFile
+		if isDir || rel != "" {
+			entryShape = shapeTree
+		}
+		switch {
+		case shape == shapeUnknown:
+			shape = entryShape
+		case shape != entryShape:
+			return fmt.Errorf("archive from pod has both a file and a directory named %q", srcBase)
+		}
+		if shape == shapeTree && dstIsFile {
+			return fmt.Errorf("destination %q is a file but %q is a directory; choose a directory or a new path", dst, srcBase)
+		}
+		// Directory markers only classify the archive; the parent dirs of each file
+		// (dst itself included, for a tree copied to a new path) are created as needed.
+		if isDir {
+			continue
+		}
+
+		target := dst
+		switch {
+		case dstIsDir:
+			target, err = resolveExtractTarget(dst, path.Join(srcBase, rel))
+		case shape == shapeTree:
+			target, err = resolveExtractTarget(dst, rel)
+		}
 		if err != nil {
 			return err
 		}
@@ -266,26 +310,44 @@ func extractTar(r io.Reader, dst string) error {
 	return nil
 }
 
-// resolveExtractTarget maps a tar entry name to a safe on-disk path under dst and
-// rejects any name that would escape dst (absolute paths or ".." traversal).
-func resolveExtractTarget(dst string, dstIsDir bool, name string) (string, error) {
+// archiveShape is what a download turned out to be, learned from its first entry.
+type archiveShape int
+
+const (
+	shapeUnknown archiveShape = iota
+	shapeFile                 // srcBase is a single regular file
+	shapeTree                 // srcBase is a directory
+)
+
+// archiveRel cleans a tar entry name and returns it relative to the archive root
+// srcBase: "" for srcBase itself, "a/b" for "srcBase/a/b". Cleaning forces the
+// name absolute before stripping the leading slash, so ".." can never climb above
+// the root; a name that is then neither srcBase nor beneath it is an error.
+func archiveRel(name, srcBase string) (string, error) {
 	clean := path.Clean("/" + filepath.ToSlash(name)) // force-absolute, then strip the leading slash
 	clean = strings.TrimPrefix(clean, "/")
 	if clean == "" {
 		return "", fmt.Errorf("tar entry has empty name")
 	}
-
-	if !dstIsDir {
-		// Single-file destination: ignore the archive's internal path and write to dst.
-		return dst, nil
+	if clean == srcBase {
+		return "", nil
 	}
+	if rest, ok := strings.CutPrefix(clean, srcBase+"/"); ok {
+		return rest, nil
+	}
+	return "", fmt.Errorf("tar entry %q is not under %q; the archive from the pod looks corrupted", name, srcBase)
+}
 
-	target := filepath.Join(dst, filepath.FromSlash(clean))
-	// Defense in depth: Join+Clean already collapse "..", but verify the result is
-	// still contained in dst before touching the filesystem.
-	rel, err := filepath.Rel(dst, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("tar entry %q escapes destination directory", name)
+// resolveExtractTarget maps a slash-separated, archive-relative path to a path
+// under dst and rejects any that would escape dst (absolute paths or ".."
+// traversal).
+func resolveExtractTarget(dst, rel string) (string, error) {
+	target := filepath.Join(dst, filepath.FromSlash(rel))
+	// Defense in depth: archiveRel and Join+Clean already collapse "..", but verify
+	// the result is still contained in dst before touching the filesystem.
+	r, err := filepath.Rel(dst, target)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("tar entry %q escapes destination directory", rel)
 	}
 	return target, nil
 }

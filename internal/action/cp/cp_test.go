@@ -4,8 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"io"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -115,7 +118,7 @@ func TestExtractTarToDir(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := extractTar(&buf, dir); err != nil {
+	if err := extractTar(&buf, dir, "bundle"); err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
 
@@ -137,7 +140,7 @@ func TestExtractTarToFile(t *testing.T) {
 	}
 
 	dst := filepath.Join(t.TempDir(), "downloaded.sql")
-	if err := extractTar(&buf, dst); err != nil {
+	if err := extractTar(&buf, dst, "dump.sql"); err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
 	assertFile(t, dst, "SELECT 1;")
@@ -146,7 +149,8 @@ func TestExtractTarToFile(t *testing.T) {
 // TestExtractTarNeutralizesTraversal confirms the tar-slip guard: an entry that
 // tries to escape the destination via a leading ".." is neutralized (clamped
 // inside the destination) rather than being written to a parent directory. The
-// file must appear beneath dst, and never above it.
+// file must appear beneath dst, and never above it. Clamped, the name is the
+// requested source itself, so it is accepted as a single-file download.
 func TestExtractTarNeutralizesTraversal(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -168,7 +172,7 @@ func TestExtractTarNeutralizesTraversal(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := extractTar(&buf, dir); err != nil {
+	if err := extractTar(&buf, dir, "escape.txt"); err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
 	// The traversal is clamped: the file lands inside dst as escape.txt, never in
@@ -179,16 +183,17 @@ func TestExtractTarNeutralizesTraversal(t *testing.T) {
 	assertFile(t, filepath.Join(dir, "escape.txt"), "pwned")
 }
 
-// TestResolveExtractTargetRejectsEscape exercises the containment check directly
-// with a name that survives cleaning yet still resolves outside dst, ensuring the
-// filepath.Rel guard rejects it.
+// TestResolveExtractTargetRejectsEscape exercises the containment check directly.
+// archiveRel cleans every name before it gets here, so ".." never arrives from an
+// archive; handing one in uncleaned proves the filepath.Rel guard behind it fires.
 func TestResolveExtractTargetRejectsEscape(t *testing.T) {
-	// "a/../../evil" cleans (with the forced leading slash) to "/evil" -> "evil",
-	// which is safe; so instead prove the Rel guard fires when a caller passes an
-	// already-parent-relative destination directly. We simulate that by checking a
-	// name that Clean cannot fully absorb is contained.
-	if _, err := resolveExtractTarget("/base", true, "sub/ok.txt"); err != nil {
+	if _, err := resolveExtractTarget("/base", "sub/ok.txt"); err != nil {
 		t.Errorf("in-dir name unexpectedly rejected: %v", err)
+	}
+	for _, rel := range []string{"../evil", "sub/../../evil"} {
+		if got, err := resolveExtractTarget("/base", rel); err == nil {
+			t.Errorf("resolveExtractTarget(%q) = %q, want an escape error", rel, got)
+		}
 	}
 }
 
@@ -200,7 +205,7 @@ func TestExtractTarEmpty(t *testing.T) {
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractTar(&buf, t.TempDir()); err == nil {
+	if err := extractTar(&buf, t.TempDir(), "x"); err == nil {
 		t.Errorf("expected error for empty archive, got nil")
 	}
 }
@@ -225,11 +230,159 @@ func TestWriteTarDirRoundTrip(t *testing.T) {
 	}
 
 	out := t.TempDir()
-	if err := extractTar(&buf, out); err != nil {
+	if err := extractTar(&buf, out, "payload"); err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
 	assertFile(t, filepath.Join(out, "payload", "top.txt"), "top")
 	assertFile(t, filepath.Join(out, "payload", "nested", "inner.txt"), "inner")
+}
+
+// TestExtractTarLayouts pins where a download lands for every combination of a
+// file or a directory in the pod and a destination that is missing, an existing
+// directory, or an existing file. want maps slash paths relative to dst (with "."
+// for dst itself) to contents, and must match the files on disk exactly.
+func TestExtractTarLayouts(t *testing.T) {
+	file := []tarEntry{{name: "dump.sql", body: "SELECT 1;"}}
+	tree := []tarEntry{
+		{name: "nginx/"},
+		{name: "nginx/nginx.conf", body: "CONF"},
+		{name: "nginx/conf.d/"},
+		{name: "nginx/conf.d/default.conf", body: "DEFAULT"},
+		{name: "nginx/mime.types", body: "MIME"},
+	}
+	// A directory holding one file is still a directory, not a file download.
+	oneFileTree := []tarEntry{{name: "certs/"}, {name: "certs/tls.crt", body: "CRT"}}
+
+	cases := []struct {
+		name    string
+		entries []tarEntry
+		srcBase string
+		dst     string // "missing", "dir" or "file" (a file holding "KEEP")
+		want    map[string]string
+		wantErr bool
+	}{
+		{name: "file to new path", entries: file, srcBase: "dump.sql", dst: "missing",
+			want: map[string]string{".": "SELECT 1;"}},
+		{name: "file into existing dir", entries: file, srcBase: "dump.sql", dst: "dir",
+			want: map[string]string{"dump.sql": "SELECT 1;"}},
+		{name: "file over existing file", entries: file, srcBase: "dump.sql", dst: "file",
+			want: map[string]string{".": "SELECT 1;"}},
+		{name: "dir to new path", entries: tree, srcBase: "nginx", dst: "missing",
+			want: map[string]string{"nginx.conf": "CONF", "conf.d/default.conf": "DEFAULT", "mime.types": "MIME"}},
+		{name: "one-file dir to new path", entries: oneFileTree, srcBase: "certs", dst: "missing",
+			want: map[string]string{"tls.crt": "CRT"}},
+		{name: "dir into existing dir", entries: tree, srcBase: "nginx", dst: "dir",
+			want: map[string]string{"nginx/nginx.conf": "CONF", "nginx/conf.d/default.conf": "DEFAULT", "nginx/mime.types": "MIME"}},
+		{name: "dir over existing file", entries: tree, srcBase: "nginx", dst: "file",
+			want: map[string]string{".": "KEEP"}, wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "out")
+			switch c.dst {
+			case "dir":
+				if err := os.Mkdir(dst, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				mustWrite(t, dst, "KEEP")
+			}
+
+			err := extractTar(buildTar(t, c.entries...), dst, c.srcBase)
+			if c.wantErr != (err != nil) {
+				t.Fatalf("extractTar err = %v, wantErr %v", err, c.wantErr)
+			}
+			if got := collectFiles(t, dst); !maps.Equal(got, c.want) {
+				t.Errorf("files under dst = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestExtractTarRejectsForeignEntries confirms an archive holding anything other
+// than the requested source is refused rather than extracted, including a ".."
+// name that cleaning clamps to something outside the source, and that none of it
+// reaches the disk around dst.
+func TestExtractTarRejectsForeignEntries(t *testing.T) {
+	cases := map[string][]tarEntry{
+		"sibling":          {{name: "nginx/a", body: "A"}, {name: "other/b", body: "B"}},
+		"climbs out":       {{name: "nginx/../../evil.txt", body: "pwned"}},
+		"climbs out later": {{name: "nginx/a", body: "A"}, {name: "nginx/sub/../../../evil.txt", body: "pwned"}},
+		"file then tree":   {{name: "nginx", body: "F"}, {name: "nginx/a", body: "A"}},
+	}
+	for name, entries := range cases {
+		t.Run(name, func(t *testing.T) {
+			parent := t.TempDir()
+			dst := filepath.Join(parent, "out")
+			if err := extractTar(buildTar(t, entries...), dst, "nginx"); err == nil {
+				t.Fatal("extractTar succeeded, want an error")
+			}
+			if _, err := os.Stat(filepath.Join(parent, "evil.txt")); !os.IsNotExist(err) {
+				t.Error("a traversal entry was written outside the destination")
+			}
+		})
+	}
+}
+
+// tarEntry is one member of an in-memory test archive. A name ending in "/" is a
+// directory marker, as GNU tar writes them; mode defaults to 0o644.
+type tarEntry struct {
+	name string
+	body string
+	mode int64
+}
+
+// buildTar writes entries verbatim, without writeTarFile's path.Join, so tests can
+// craft names a real tar would never produce.
+func buildTar(t *testing.T, entries ...tarEntry) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range entries {
+		hdr := &tar.Header{Name: e.name, Mode: e.mode, Typeflag: tar.TypeReg, Size: int64(len(e.body))}
+		if hdr.Mode == 0 {
+			hdr.Mode = 0o644
+		}
+		if strings.HasSuffix(e.name, "/") {
+			hdr.Typeflag, hdr.Mode, hdr.Size = tar.TypeDir, 0o755, 0
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(e.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buf
+}
+
+// collectFiles returns every regular file under root as slash paths relative to
+// root ("." when root is itself a file) mapped to their contents.
+func collectFiles(t *testing.T, root string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		got[filepath.ToSlash(rel)] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %q: %v", root, err)
+	}
+	return got
 }
 
 func TestToSlashDir(t *testing.T) {
