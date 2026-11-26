@@ -68,10 +68,17 @@ type Model struct {
 	clusterMem float64
 
 	sess    *k8s.Session
-	ref     k8s.ClusterRef // the cluster the Session connects to (or is connecting to)
+	ref     k8s.ClusterRef // the cluster the Session connects to; at launch, the one being connected to
 	pages   []view.Page    // stack; top is active
 	fatal   error          // unrecoverable bootstrap error
 	booting bool
+
+	// A switch builds the new Session while the current one keeps running, and
+	// swaps it in only once it is ready. Each bootstrap carries a token; a result
+	// whose token is not the one in flight is stale and its Session is disposed.
+	bootToken  int                // increments per bootstrap
+	bootCancel context.CancelFunc // cancels the in-flight version probe
+	connecting *k8s.ClusterRef    // non-nil while a bootstrap is in flight
 
 	width, height int
 
@@ -132,26 +139,53 @@ func New(cfg Config) *Model {
 
 // Init requests the session bootstrap.
 func (m *Model) Init() tea.Cmd {
-	return bootstrapCmd(m.sink, m.ref, m.sessionOptions())
+	return m.connect(m.ref)
 }
 
 // sessionOptions are the Session settings that come from the config rather than
 // from the cluster being connected to.
 func (m *Model) sessionOptions() k8s.Options {
-	return k8s.Options{ReadOnly: m.cfg.Config.ReadOnly}
+	return k8s.Options{ReadOnly: m.cfg.Config.ReadOnly, Sink: m.sink}
+}
+
+// connect starts a bootstrap for ref, cancelling any already in flight. The
+// current Session, if there is one, keeps running until the result arrives.
+func (m *Model) connect(ref k8s.ClusterRef) tea.Cmd {
+	m.cancelConnect()
+	m.bootToken++
+	ctx, cancel := context.WithCancel(context.Background())
+	m.bootCancel, m.connecting = cancel, &ref
+	return bootstrapCmd(ctx, m.bootToken, ref, m.sessionOptions())
+}
+
+// cancelConnect cancels the bootstrap in flight, if any, and clears connecting.
+// Its result, still on its way, is then stale (see isCurrent) and is disposed on
+// arrival.
+func (m *Model) cancelConnect() {
+	if m.bootCancel != nil {
+		m.bootCancel()
+	}
+	m.bootCancel, m.connecting = nil, nil
+}
+
+// isCurrent reports whether a bootstrap result belongs to the bootstrap in
+// flight, rather than to one a later pick or a cancel replaced.
+func (m *Model) isCurrent(token int) bool {
+	return m.connecting != nil && token == m.bootToken
 }
 
 // bootstrapCmd builds a Session for ref off the UI goroutine and reports the
-// result. The Session's snapshots go to sink, whatever opts.Sink holds.
-func bootstrapCmd(sink engine.Sink, ref k8s.ClusterRef, opts k8s.Options) tea.Cmd {
-	opts.Sink = sink
+// result tagged with token. The Session's lifetime is its own (its parent is
+// Background, so it outlives this command); ctx bounds only the version probe,
+// which is the one slow step, so a newer pick can cut it short.
+func bootstrapCmd(ctx context.Context, token int, ref k8s.ClusterRef, opts k8s.Options) tea.Cmd {
 	return func() tea.Msg {
 		sess, err := k8s.NewSession(context.Background(), ref, opts)
 		if err != nil {
-			return msg.SessionError{Err: err}
+			return msg.SessionError{Err: err, Token: token, Ref: ref}
 		}
-		_ = sess.RefreshServerVersion(sess.Context()) // best-effort; empty version is fine
-		return msg.SessionReady{Session: sess}
+		_ = sess.RefreshServerVersion(ctx) // best-effort; empty version is fine
+		return msg.SessionReady{Session: sess, Token: token}
 	}
 }
 
@@ -177,12 +211,24 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		return m.handlePaste(t)
 
 	case msg.SessionReady:
+		if !m.isCurrent(t.Token) {
+			// A later pick or a cancel replaced this bootstrap; nothing else holds
+			// its Session, so dispose it rather than leak it.
+			if sess, ok := t.Session.(*k8s.Session); ok {
+				sess.Dispose()
+			}
+			return m, nil
+		}
 		return m.onSessionReady(t)
 
 	case msg.SessionError:
-		m.booting = false
-		m.fatal = t.Err
-		return m, nil
+		if !m.isCurrent(t.Token) {
+			return m, nil
+		}
+		return m.onSessionError(t)
+
+	case switchConfirmed:
+		return m, m.connect(t.ref)
 
 	case msg.Toast:
 		return m.showToast(t)
@@ -323,18 +369,50 @@ func (m *Model) routeToPage(message tea.Msg) tea.Cmd {
 	return cmd
 }
 
+// onSessionReady swaps in the Session the current bootstrap built. The previous
+// one, kept running through the connect, is disposed now, which closes its
+// port-forwards; its pages and dialogs go with it, and late snapshots from its
+// engine carry view ids no new page holds, so they change nothing.
 func (m *Model) onSessionReady(t msg.SessionReady) (tea.Model, tea.Cmd) {
+	m.cancelConnect() // the probe is done; this releases its context
 	sess, ok := t.Session.(*k8s.Session)
 	if !ok {
 		m.fatal = fmt.Errorf("internal: session type mismatch")
 		m.booting = false
 		return m, nil
 	}
-	m.sess = sess
+	for _, p := range m.pages {
+		p.OnLeave()
+	}
+	m.pages = nil
+	m.confirm, m.prompt = nil, nil // they would act on the disposed Session
+	if m.sess != nil {
+		m.sess.Dispose()
+	}
+	m.metricsOK, m.clusterCPU, m.clusterMem = false, 0, 0
+	m.sess, m.ref = sess, sess.Ref
 	m.booting = false
 	m.poller = metrics.NewPoller(sess.CS, sess.Metrics, sess.Disco, m.sink)
 	go m.poller.Run(sess.Context())
 	return m.navigate(m.cfg.StartKind, sess.Identity.Namespace)
+}
+
+// onSessionError reports a failed bootstrap. A switch that fails leaves the
+// current Session as it was and says why; with no Session to stay on (the launch
+// connect), the error is fatal.
+func (m *Model) onSessionError(t msg.SessionError) (tea.Model, tea.Cmd) {
+	m.cancelConnect()
+	if m.sess == nil {
+		m.booting = false
+		m.fatal = t.Err
+		return m, nil
+	}
+	ref, _ := t.Ref.(k8s.ClusterRef)
+	name := ref.Context
+	if name == "" {
+		name = string(ref.Source) // an in-cluster ref names no context
+	}
+	return m.showToast(msg.Toast{Text: "connect " + name + ": " + t.Err.Error(), Level: msg.LevelError})
 }
 
 // navigate replaces the page stack with a fresh page for kind, scoped to
@@ -367,22 +445,26 @@ func (m *Model) navigate(kind, namespace string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(page.Init(), page.OnEnter())
 }
 
-// switchContext disposes the current Session and bootstraps one for ref. All
-// informers, log streams, and forwards die with the old Session's context.
+// switchConfirmed is the yes to a switch that closes port-forwards; it starts the
+// connect the confirm held back.
+type switchConfirmed struct{ ref k8s.ClusterRef }
+
+// switchContext starts a bootstrap for ref; it does not dispose the current
+// Session, which stays up until the new one is ready (onSessionReady). The
+// switch will close every open port-forward, so with any open it asks first.
 func (m *Model) switchContext(ref k8s.ClusterRef) (tea.Model, tea.Cmd) {
-	for _, p := range m.pages {
-		p.OnLeave()
+	if m.sess != nil && m.sess.Forwards != nil {
+		if n := m.sess.Forwards.Count(); n > 0 {
+			return m, func() tea.Msg {
+				return view.ConfirmRequest{
+					Title:  "switch cluster",
+					Prompt: fmt.Sprintf("Switching closes %d port-forwards.", n),
+					Action: func() tea.Msg { return switchConfirmed{ref: ref} },
+				}
+			}
+		}
 	}
-	m.pages = nil
-	if m.sess != nil {
-		m.sess.Dispose()
-		m.sess = nil
-	}
-	m.booting = true
-	m.mode = modeNone
-	m.inputBuf = ""
-	m.ref = ref
-	return m, bootstrapCmd(m.sink, ref, m.sessionOptions())
+	return m, m.connect(ref)
 }
 
 // jumpNamespace switches the active page to a namespace: "0" is all namespaces,
@@ -471,22 +553,23 @@ func (m *Model) retryActive() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(p.OnEnter(), toastCmd("retrying "+p.Title(), msg.LevelInfo))
 }
 
-// reconnect disposes the Session and builds a fresh one for the same ClusterRef,
-// which re-runs the exec credential plugin. The ref pins the context by name, so
-// a `kubectl config use-context` run elsewhere since the connect cannot move the
-// user to another cluster.
+// reconnect builds a fresh Session for the same ClusterRef, which re-runs the exec
+// credential plugin, and swaps it in once it connects. The ref pins the context
+// by name, so a `kubectl config use-context` run elsewhere since the connect
+// cannot move the user to another cluster.
 func (m *Model) reconnect() (tea.Model, tea.Cmd) {
 	if m.sess == nil {
 		return m, nil
 	}
-	// Reconnecting tears down every port-forward with it, so say so first.
+	// Reconnecting tears down every port-forward with it, so say so first, in
+	// its own words; a yes connects without switchContext asking again.
 	if n := m.sess.Forwards.Count(); n > 0 {
 		ref := m.ref // the confirm's action runs as a Cmd, off the UI goroutine
 		return m, func() tea.Msg {
 			return view.ConfirmRequest{
 				Title:  "reconnect",
 				Prompt: fmt.Sprintf("re-authenticate and rebuild the session? this closes %d active port-forward(s)", n),
-				Action: func() tea.Msg { return view.SwitchContextRequest{Ref: ref} },
+				Action: func() tea.Msg { return switchConfirmed{ref: ref} },
 			}
 		}
 	}

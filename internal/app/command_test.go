@@ -51,13 +51,18 @@ func TestParseCommand(t *testing.T) {
 // ":ctx <name>" names another context in the active cluster's kubeconfig, so a
 // switch from a --kubeconfig file stays in that file.
 func TestCtxCommandKeepsTheActiveKubeconfig(t *testing.T) {
-	m := &Model{theme: style.Default(), ref: k8s.ClusterRef{Source: k8s.SourceFile, Path: "/k/config", Context: "a"}}
+	refA := k8s.ClusterRef{Source: k8s.SourceFile, Path: "/k/config", Context: "a"}
+	m := &Model{theme: style.Default(), ref: refA}
 	if _, cmd := m.runCommand("ctx b"); cmd == nil {
 		t.Fatal("ctx b returned no bootstrap command")
 	}
 	want := k8s.ClusterRef{Source: k8s.SourceFile, Path: "/k/config", Context: "b"}
-	if m.ref != want {
-		t.Errorf("ref = %+v, want %+v", m.ref, want)
+	if m.connecting == nil || *m.connecting != want {
+		t.Errorf("connecting = %v, want %+v", m.connecting, want)
+	}
+	// ref moves only once b has connected.
+	if m.ref != refA {
+		t.Errorf("ref = %+v while connecting, want %+v", m.ref, refA)
 	}
 }
 
