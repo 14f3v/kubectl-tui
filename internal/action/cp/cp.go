@@ -509,14 +509,16 @@ func extractMode(hdrMode int64, goos string) os.FileMode {
 	return mode
 }
 
-// clearReadOnly makes an existing regular file at target owner-writable again so
-// a download can replace one that an earlier download left read-only. On Windows
+// clearReadOnly makes an existing file at target owner-writable again so a
+// download can replace one that an earlier download left read-only. On Windows
 // os.Chmod only toggles FILE_ATTRIBUTE_READONLY (syscall.Chmod), which is exactly
-// what blocks the overwrite. A failure is left for the open that follows to
-// report.
+// what blocks the overwrite. A file counts whether it is regular or, like the
+// files OneDrive syncs, a placeholder Go reports as ModeIrregular (see
+// uploadable); links, devices and directories are left alone. A failure is left
+// for the open that follows to report.
 func clearReadOnly(target string) {
 	fi, err := os.Lstat(target)
-	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o200 != 0 {
+	if err != nil || !uploadable(fi.Mode()) || fi.Mode().Perm()&0o200 != 0 {
 		return
 	}
 	_ = os.Chmod(target, fi.Mode().Perm()|0o200)
