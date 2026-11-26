@@ -315,3 +315,93 @@ func TestReconnectWithForwardsAsksOnce(t *testing.T) {
 		t.Error("the reconnect did not replace the session")
 	}
 }
+
+// pickWithForwards asks to switch to ref with a forward open: the answer is
+// the confirm, which it puts up.
+func pickWithForwards(t *testing.T, m *Model, ref k8s.ClusterRef) {
+	t.Helper()
+	_, cmd := m.Update(view.SwitchContextRequest{Ref: ref})
+	if _, ok := cmd().(view.ConfirmRequest); !ok {
+		t.Fatal("a switch with a forward open did not ask first")
+	}
+	m.Update(cmd())
+}
+
+// With forwards open, a second pick asks again; it must cancel the connect the
+// first one started, or that connect lands, closes the new question and leaves
+// the user on the cluster they had moved away from.
+func TestSecondPickWithForwardsCancelsTheFirst(t *testing.T) {
+	for _, answer := range []string{"n", "y"} {
+		t.Run(answer, func(t *testing.T) {
+			m, a, refB, refC := connected(t, fastServer(t))
+			a.Forwards.Start("default", "web", []string{"8080:80"})
+
+			pickWithForwards(t, m, refB)
+			_, yes := m.handleKey(tea.KeyPressMsg{Code: 'y', Text: "y"})
+			_, connectB := m.Update(yes())
+			if m.connecting == nil || *m.connecting != refB {
+				t.Fatalf("connecting = %v, want b", m.connecting)
+			}
+
+			pickWithForwards(t, m, refC)
+			if m.connecting != nil {
+				t.Fatalf("asking about c left the connect to %+v running", *m.connecting)
+			}
+			res := connectB()
+			m.Update(res)
+			if m.sess != a || m.confirm == nil {
+				t.Fatalf("b's connect landed: on %+v, confirm open = %v", m.sess.Ref, m.confirm != nil)
+			}
+			if r, ok := res.(msg.SessionReady); ok && !disposed(r.Session.(*k8s.Session)) {
+				t.Error("b's cancelled Session was not disposed")
+			}
+
+			_, cmd := m.handleKey(tea.KeyPressMsg{Code: rune(answer[0]), Text: answer})
+			if answer == "n" {
+				if cmd != nil || m.connecting != nil || m.sess != a {
+					t.Errorf("no: connecting = %v, want to stay on a", m.connecting)
+				}
+				return
+			}
+			connectC := deliver(t, m, cmd)
+			deliver(t, m, connectC)
+			if m.sess == nil || m.sess.Ref != refC {
+				t.Errorf("yes: on %+v, want c", m.sess.Ref)
+			}
+		})
+	}
+}
+
+// Picking the connected cluster while a switch is in flight is choosing to
+// stay: the switch is cancelled, as esc on the picker cancels it.
+func TestPickingConnectedRowCancelsSwitch(t *testing.T) {
+	m, a, refB, _ := connected(t, fastServer(t))
+	m.store = savedStore(t, "")
+	remember(t, m.store, a.Ref)
+	_, load := m.runCommand("ctx")
+	m.Update(loadedRows(t, load))
+	_, connectB := m.Update(view.SwitchContextRequest{Ref: refB}) // enter on b's row
+
+	_, stay := m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter}) // the cursor is on a, the connected row
+	m.Update(stay())
+	if m.connecting != nil {
+		t.Fatalf("connecting = %+v after picking the connected cluster, want the switch cancelled", *m.connecting)
+	}
+	if m.toast == nil || m.toast.Text != "staying on a" {
+		t.Errorf("toast = %+v, want %q", m.toast, "staying on a")
+	}
+	res := connectB()
+	m.Update(res)
+	if m.sess != a {
+		t.Errorf("b's connect landed after the user chose to stay: on %+v", m.sess.Ref)
+	}
+	if r, ok := res.(msg.SessionReady); ok && !disposed(r.Session.(*k8s.Session)) {
+		t.Error("b's cancelled Session was not disposed")
+	}
+
+	// With nothing in flight it only says so.
+	m.Update(stay())
+	if m.toast == nil || m.toast.Text != "already on a" {
+		t.Errorf("toast = %+v, want %q", m.toast, "already on a")
+	}
+}

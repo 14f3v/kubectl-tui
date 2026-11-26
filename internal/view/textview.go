@@ -75,6 +75,10 @@ type BannerLine struct {
 	Warn bool
 }
 
+// StayOnCluster is the pick of the connected cluster: the root model says it is
+// already on it, and cancels a switch in flight.
+type StayOnCluster struct{ Label string }
+
 // OpenPasteBox asks the root model to open the paste-a-kubeconfig box.
 type OpenPasteBox struct{}
 

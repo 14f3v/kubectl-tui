@@ -400,6 +400,16 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 	case view.SwitchContextRequest:
 		return m.switchContext(t.Ref)
 
+	case view.StayOnCluster:
+		// Picking the cluster on screen is choosing to stay on it: a switch in
+		// flight is cancelled, as esc on the picker cancels it.
+		text := "already on " + clusters.Sanitize(t.Label)
+		if m.connecting != nil {
+			text = "staying on " + clusters.Sanitize(t.Label)
+		}
+		m.cancelConnect()
+		return m.showToast(msg.Toast{Text: text, Level: msg.LevelInfo})
+
 	case view.ClustersLoaded:
 		return m, m.routeToPage(m.withStoreNote(t))
 
@@ -1036,9 +1046,13 @@ type switchConfirmed struct{ ref k8s.ClusterRef }
 // switchContext starts a bootstrap for ref; it does not dispose the current
 // Session, which stays up until the new one is ready (onSessionReady). The
 // switch will close every open port-forward, so with any open it asks first.
+// A new pick replaces any connect in flight, so asking cancels that one first:
+// left running, it would land, close the question and leave the user on the
+// cluster they had just moved away from, and a no stays on the current one.
 func (m *Model) switchContext(ref k8s.ClusterRef) (tea.Model, tea.Cmd) {
 	if m.sess != nil && m.sess.Forwards != nil {
 		if n := m.sess.Forwards.Count(); n > 0 {
+			m.cancelConnect()
 			return m, func() tea.Msg {
 				return view.ConfirmRequest{
 					Title:  "switch cluster",
@@ -1146,8 +1160,10 @@ func (m *Model) reconnect() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// Reconnecting tears down every port-forward with it, so say so first, in
-	// its own words; a yes connects without switchContext asking again.
+	// its own words; a yes connects without switchContext asking again. As in
+	// switchContext, asking cancels a connect in flight.
 	if n := m.sess.Forwards.Count(); n > 0 {
+		m.cancelConnect()
 		ref := m.ref // the confirm's action runs as a Cmd, off the UI goroutine
 		return m, func() tea.Msg {
 			return view.ConfirmRequest{

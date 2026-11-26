@@ -178,8 +178,10 @@ contexts:
 					t.Fatalf("pick = %#v, want a ReviewCluster for fresh", got)
 				}
 			} else {
-				if _, ok := got.(msg.Toast); !ok {
-					t.Fatalf("pick = %#v, want a toast", got)
+				_, toast := got.(msg.Toast)
+				_, stay := got.(view.StayOnCluster)
+				if !toast && !stay {
+					t.Fatalf("pick = %#v, want a toast or a stay", got)
 				}
 				m.Update(got)
 				if m.toast == nil || m.toast.Text != tc.toast {

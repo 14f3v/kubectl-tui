@@ -98,7 +98,7 @@ func TestPickMsg(t *testing.T) {
 	}{
 		{"switch", plain, &cur.Ref, SwitchContextRequest{Ref: plain.Ref}},
 		{"switch with no session", cur, nil, SwitchContextRequest{Ref: cur.Ref}},
-		{"connected", cur, &cur.Ref, msg.Toast{Text: "already on b", Level: msg.LevelInfo}},
+		{"connected", cur, &cur.Ref, StayOnCluster{Label: "b"}},
 		{"missing", missing, nil, msg.Toast{Text: "gone: file missing", Level: msg.LevelWarn}},
 		{"missing connected", missingCur, &cur.Ref, msg.Toast{Text: "b: file missing", Level: msg.LevelWarn}},
 		{"needs review", fresh, nil, ReviewCluster{Row: fresh}},
@@ -133,13 +133,13 @@ func TestPickerLoadSelectsRow(t *testing.T) {
 	}
 }
 
-func TestPickerEnterOnConnectedRowToasts(t *testing.T) {
+func TestPickerEnterOnConnectedRowStays(t *testing.T) {
 	a := pickRow("a", k8s.SourceKubeconfig)
 	cur := a.Ref
 	p := loadedPicker(t, &cur, a)
 	_, m := press(p, "enter")
-	if tm, ok := m.(msg.Toast); !ok || !strings.Contains(tm.Text, "already on a") {
-		t.Fatalf("enter = %#v, want an already-on toast", m)
+	if got, ok := m.(StayOnCluster); !ok || got.Label != "a" {
+		t.Fatalf("enter = %#v, want StayOnCluster{a}", m)
 	}
 }
 
@@ -330,12 +330,15 @@ func TestPickerSanitizesKubeconfigText(t *testing.T) {
 	cur := cfg.Ref
 	missing := evil
 	missing.Missing = true
-	for _, got := range []tea.Msg{PickMsg(cfg, &cur), PickMsg(missing, nil)} {
-		tm, ok := got.(msg.Toast)
-		if !ok {
-			t.Fatalf("PickMsg = %#v, want a toast", got)
-		}
-		clean("toast", tm.Text)
+	if got, ok := PickMsg(cfg, &cur).(StayOnCluster); !ok {
+		t.Fatalf("PickMsg = %#v, want StayOnCluster", got)
+	} else {
+		clean("stay label", got.Label)
+	}
+	if got, ok := PickMsg(missing, nil).(msg.Toast); !ok {
+		t.Fatalf("PickMsg = %#v, want a toast", got)
+	} else {
+		clean("toast", got.Text)
 	}
 	p.cursor = 1
 	_, m = press(p, "ctrl+d")
