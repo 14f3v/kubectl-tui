@@ -44,6 +44,9 @@ func TestUnchanged(t *testing.T) {
 		{name: "as written", data: object, want: true},
 		{name: "saved with CRLF", data: crlf(object), want: true},
 		{name: "some lines CRLF", data: strings.Replace(object, "\n", "\r\n", 3), want: true},
+		{name: "saved with a BOM", data: "\xef\xbb\xbf" + object, want: true},
+		{name: "saved with a BOM and CRLF", data: "\xef\xbb\xbf" + crlf(object), want: true},
+		{name: "edited and saved with a BOM", data: "\xef\xbb\xbf" + strings.Replace(object, "echo two", "echo three", 1), want: false},
 		{name: "edited", data: strings.Replace(object, "echo two", "echo three", 1), want: false},
 		{name: "edited and saved with CRLF", data: crlf(strings.Replace(object, "name: web", "name: api", 1)), want: false},
 		{name: "final newline dropped", data: strings.TrimSuffix(object, "\n"), want: false},
@@ -145,14 +148,35 @@ func TestQuickExitHint(t *testing.T) {
 		{elapsed: 30 * time.Second, hint: false}, // a real look, no edit
 	}
 	for _, c := range cases {
-		got := QuickExitHint(c.elapsed)
-		if (got != "") != c.hint {
-			t.Errorf("QuickExitHint(%v) = %q, want a hint: %v", c.elapsed, got, c.hint)
+		for goos, example := range map[string]string{
+			"linux":   `KUBE_EDITOR="code --wait"`,
+			"darwin":  `KUBE_EDITOR="code --wait"`,
+			"windows": `$env:KUBE_EDITOR='code --wait'`, // PowerShell; cmd's set would keep the quotes
+		} {
+			got := quickExitHint(c.elapsed, goos)
+			if (got != "") != c.hint {
+				t.Errorf("quickExitHint(%v, %s) = %q, want a hint: %v", c.elapsed, goos, got, c.hint)
+			}
+			// KUBE_EDITOR, because advice to set EDITOR does nothing while a
+			// KUBE_EDITOR holds the editor that did not wait.
+			if c.hint && !strings.HasSuffix(got, example) {
+				t.Errorf("quickExitHint(%v, %s) = %q, want it to end with %s", c.elapsed, goos, got, example)
+			}
 		}
-		// KUBE_EDITOR, because advice to set EDITOR does nothing while a
-		// KUBE_EDITOR holds the editor that did not wait.
-		if c.hint && !strings.Contains(got, `KUBE_EDITOR="code --wait"`) {
-			t.Errorf("QuickExitHint(%v) = %q, want it to show KUBE_EDITOR with a wait flag", c.elapsed, got)
+	}
+}
+
+// The Windows example must survive its own round trip: what PowerShell stores
+// for $env:KUBE_EDITOR='code --wait' has to split back into code plus its flag.
+func TestQuickExitHintExampleSplits(t *testing.T) {
+	env := func(k string) string {
+		if k == "KUBE_EDITOR" {
+			return "code --wait"
 		}
+		return ""
+	}
+	got := command(env, "windows", func(string) bool { return false })
+	if len(got) != 2 || got[0] != "code" || got[1] != "--wait" {
+		t.Errorf("command for KUBE_EDITOR=code --wait = %q, want [code --wait]", got)
 	}
 }

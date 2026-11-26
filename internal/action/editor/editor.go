@@ -49,8 +49,11 @@ func Unchanged(data []byte, sum [32]byte) bool {
 	return digest(data) == sum
 }
 
-// digest is the SHA-256 behind Unchanged, taken with CRLF folded to LF.
+// digest is the SHA-256 behind Unchanged, taken with a leading UTF-8 BOM dropped
+// and CRLF folded to LF. Notepad before Windows 10 1903 could save UTF-8 with a
+// BOM, and the YAML parser skips one, so neither is an edit.
 func digest(b []byte) [32]byte {
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
 	return sha256.Sum256(bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n")))
 }
 
@@ -64,8 +67,10 @@ func Process(path string) *exec.Cmd {
 }
 
 // quickExit is how soon an editor must hand back an untouched file for kubetui to
-// conclude it never waited for the user.
-const quickExit = time.Second
+// conclude it never waited for the user. The clock starts before Bubble Tea
+// releases the terminal (up to 500ms on Windows) and code.cmd's hand-off to a
+// running window takes about as long again, so a second is too tight.
+const quickExit = 2 * time.Second
 
 // QuickExitHint is the toast for an editor that handed the file back untouched
 // within quickExit of getting it, or "" if it took longer. Nobody reviews an
@@ -81,10 +86,22 @@ const quickExit = time.Second
 // footer line cut to the terminal width, so the hint stays short enough to fit
 // 80 columns whole; past that, the example is the part that gets cut.
 func QuickExitHint(elapsed time.Duration) string {
+	return quickExitHint(elapsed, runtime.GOOS)
+}
+
+// quickExitHint is QuickExitHint for a given GOOS. The example is in the syntax of
+// the shell the user is likely in, so it works when copied: cmd's
+// `set KUBE_EDITOR="code --wait"` keeps the quotes in the value, which then
+// splits to the single word `code --wait`, and PowerShell rejects it outright.
+func quickExitHint(elapsed time.Duration, goos string) string {
 	if elapsed >= quickExit {
 		return ""
 	}
-	return `editor exited at once — use a wait flag, e.g. KUBE_EDITOR="code --wait"`
+	example := `KUBE_EDITOR="code --wait"`
+	if goos == "windows" {
+		example = `$env:KUBE_EDITOR='code --wait'`
+	}
+	return "editor exited at once — use a wait flag, e.g. " + example
 }
 
 // Apply reads the edited file, and if it differs from the original applies it

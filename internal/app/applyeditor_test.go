@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/14f3v/kubectl-tui/internal/action/editor"
 	"github.com/14f3v/kubectl-tui/internal/msg"
 	"github.com/14f3v/kubectl-tui/internal/view"
 )
@@ -43,7 +44,7 @@ func TestApplyHintsAtAnEditorThatDidNotWait(t *testing.T) {
 
 	m.width = 80
 	m.showToast(toast)
-	if got := ansi.Strip(m.renderToast()); !strings.Contains(got, `KUBE_EDITOR="code --wait"`) {
-		t.Errorf("toast at 80 columns = %q, want the example whole", got)
+	if got := ansi.Strip(m.renderToast()); !strings.Contains(got, editor.QuickExitHint(0)) {
+		t.Errorf("toast at 80 columns = %q, want the hint whole, example included", got)
 	}
 }
