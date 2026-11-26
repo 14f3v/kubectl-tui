@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	// Blank import registers the legacy auth providers (gcp/azure/oidc). Exec
@@ -145,8 +146,15 @@ func NewSession(parent context.Context, kubeconfigPath, contextName string, read
 		cancel:  cancel,
 	}
 	s.Forwards = portfwd.NewManager(restCfg, cs, sink)
-	s.Identity = deriveIdentity(cc, restCfg)
-	s.contexts = contextNames(cc)
+	// DeferredLoadingClientConfig cannot report the override-merged config, so
+	// identity and the context list come from a direct config over the same
+	// rules and overrides.
+	idCfg := cc
+	if raw, err := loadingRules.Load(); err == nil {
+		idCfg = clientcmd.NewNonInteractiveClientConfig(*raw, overrides.CurrentContext, overrides, loadingRules)
+	}
+	s.Identity = deriveIdentity(idCfg, restCfg)
+	s.contexts = contextNames(idCfg)
 	s.registerFactories()
 	return s, nil
 }
@@ -184,9 +192,15 @@ func (s *Session) Context() context.Context {
 // Dispose cancels the context and stops every engine store and port-forward.
 // After Dispose the Session must not be reused.
 func (s *Session) Dispose() {
-	s.Forwards.StopAll()
-	s.Engine.StopAll()
-	s.cancel()
+	if s.Forwards != nil {
+		s.Forwards.StopAll()
+	}
+	if s.Engine != nil {
+		s.Engine.StopAll()
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
 }
 
 // RefreshServerVersion queries /version for the cluster's Kubernetes version and
@@ -316,11 +330,19 @@ func nsOrAll(ns string) string {
 	return ns
 }
 
-// deriveIdentity extracts the header identity from the raw kubeconfig and the
-// resolved rest.Config.
+// deriveIdentity extracts the header identity from the kubeconfig with the
+// caller's overrides applied (MergedRawConfig), so a --context or :ctx choice is
+// what the header describes, not the file's current-context, and the resolved
+// rest.Config.
 func deriveIdentity(cc clientcmd.ClientConfig, restCfg *rest.Config) Identity {
 	id := Identity{Server: restCfg.Host}
-	raw, err := cc.RawConfig()
+	var raw clientcmdapi.Config
+	var err error
+	if oc, ok := cc.(clientcmd.OverridingClientConfig); ok {
+		raw, err = oc.MergedRawConfig()
+	} else {
+		raw, err = cc.RawConfig()
+	}
 	if err != nil {
 		return id
 	}
