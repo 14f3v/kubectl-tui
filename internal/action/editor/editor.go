@@ -1,9 +1,11 @@
 // Package editor implements the edit action: dump an object to a temp YAML file,
 // hand it to $EDITOR, and apply the result with server-side apply — unless the
-// file is byte-identical to what was opened, in which case it is a no-op.
+// file is unchanged from what was opened (line endings aside), in which case it
+// is a no-op.
 package editor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"os"
@@ -18,7 +20,7 @@ import (
 )
 
 // WriteTemp writes content to a temp .yaml file and returns its path and the
-// SHA-256 of the original content (for the unchanged-file no-op check).
+// digest of the original content, for Unchanged.
 func WriteTemp(content string) (path string, sum [32]byte, err error) {
 	f, err := os.CreateTemp("", "kubetui-*.yaml")
 	if err != nil {
@@ -33,7 +35,22 @@ func WriteTemp(content string) (path string, sum [32]byte, err error) {
 		os.Remove(f.Name())
 		return "", [32]byte{}, err
 	}
-	return f.Name(), sha256.Sum256([]byte(content)), nil
+	return f.Name(), digest([]byte(content)), nil
+}
+
+// Unchanged reports whether data, read back from the temp file, is still the
+// content WriteTemp wrote (sum) — line endings aside. An editor that saves with
+// CRLF, because it is set to or an .editorconfig asks it to, rewrites every line
+// without the user touching one. The YAML parser reads CRLF and LF alike, so
+// that is no change, not a server-side apply that sends the same object back
+// and claims every field in it for kubetui.
+func Unchanged(data []byte, sum [32]byte) bool {
+	return digest(data) == sum
+}
+
+// digest is the SHA-256 behind Unchanged, taken with CRLF folded to LF.
+func digest(b []byte) [32]byte {
+	return sha256.Sum256(bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n")))
 }
 
 // Process builds the $EDITOR command for a file: the editor command picks from
@@ -53,7 +70,7 @@ func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionRe
 	if err != nil {
 		return false, err
 	}
-	if sha256.Sum256(data) == origSum {
+	if Unchanged(data, origSum) {
 		return false, nil // unchanged — no-op
 	}
 	jsonBytes, err := yaml.YAMLToJSON(data)
