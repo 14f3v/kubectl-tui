@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -118,7 +119,7 @@ func TestExtractTarToDir(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := extractTar(&buf, dir, "bundle"); err != nil {
+	if _, err := extractTar(&buf, dir, "bundle", runtime.GOOS); err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
 
@@ -140,7 +141,7 @@ func TestExtractTarToFile(t *testing.T) {
 	}
 
 	dst := filepath.Join(t.TempDir(), "downloaded.sql")
-	if err := extractTar(&buf, dst, "dump.sql"); err != nil {
+	if _, err := extractTar(&buf, dst, "dump.sql", runtime.GOOS); err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
 	assertFile(t, dst, "SELECT 1;")
@@ -172,7 +173,7 @@ func TestExtractTarNeutralizesTraversal(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := extractTar(&buf, dir, "escape.txt"); err != nil {
+	if _, err := extractTar(&buf, dir, "escape.txt", runtime.GOOS); err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
 	// The traversal is clamped: the file lands inside dst as escape.txt, never in
@@ -187,13 +188,120 @@ func TestExtractTarNeutralizesTraversal(t *testing.T) {
 // archiveRel cleans every name before it gets here, so ".." never arrives from an
 // archive; handing one in uncleaned proves the filepath.Rel guard behind it fires.
 func TestResolveExtractTargetRejectsEscape(t *testing.T) {
-	if _, err := resolveExtractTarget("/base", "sub/ok.txt"); err != nil {
+	if _, _, err := resolveExtractTarget("/base", "sub/ok.txt", "linux"); err != nil {
 		t.Errorf("in-dir name unexpectedly rejected: %v", err)
 	}
 	for _, rel := range []string{"../evil", "sub/../../evil"} {
-		if got, err := resolveExtractTarget("/base", rel); err == nil {
+		if got, _, err := resolveExtractTarget("/base", rel, "linux"); err == nil {
 			t.Errorf("resolveExtractTarget(%q) = %q, want an escape error", rel, got)
 		}
+	}
+}
+
+// TestResolveExtractTargetWindowsNames pins the Windows renaming end to end
+// through to the joined path, and that other systems keep names as they are.
+// Nothing touches the disk, so the Linux cases are safe to run on Windows.
+func TestResolveExtractTargetWindowsNames(t *testing.T) {
+	dst := filepath.Join("base", "out")
+	cases := []struct {
+		rel, goos, want string
+		renamed         bool
+	}{
+		{rel: "logs/app.log", goos: "windows", want: "logs/app.log"},
+		{rel: "logs/backup_10:30.sql", goos: "windows", want: "logs/backup_10_30.sql", renamed: true},
+		{rel: "con/notes./aux.c", goos: "windows", want: "_con/notes/_aux.c", renamed: true},
+		{rel: "logs/backup_10:30.sql", goos: "linux", want: "logs/backup_10:30.sql"},
+		{rel: "con/notes./aux.c", goos: "darwin", want: "con/notes./aux.c"},
+	}
+	for _, c := range cases {
+		got, renamed, err := resolveExtractTarget(dst, c.rel, c.goos)
+		if err != nil {
+			t.Errorf("resolveExtractTarget(%q, %s): %v", c.rel, c.goos, err)
+			continue
+		}
+		if want := filepath.Join(dst, filepath.FromSlash(c.want)); got != want || renamed != c.renamed {
+			t.Errorf("resolveExtractTarget(%q, %s) = %q, %v; want %q, %v", c.rel, c.goos, got, renamed, want, c.renamed)
+		}
+	}
+}
+
+// TestWindowsSanitizingCannotEscape feeds the sanitizer the names most likely to
+// turn into a traversal once trailing dots and spaces are trimmed, plus raw ".."
+// (which archiveRel would have cleaned away), and checks every result stays
+// beneath dst with no "." or ".." component left to climb with.
+func TestWindowsSanitizingCannotEscape(t *testing.T) {
+	dst := filepath.Join("base", "out")
+	for _, rel := range []string{
+		"..", "../evil", "a/../../evil", "...", ". .", ".. ", " ..", "... /x",
+		`..\..\evil`, `a\..\..\evil`, "./x", "x/./y",
+	} {
+		name, _ := windowsEntryPath(rel)
+		for _, part := range strings.Split(name, "/") {
+			if part == "." || part == ".." || part == "" {
+				t.Errorf("windowsEntryPath(%q) = %q, has component %q", rel, name, part)
+			}
+		}
+		got, _, err := resolveExtractTarget(dst, rel, "windows")
+		if err != nil {
+			t.Errorf("resolveExtractTarget(%q): %v", rel, err)
+			continue
+		}
+		if r, err := filepath.Rel(dst, got); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			t.Errorf("resolveExtractTarget(%q) = %q, outside %q", rel, got, dst)
+		}
+	}
+}
+
+// TestExtractTarWindowsNames extracts, with Windows rules, an archive whose names
+// Windows would mangle or refuse, and checks they land renamed and counted. The
+// renamed names are valid everywhere, so this runs the same on every host.
+func TestExtractTarWindowsNames(t *testing.T) {
+	entries := []tarEntry{
+		{name: "logs/"},
+		{name: "logs/app-2026-11-26T10:00:00.log", body: "A"},
+		{name: "logs/con", body: "C"},
+		{name: "logs/notes.", body: "N"},
+		{name: "logs/what?.txt", body: "Q"},
+		{name: "logs/ok.txt", body: "OK"},
+	}
+	dst := filepath.Join(t.TempDir(), "out")
+	res, err := extractTar(buildTar(t, entries...), dst, "logs", "windows")
+	if err != nil {
+		t.Fatalf("extractTar: %v", err)
+	}
+	want := map[string]string{
+		"app-2026-11-26T10_00_00.log": "A",
+		"_con":                        "C",
+		"notes":                       "N",
+		"what_.txt":                   "Q",
+		"ok.txt":                      "OK",
+	}
+	if got := collectFiles(t, dst); !maps.Equal(got, want) {
+		t.Errorf("files under dst = %v, want %v", got, want)
+	}
+	if res.Renamed != 4 {
+		t.Errorf("Renamed = %d, want 4", res.Renamed)
+	}
+
+	// A single file downloaded into a directory is named from the archive, so it
+	// is renamed too; one downloaded to a path the user typed is left alone.
+	dir := t.TempDir()
+	res, err = extractTar(buildTar(t, tarEntry{name: "backup_10:30.sql", body: "SQL"}), dir, "backup_10:30.sql", "windows")
+	if err != nil {
+		t.Fatalf("extractTar into dir: %v", err)
+	}
+	assertFile(t, filepath.Join(dir, "backup_10_30.sql"), "SQL")
+	if res.Renamed != 1 {
+		t.Errorf("Renamed into dir = %d, want 1", res.Renamed)
+	}
+	typed := filepath.Join(t.TempDir(), "backup.sql")
+	res, err = extractTar(buildTar(t, tarEntry{name: "backup_10:30.sql", body: "SQL"}), typed, "backup_10:30.sql", "windows")
+	if err != nil {
+		t.Fatalf("extractTar to typed path: %v", err)
+	}
+	assertFile(t, typed, "SQL")
+	if res.Renamed != 0 {
+		t.Errorf("Renamed to typed path = %d, want 0", res.Renamed)
 	}
 }
 
@@ -205,7 +313,7 @@ func TestExtractTarEmpty(t *testing.T) {
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractTar(&buf, t.TempDir(), "x"); err == nil {
+	if _, err := extractTar(&buf, t.TempDir(), "x", runtime.GOOS); err == nil {
 		t.Errorf("expected error for empty archive, got nil")
 	}
 }
@@ -230,7 +338,7 @@ func TestWriteTarDirRoundTrip(t *testing.T) {
 	}
 
 	out := t.TempDir()
-	if err := extractTar(&buf, out, "payload"); err != nil {
+	if _, err := extractTar(&buf, out, "payload", runtime.GOOS); err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
 	assertFile(t, filepath.Join(out, "payload", "top.txt"), "top")
@@ -288,7 +396,7 @@ func TestExtractTarLayouts(t *testing.T) {
 				mustWrite(t, dst, "KEEP")
 			}
 
-			err := extractTar(buildTar(t, c.entries...), dst, c.srcBase)
+			_, err := extractTar(buildTar(t, c.entries...), dst, c.srcBase, runtime.GOOS)
 			if c.wantErr != (err != nil) {
 				t.Fatalf("extractTar err = %v, wantErr %v", err, c.wantErr)
 			}
@@ -314,7 +422,7 @@ func TestExtractTarRejectsForeignEntries(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			parent := t.TempDir()
 			dst := filepath.Join(parent, "out")
-			if err := extractTar(buildTar(t, entries...), dst, "nginx"); err == nil {
+			if _, err := extractTar(buildTar(t, entries...), dst, "nginx", runtime.GOOS); err == nil {
 				t.Fatal("extractTar succeeded, want an error")
 			}
 			if _, err := os.Stat(filepath.Join(parent, "evil.txt")); !os.IsNotExist(err) {

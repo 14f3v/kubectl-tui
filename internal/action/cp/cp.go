@@ -19,6 +19,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -147,6 +148,14 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 	return nil
 }
 
+// Result reports what a copy did beyond succeeding, so the caller can say so when
+// the files on disk are not a byte-for-byte mirror of the source.
+type Result struct {
+	// Renamed counts downloaded files written under a different name because
+	// theirs is not valid on Windows (see WindowsFileName).
+	Renamed int
+}
+
 // CopyFromPod downloads srcRemote from the container into dstLocal. It runs
 // `tar -cf - -C <dir(srcRemote)> <base(srcRemote)>` in the pod, reads the tar off
 // stdout, and extracts it according to dstLocal: into an existing directory the
@@ -154,13 +163,13 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 // and a directory copied to a path that does not exist yet becomes that path (see
 // extractTar). An empty container targets the pod's first container. It blocks
 // until the transfer completes.
-func CopyFromPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, ns, pod, container, srcRemote, dstLocal string) error {
+func CopyFromPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, ns, pod, container, srcRemote, dstLocal string) (Result, error) {
 	srcDir := toSlashDir(srcRemote)
 	srcBase := path.Base(filepath.ToSlash(strings.TrimRight(srcRemote, "/")))
 	// ".." would make tar emit names that climb out of srcDir, which no archive
 	// entry can be matched against; it names no file to copy any more than "." does.
 	if srcBase == "" || srcBase == "." || srcBase == ".." || srcBase == "/" {
-		return fmt.Errorf("remote source %q has no file name to copy", srcRemote)
+		return Result{}, fmt.Errorf("remote source %q has no file name to copy", srcRemote)
 	}
 
 	cmd := []string{"tar", "-cf", "-", "-C", srcDir, srcBase}
@@ -170,10 +179,10 @@ func CopyFromPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface,
 		Stderr: &stderr,
 	})
 	if err != nil {
-		return wrapTarErr("download", err, stderr.String())
+		return Result{}, wrapTarErr("download", err, stderr.String())
 	}
 
-	return extractTar(&stdout, dstLocal, srcBase)
+	return extractTar(&stdout, dstLocal, srcBase, runtime.GOOS)
 }
 
 // writeTarFile writes a single regular-file entry (name, mode, data) into tw. It
@@ -242,13 +251,17 @@ func writeTarDir(tw *tar.Writer, root, prefix string) error {
 // Entry names are sanitized so a malicious archive cannot escape the destination
 // via ".." or an absolute path (the classic tar-slip guard), and an entry that is
 // not srcBase or beneath it is rejected as a corrupted archive, as kubectl does.
-func extractTar(r io.Reader, dst, srcBase string) error {
+// When goos is "windows", names taken from the archive are also made valid
+// Windows file names (see resolveExtractTarget); dst itself, which the user
+// typed, is never altered.
+func extractTar(r io.Reader, dst, srcBase, goos string) (Result, error) {
 	fi, statErr := os.Stat(dst)
 	dstIsDir := statErr == nil && fi.IsDir()
 	dstIsFile := statErr == nil && !fi.IsDir()
 
 	tr := tar.NewReader(r)
 	shape := shapeUnknown
+	var res Result
 	wrote := false
 	for {
 		hdr, err := tr.Next()
@@ -256,7 +269,7 @@ func extractTar(r io.Reader, dst, srcBase string) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("read tar: %w", err)
+			return res, fmt.Errorf("read tar: %w", err)
 		}
 		isDir := hdr.Typeflag == tar.TypeDir
 		if !isDir && hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA { //nolint:staticcheck // TypeRegA kept for pre-POSIX archives
@@ -265,7 +278,7 @@ func extractTar(r io.Reader, dst, srcBase string) error {
 
 		rel, err := archiveRel(hdr.Name, srcBase)
 		if err != nil {
-			return err
+			return res, err
 		}
 		entryShape := shapeFile
 		if isDir || rel != "" {
@@ -275,10 +288,10 @@ func extractTar(r io.Reader, dst, srcBase string) error {
 		case shape == shapeUnknown:
 			shape = entryShape
 		case shape != entryShape:
-			return fmt.Errorf("archive from pod has both a file and a directory named %q", srcBase)
+			return res, fmt.Errorf("archive from pod has both a file and a directory named %q", srcBase)
 		}
 		if shape == shapeTree && dstIsFile {
-			return fmt.Errorf("destination %q is a file but %q is a directory; choose a directory or a new path", dst, srcBase)
+			return res, fmt.Errorf("destination %q is a file but %q is a directory; choose a directory or a new path", dst, srcBase)
 		}
 		// Directory markers only classify the archive; the parent dirs of each file
 		// (dst itself included, for a tree copied to a new path) are created as needed.
@@ -286,28 +299,31 @@ func extractTar(r io.Reader, dst, srcBase string) error {
 			continue
 		}
 
-		target := dst
+		target, renamed := dst, false
 		switch {
 		case dstIsDir:
-			target, err = resolveExtractTarget(dst, path.Join(srcBase, rel))
+			target, renamed, err = resolveExtractTarget(dst, path.Join(srcBase, rel), goos)
 		case shape == shapeTree:
-			target, err = resolveExtractTarget(dst, rel)
+			target, renamed, err = resolveExtractTarget(dst, rel, goos)
 		}
 		if err != nil {
-			return err
+			return res, err
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return fmt.Errorf("create dir for %q: %w", target, err)
+			return res, fmt.Errorf("create dir for %q: %w", target, err)
 		}
 		if err := writeExtractedFile(target, os.FileMode(hdr.Mode).Perm(), tr); err != nil {
-			return err
+			return res, err
 		}
 		wrote = true
+		if renamed {
+			res.Renamed++
+		}
 	}
 	if !wrote {
-		return fmt.Errorf("archive from pod was empty")
+		return res, fmt.Errorf("archive from pod was empty")
 	}
-	return nil
+	return res, nil
 }
 
 // archiveShape is what a download turned out to be, learned from its first entry.
@@ -341,15 +357,32 @@ func archiveRel(name, srcBase string) (string, error) {
 // resolveExtractTarget maps a slash-separated, archive-relative path to a path
 // under dst and rejects any that would escape dst (absolute paths or ".."
 // traversal).
-func resolveExtractTarget(dst, rel string) (string, error) {
-	target := filepath.Join(dst, filepath.FromSlash(rel))
+//
+// When goos is "windows" every component is first passed through WindowsFileName,
+// and renamed reports whether that changed anything. A Linux name is not
+// necessarily a Windows one: a ':' would put the data in a hidden alternate data
+// stream, '?' or '*' would abort the extraction part-way, and "con" or "nul"
+// would open a device. filepath.Localize then turns the result into an OS path;
+// on Windows it rejects ':', '\' and reserved names itself, so it is a final
+// guard that nothing WindowsFileName missed reaches the disk. Other systems take
+// the name as it is, so their behaviour is unchanged.
+func resolveExtractTarget(dst, rel, goos string) (target string, renamed bool, err error) {
+	local := filepath.FromSlash(rel)
+	if goos == "windows" {
+		var name string
+		name, renamed = windowsEntryPath(rel)
+		if local, err = filepath.Localize(name); err != nil {
+			return "", false, fmt.Errorf("tar entry %q cannot be written on Windows: %w", rel, err)
+		}
+	}
+	target = filepath.Join(dst, local)
 	// Defense in depth: archiveRel and Join+Clean already collapse "..", but verify
 	// the result is still contained in dst before touching the filesystem.
 	r, err := filepath.Rel(dst, target)
 	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("tar entry %q escapes destination directory", rel)
+		return "", false, fmt.Errorf("tar entry %q escapes destination directory", rel)
 	}
-	return target, nil
+	return target, renamed, nil
 }
 
 // writeExtractedFile creates target with mode and copies the tar entry body into
