@@ -1,5 +1,7 @@
 # goreleaser configuration for kubetui.
 # Build locally with: goreleaser build --snapshot --clean
+# Dry-run a whole release (archives, checksums, Homebrew formula in dist/, nothing
+# published, no tokens needed) with: goreleaser release --snapshot --clean
 version: 2
 
 before:
@@ -9,10 +11,11 @@ before:
 builds:
   - id: kubetui
     main: ./cmd/kubetui
-    binary: kubetui
+    binary: kubetui # goreleaser appends .exe for windows -> kubetui.exe
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin]
+    # CGO is off, so every target cross-compiles from the ubuntu release runner.
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w -X main.version={{.Version}}
@@ -20,6 +23,11 @@ builds:
 archives:
   - id: kubetui
     formats: [tar.gz]
+    # Windows gets a zip: every Windows version opens one without extra tools, and
+    # the winget publisher (see the Scoop note at the end) only installs from zips.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: "kubetui_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - README.md
@@ -67,3 +75,26 @@ brews:
       bin.install "kubetui"
     test: |
       system "#{bin}/kubetui", "--version"
+
+# Scoop manifest for Windows — ready to enable, but off until its bucket exists.
+# To turn it on:
+#   1. create the public repo 14f3v/scoop-bucket;
+#   2. add a repo secret SCOOP_BUCKET_TOKEN: a PAT with write access to that repo
+#      (as with the tap, the default GITHUB_TOKEN can't push to another repo);
+#   3. pass it to goreleaser in release.yml next to HOMEBREW_TAP_TOKEN:
+#        SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+#   4. uncomment the block below and document the install in the README:
+#        scoop bucket add 14f3v https://github.com/14f3v/scoop-bucket
+#        scoop install 14f3v/kubetui
+# winget (`winget:` publisher) is a later option: it also installs from the zip,
+# but each release opens a PR against microsoft/winget-pkgs that Microsoft reviews.
+# scoops:
+#   - repository:
+#       owner: 14f3v
+#       name: scoop-bucket
+#       token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
+#     # Same reason as the formula: name the manifest after the binary, not the repo.
+#     name: kubetui
+#     homepage: "https://github.com/14f3v/kubectl-tui"
+#     description: "A terminal UI for managing and monitoring Kubernetes clusters"
+#     license: "Apache-2.0"
