@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -777,9 +778,11 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Filter is already applied live; enter just commits it.
 		return m, nil
 	case "backspace":
-		if len(m.inputBuf) > 0 {
-			m.inputBuf = m.inputBuf[:len(m.inputBuf)-1]
-		}
+		// Drop the last rune, not the last byte: a non-ASCII character (typed on a
+		// non-US layout or pasted) is several bytes, and cutting one would leave
+		// invalid UTF-8 in the buffer and the filter.
+		_, size := utf8.DecodeLastRuneInString(m.inputBuf)
+		m.inputBuf = m.inputBuf[:len(m.inputBuf)-size]
 		m.cmdSel = 0
 		if m.mode == modeFilter {
 			if p := m.active(); p != nil {
