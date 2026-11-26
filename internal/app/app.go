@@ -8,8 +8,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -53,6 +56,10 @@ type Config struct {
 	// caller, so a reconnect never follows the file's current-context elsewhere.
 	Start     k8s.ClusterRef
 	StartKind string
+	// Store keeps pasted kubeconfigs and state.yaml; nil when it could not be
+	// opened, with StoreErr saying why.
+	Store    *clusters.Store
+	StoreErr string
 }
 
 // Model is the root model.
@@ -67,6 +74,8 @@ type Model struct {
 	metricsOK  bool
 	clusterCPU float64
 	clusterMem float64
+
+	store *clusters.Store // nil: paste, load-file and saved state are off
 
 	sess    *k8s.Session
 	ref     k8s.ClusterRef // the cluster the Session connects to; at launch, the one being connected to
@@ -132,6 +141,7 @@ func New(cfg Config) *Model {
 		cfg:     cfg,
 		theme:   theme,
 		sink:    cfg.Sink,
+		store:   cfg.Store,
 		ref:     cfg.Start,
 		gate:    action.NewTerminalGate(),
 		booting: true,
@@ -156,6 +166,9 @@ func (m *Model) connect(ref k8s.ClusterRef) tea.Cmd {
 	m.bootToken++
 	ctx, cancel := context.WithCancel(context.Background())
 	m.bootCancel, m.connecting = cancel, &ref
+	if p := m.picker(); p != nil {
+		p.SetConnecting(&ref)
+	}
 	return bootstrapCmd(ctx, m.bootToken, ref, m.sessionOptions())
 }
 
@@ -167,6 +180,9 @@ func (m *Model) cancelConnect() {
 		m.bootCancel()
 	}
 	m.bootCancel, m.connecting = nil, nil
+	if p := m.picker(); p != nil {
+		p.SetConnecting(nil)
+	}
 }
 
 // isCurrent reports whether a bootstrap result belongs to the bootstrap in
@@ -260,6 +276,27 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 	case view.SwitchContextRequest:
 		return m.switchContext(t.Ref)
 
+	case view.ClustersLoaded:
+		t.NoStore = m.noStoreReason()
+		return m, m.routeToPage(t)
+
+	case ctxLookup:
+		return m.onCtxLookup(t)
+
+	case view.AddKubeconfigFile:
+		return m.addKubeconfigFile(t.Path)
+
+	case view.ForgetCluster:
+		return m.forgetCluster(t.Row)
+
+	case clustersChanged:
+		reload := loadClustersCmd(m.store)
+		if t.err == nil {
+			return m, reload
+		}
+		_, tick := m.showToast(msg.Toast{Text: t.err.Error(), Level: msg.LevelError})
+		return m, tea.Batch(tick, reload)
+
 	case view.ExecRequest:
 		return m.handleExecRequest(t)
 
@@ -341,11 +378,197 @@ func (m *Model) pushPage(p view.Page) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(p.Init(), p.OnEnter())
 }
 
-// loadClusters reads every cluster source off the UI thread. Until the saved
-// store is wired in, only the default kubeconfig and in-cluster are listed.
-func loadClusters() tea.Msg {
-	rows, err := clusters.Collect(nil)
-	return view.ClustersLoaded{Rows: rows, Err: err}
+// loadClustersCmd reads every cluster source off the UI thread. With no store,
+// only the default kubeconfig (and in-cluster) is listed.
+func loadClustersCmd(s *clusters.Store) tea.Cmd {
+	return func() tea.Msg {
+		rows, err := clusters.Collect(s)
+		return view.ClustersLoaded{Rows: rows, Err: err}
+	}
+}
+
+// clusterPicker is the cluster picker page as the root model drives it. The
+// picker only asks; the root tells it which row is connecting.
+type clusterPicker interface {
+	view.Page
+	SetConnecting(ref *k8s.ClusterRef)
+}
+
+// picker returns the cluster picker when it is the active page, else nil.
+func (m *Model) picker() clusterPicker {
+	p, _ := m.active().(clusterPicker)
+	return p
+}
+
+// openPicker pushes the cluster picker over the current page, unless it is
+// already the active one; esc pops it. A connect already in flight shows on
+// its row. Its rows arrive by a ClustersLoaded the caller sends.
+func (m *Model) openPicker() (tea.Model, tea.Cmd) {
+	if m.picker() != nil {
+		return m, nil
+	}
+	cur := m.ref
+	p := view.NewClusterPicker(m.theme, &cur, false)
+	if m.connecting != nil {
+		ref := *m.connecting
+		p.SetConnecting(&ref)
+	}
+	return m.pushPage(p)
+}
+
+// noStoreReason says why paste, load-file and the saved state are off, or ""
+// when the store is open.
+func (m *Model) noStoreReason() string {
+	if m.store != nil {
+		return ""
+	}
+	why := m.cfg.StoreErr
+	if why == "" {
+		why = clusters.ErrNoConfigDir.Error()
+	}
+	return "saved clusters are off: " + why
+}
+
+// ctxLookup is every cluster row, listed to resolve ":ctx <name>".
+type ctxLookup struct {
+	name string
+	rows []clusters.Row
+	err  error
+}
+
+// lookupClusterCmd lists every cluster off the UI thread, for ":ctx <name>".
+func lookupClusterCmd(s *clusters.Store, name string) tea.Cmd {
+	return func() tea.Msg {
+		rows, err := clusters.Collect(s)
+		return ctxLookup{name: name, rows: rows, err: err}
+	}
+}
+
+// onCtxLookup resolves ":ctx <name>" against every cluster's display name. One
+// match connects to it, as enter on its row would; several open the picker on
+// the first; none says so.
+func (m *Model) onCtxLookup(t ctxLookup) (tea.Model, tea.Cmd) {
+	if t.err != nil {
+		return m.showToast(msg.Toast{Text: "list clusters: " + t.err.Error(), Level: msg.LevelError})
+	}
+	matches := clusters.Match(t.rows, t.name)
+	switch len(matches) {
+	case 0:
+		return m.showToast(msg.Toast{Text: fmt.Sprintf("no cluster named %q", t.name), Level: msg.LevelWarn})
+	case 1:
+		return m.pickCluster(matches[0])
+	}
+	mdl, push := m.openPicker()
+	first := matches[0].Ref
+	loaded := view.ClustersLoaded{Rows: t.rows, NoStore: m.noStoreReason(), Select: &first}
+	return mdl, tea.Batch(push, m.routeToPage(loaded))
+}
+
+// pickCluster connects to a row by the picker's rules for enter: a missing file
+// or the connected cluster only says so, and an unreviewed paste is shown for
+// review before anything in it runs.
+func (m *Model) pickCluster(r clusters.Row) (tea.Model, tea.Cmd) {
+	switch {
+	case r.Missing:
+		return m.showToast(msg.Toast{Text: r.Label + ": file missing", Level: msg.LevelWarn})
+	case r.NeedsReview:
+		return m, func() tea.Msg { return view.ReviewCluster{Row: r} }
+	case m.sess != nil && r.Ref == m.ref:
+		return m.showToast(msg.Toast{Text: "already on " + r.Label, Level: msg.LevelInfo})
+	}
+	return m.switchContext(r.Ref)
+}
+
+// clustersChanged is the result of a Cmd that changed the saved clusters. The
+// picker reloads its rows either way; an error is also toasted.
+type clustersChanged struct{ err error }
+
+// addKubeconfigFile remembers the kubeconfig file the user named with f in the
+// picker.
+func (m *Model) addKubeconfigFile(path string) (tea.Model, tea.Cmd) {
+	switch {
+	case strings.TrimSpace(path) == "":
+		return m, nil
+	case m.store == nil:
+		return m.showToast(msg.Toast{Text: m.noStoreReason(), Level: msg.LevelWarn})
+	}
+	return m, addFileCmd(m.store, path)
+}
+
+// addFileCmd remembers a kubeconfig file exactly as --kubeconfig does: one file
+// entry per context, by absolute path, so the entry still works when kubetui
+// starts in another folder. The file is not copied, so later edits to it are
+// picked up. It must load as a kubeconfig with at least one context.
+func addFileCmd(s *clusters.Store, path string) tea.Cmd {
+	return func() tea.Msg {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return clustersChanged{err: err}
+		}
+		ctxs, _, err := k8s.ListContexts(abs)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return clustersChanged{err: fmt.Errorf("%s: no such file", abs)}
+		case err != nil: // client-go's error names the file
+			return clustersChanged{err: fmt.Errorf("%w: %s", clusters.ErrNotKubeconfig, clusters.SafeLoadError(err))}
+		case len(ctxs) == 0:
+			return clustersChanged{err: fmt.Errorf("%s: %w: it has no contexts", abs, clusters.ErrNotKubeconfig)}
+		}
+		for _, c := range ctxs {
+			ref := k8s.ClusterRef{Source: k8s.SourceFile, Path: abs, Context: c.Name}
+			server := c.Server // shown on the row if the file goes missing
+			if err := s.Update(clusters.KeyFor(ref, ""), func(e *clusters.Entry) { e.Server = server }); err != nil {
+				return clustersChanged{err: err}
+			}
+		}
+		return clustersChanged{}
+	}
+}
+
+// forgetCluster removes a picker row's source, unless the connected cluster (or
+// the one connecting) comes from it: deleting a pasted file under a live Session
+// would break it, and an oidc token refresh would write the file back
+// unreviewed. Rows from the default kubeconfig are never removed.
+func (m *Model) forgetCluster(r clusters.Row) (tea.Model, tea.Cmd) {
+	sameSource := func(ref k8s.ClusterRef) bool { return ref.Source == r.Ref.Source && ref.Path == r.Ref.Path }
+	switch {
+	case r.Source != k8s.SourcePasted && r.Source != k8s.SourceFile:
+		return m.showToast(msg.Toast{Text: r.Label + " comes from your kubeconfig; kubetui doesn't edit it", Level: msg.LevelInfo})
+	case m.store == nil:
+		return m.showToast(msg.Toast{Text: m.noStoreReason(), Level: msg.LevelWarn})
+	case (m.sess != nil && sameSource(m.ref)) || (m.connecting != nil && sameSource(*m.connecting)):
+		return m.showToast(msg.Toast{Text: "disconnect first: switch to another cluster", Level: msg.LevelWarn})
+	}
+	return m, forgetCmd(m.store, r)
+}
+
+// forgetCmd removes what a row came from. A pasted file is deleted along with
+// the record of every context in it. A loaded file is forgotten, every context
+// of it, and the file itself is left alone. A record left behind by a failed
+// write is harmless: the picker drops records whose pasted file is gone.
+func forgetCmd(s *clusters.Store, r clusters.Row) tea.Cmd {
+	return func() tea.Msg {
+		entries, err := s.Entries()
+		if err != nil {
+			return clustersChanged{err: err}
+		}
+		ours := func(e clusters.Entry) bool { return e.Source == k8s.SourceFile && e.Path == r.Ref.Path }
+		if r.Source == k8s.SourcePasted {
+			if err := s.DeletePaste(r.Key.File); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return clustersChanged{err: err}
+			}
+			ours = func(e clusters.Entry) bool { return e.Source == k8s.SourcePasted && e.File == r.Key.File }
+		}
+		for _, e := range entries {
+			if !ours(e) {
+				continue
+			}
+			if err := s.Remove(e.Key()); err != nil {
+				return clustersChanged{err: err}
+			}
+		}
+		return clustersChanged{}
+	}
 }
 
 // popPage backs out of a drill-in. The base page is never popped.
@@ -354,6 +577,11 @@ func (m *Model) popPage() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	top := m.pages[len(m.pages)-1]
+	if _, ok := top.(clusterPicker); ok {
+		// Closing the picker stays on the current cluster: the connect it started
+		// is cut short, and its result is disposed when it arrives.
+		m.cancelConnect()
+	}
 	top.OnLeave()
 	m.pages = m.pages[:len(m.pages)-1]
 	// A page that drives its own refresh tick lost that chain while it was buried:
@@ -406,8 +634,8 @@ func (m *Model) onSessionReady(t msg.SessionReady) (tea.Model, tea.Cmd) {
 }
 
 // onSessionError reports a failed bootstrap. A switch that fails leaves the
-// current Session as it was and says why; with no Session to stay on (the launch
-// connect), the error is fatal.
+// current Session as it was and says why, on the picker's row when the picker is
+// open; with no Session to stay on (the launch connect), the error is fatal.
 func (m *Model) onSessionError(t msg.SessionError) (tea.Model, tea.Cmd) {
 	m.cancelConnect()
 	if m.sess == nil {
@@ -416,6 +644,10 @@ func (m *Model) onSessionError(t msg.SessionError) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	ref, _ := t.Ref.(k8s.ClusterRef)
+	if m.picker() != nil {
+		// The picker stays open and shows why on the row that failed.
+		return m, m.routeToPage(view.ClusterConnectFailed{Ref: ref, Err: t.Err.Error()})
+	}
 	name := ref.Context
 	if name == "" {
 		name = string(ref.Source) // an in-cluster ref names no context
@@ -950,16 +1182,14 @@ func (m *Model) runCommand(buf string) (tea.Model, tea.Cmd) {
 		// open it in the Table browser (e.g. :endpoints, :componentstatuses).
 		return m.openResource(cmd.kind, cmd.namespace)
 	case "ctx":
-		if cmd.arg == "" {
-			if m.sess == nil {
-				return m, nil
-			}
-			cur := m.ref
-			mdl, cmd := m.pushPage(view.NewClusterPicker(m.theme, &cur, false))
-			return mdl, tea.Batch(cmd, loadClusters)
+		if cmd.arg != "" {
+			return m, lookupClusterCmd(m.store, cmd.arg)
 		}
-		// Same kubeconfig as the active cluster, another context in it.
-		return m.switchContext(k8s.ClusterRef{Source: m.ref.Source, Path: m.ref.Path, Context: cmd.arg})
+		if m.sess == nil {
+			return m, nil
+		}
+		mdl, push := m.openPicker()
+		return mdl, tea.Batch(push, loadClustersCmd(m.store))
 	case "apply":
 		return m.applyCommand()
 	case "explain":

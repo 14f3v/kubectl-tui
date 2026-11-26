@@ -8,7 +8,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/14f3v/kubectl-tui/internal/k8s"
 	"github.com/14f3v/kubectl-tui/internal/style"
 )
 
@@ -30,6 +29,8 @@ func TestParseCommand(t *testing.T) {
 		{"exit", command{verb: "quit"}},
 		{"ctx", command{verb: "ctx"}},
 		{"context Staging-EU", command{verb: "ctx", arg: "Staging-EU"}}, // case preserved
+		// A pasted cluster's label is "name / context", so the name keeps its spaces.
+		{"ctx dev-tokyo / admin", command{verb: "ctx", arg: "dev-tokyo / admin"}},
 		{"apply", command{verb: "apply"}},
 		{"create", command{verb: "apply"}},
 		{"crds", command{verb: "crds"}},
@@ -45,24 +46,6 @@ func TestParseCommand(t *testing.T) {
 		if got := parseCommand(c.in); got != c.want {
 			t.Errorf("parseCommand(%q) = %+v, want %+v", c.in, got, c.want)
 		}
-	}
-}
-
-// ":ctx <name>" names another context in the active cluster's kubeconfig, so a
-// switch from a --kubeconfig file stays in that file.
-func TestCtxCommandKeepsTheActiveKubeconfig(t *testing.T) {
-	refA := k8s.ClusterRef{Source: k8s.SourceFile, Path: "/k/config", Context: "a"}
-	m := &Model{theme: style.Default(), ref: refA}
-	if _, cmd := m.runCommand("ctx b"); cmd == nil {
-		t.Fatal("ctx b returned no bootstrap command")
-	}
-	want := k8s.ClusterRef{Source: k8s.SourceFile, Path: "/k/config", Context: "b"}
-	if m.connecting == nil || *m.connecting != want {
-		t.Errorf("connecting = %v, want %+v", m.connecting, want)
-	}
-	// ref moves only once b has connected.
-	if m.ref != refA {
-		t.Errorf("ref = %+v while connecting, want %+v", m.ref, refA)
 	}
 }
 

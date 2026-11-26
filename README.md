@@ -208,7 +208,11 @@ An unknown `col:` is treated as literal text (so `nginx:1.25` matches that image
 
 - `0`–`9` — jump namespace: `0` = all namespaces, `1`–`9` = your configured favorites (see [Configuration](#configuration)).
 - `enter` on a **namespace** row — open that namespace's pods.
-- `:ctx` — open the **context picker** (or `:ctx <name>` to switch directly). Switching rebuilds the session.
+- `:ctx` — open the **cluster picker**: every cluster kubetui knows (each context of your kubeconfig, and files you loaded), most recently used first, with `●` on the one you are on. `enter` connects, `f` loads a kubeconfig file by path, `ctrl+d` removes a saved entry and `esc` goes back.
+  - A file loaded with `f` is remembered by its absolute path, not copied, so later edits to it are picked up. Removing it only forgets the path; the file is left alone.
+  - Contexts from your kubeconfig cannot be removed, since kubetui never edits that file. The cluster you are connected to cannot be removed either: switch to another one first.
+  - `:ctx <name>` switches directly when exactly one cluster has that name (the name shown in the picker, or a context name). If several do, it opens the picker on the first of them.
+  - The current cluster stays up while the new one connects, and esc cancels the connect. A failed connect leaves you where you were and shows the error on its row. Switching closes your port-forwards, so kubetui asks first when any are open.
 
 ### Resource actions
 
@@ -314,7 +318,7 @@ The secrets table only shows the type and data-key count. `enter` opens a reveal
 | `:nodetop` | `topnodes` | Node CPU/memory usage |
 | `:explain <kind[.field]>` | `exp` | OpenAPI field docs (e.g. `:explain pod.spec.containers`) |
 | `:api-resources` · `:api-versions` | — | Served resources / group-versions |
-| `:ctx` | `context` | Context picker (or `:ctx <name>`) |
+| `:ctx` | `context` | Cluster picker: every saved cluster (or `:ctx <name>`) |
 | `:whoami` | `auth` | Identity + access review |
 | `:tenants` | `tnt` | Capsule tenant dashboard |
 | `:q` | `quit`, `exit` | Quit |

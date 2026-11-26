@@ -79,6 +79,21 @@ func TestPickerEnterEmitsRef(t *testing.T) {
 	}
 }
 
+// ":ctx <name>" with several matches opens the picker on the first of them.
+func TestPickerLoadSelectsRow(t *testing.T) {
+	a, b, c := pickRow("a", k8s.SourceKubeconfig), pickRow("b", k8s.SourceKubeconfig), pickRow("c", k8s.SourceFile)
+	cur := b.Ref
+	p := NewClusterPicker(style.Default(), &cur, false)
+	np, _ := p.Update(ClustersLoaded{Rows: []clusters.Row{a, b, c}, Select: &c.Ref})
+	if p = np.(*clusterPickerPage); p.cursor != 2 {
+		t.Fatalf("cursor = %d, want 2, the selected row", p.cursor)
+	}
+	np, _ = p.Update(ClustersLoaded{Rows: []clusters.Row{a, b, c}})
+	if p = np.(*clusterPickerPage); p.cursor != 1 {
+		t.Fatalf("cursor = %d after a plain reload, want 1, the connected row", p.cursor)
+	}
+}
+
 func TestPickerEnterOnConnectedRowToasts(t *testing.T) {
 	a := pickRow("a", k8s.SourceKubeconfig)
 	cur := a.Ref

@@ -598,7 +598,7 @@ func (m *Model) renderHelp(h int) string {
 	b.WriteString(t.AccentText.Bold(true).Render("kubetui — keys"))
 	b.WriteString("\n\n")
 	globals := [][2]string{
-		{":", "command line (:pods, :ns, :q)"},
+		{":", "command line (:pods, :ns, :ctx, :q)"},
 		{"/", filterHelpText(m.active())},
 		{"j/k ↑/↓", "move cursor"},
 		{"g/G", "top / bottom"},

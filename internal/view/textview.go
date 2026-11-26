@@ -50,11 +50,13 @@ type PromptRequest struct {
 type SwitchContextRequest struct{ Ref k8s.ClusterRef }
 
 // ClustersLoaded delivers the picker's rows. NoStore says why paste, load-file
-// and the saved state are off ("" when they are on).
+// and the saved state are off ("" when they are on). Select, if set, is the row
+// to put the cursor on; otherwise it goes on the connected cluster's row.
 type ClustersLoaded struct {
 	Rows    []clusters.Row
 	Err     error
 	NoStore string
+	Select  *k8s.ClusterRef
 }
 
 // OpenPasteBox asks the root model to open the paste-a-kubeconfig box.

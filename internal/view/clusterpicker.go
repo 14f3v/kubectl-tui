@@ -75,9 +75,13 @@ func (p *clusterPickerPage) Update(m tea.Msg) (Page, tea.Cmd) {
 	switch t := m.(type) {
 	case ClustersLoaded:
 		p.rows, p.loadErr, p.noStore, p.loaded = t.Rows, t.Err, t.NoStore, true
+		want := p.current
+		if t.Select != nil {
+			want = t.Select
+		}
 		p.cursor = 0
 		for i, r := range p.rows {
-			if p.isCurrent(r) {
+			if want != nil && r.Ref == *want {
 				p.cursor = i
 				break
 			}

@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/14f3v/kubectl-tui/internal/app"
+	"github.com/14f3v/kubectl-tui/internal/clusters"
 	"github.com/14f3v/kubectl-tui/internal/config"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
 )
@@ -33,6 +34,13 @@ func main() {
 
 	app.Version = version
 	cfg := config.Load()
+	// Without a usable config folder the picker still lists the kubeconfig's
+	// contexts; paste, load-file and the saved state are off, and say why.
+	store, err := clusters.Open(config.Dir())
+	storeErr := ""
+	if err != nil {
+		storeErr = err.Error()
+	}
 
 	// The engine's snapshot sink is tea.Program.Send, but the program is built
 	// from the model, which needs the sink first. Break the cycle with a closure
@@ -49,10 +57,12 @@ func main() {
 		Config:    cfg,
 		Start:     startRef(*kubeconfigFlag, *ctxFlag),
 		StartKind: *kindFlag,
+		Store:     store,
+		StoreErr:  storeErr,
 	})
 	program = tea.NewProgram(model)
 
-	_, err := program.Run()
+	_, err = program.Run()
 	code, report := exitStatus(err)
 	if report {
 		fmt.Fprintln(os.Stderr, "kubetui:", err)
