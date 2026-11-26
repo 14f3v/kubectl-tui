@@ -58,6 +58,16 @@ func Path() string {
 	return filepath.Join(base, "kubetui", "config.yaml")
 }
 
+// Dir returns kubetui's config folder (the folder holding config.yaml), or ""
+// when it cannot be determined.
+func Dir() string {
+	p := Path()
+	if p == "" {
+		return ""
+	}
+	return filepath.Dir(p)
+}
+
 // Load reads the config file, falling back to defaults for any missing or
 // malformed content. It never returns an error; a bad config should not stop the
 // tool from starting.

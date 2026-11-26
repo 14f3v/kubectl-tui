@@ -357,6 +357,10 @@ favorites:              # namespaces on digit keys 1-9
 | `tierLabel` | `tier` | tenant label key for the TIER column |
 | `favorites` | — | namespaces surfaced by the `1`–`9` keys |
 
+### Saved kubeconfigs
+
+Kubeconfigs you paste into kubetui are stored in **`clusters/`** next to the config file (`~/.config/kubetui/clusters/`, or `$XDG_CONFIG_HOME/kubetui/clusters/`). The folder is private to you (mode `0700`, files `0600` on Unix) and holds a `.gitignore` of `*` so a dotfiles repo never picks the credentials up. kubetui never writes `~/.kube/config`, your `$KUBECONFIG` files or a `--kubeconfig` file.
+
 ### Read-only mode
 
 `readOnly: true` makes kubetui behave exactly as a read-only ServiceAccount would:
