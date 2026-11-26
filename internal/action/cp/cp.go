@@ -154,6 +154,11 @@ type Result struct {
 	// Renamed counts downloaded files written under a different name because
 	// theirs is not valid on Windows (see WindowsFileName).
 	Renamed int
+	// Overwritten lists the archive names of downloaded files that replaced an
+	// earlier, different entry because Windows sees the two as one file: their
+	// names differ only in case ("Makefile", "makefile") or became equal when
+	// renamed ("a:b", "a_b"). Only the later one is on disk.
+	Overwritten []string
 }
 
 // CopyFromPod downloads srcRemote from the container into dstLocal. It runs
@@ -263,6 +268,15 @@ func extractTar(r io.Reader, dst, srcBase, goos string) (Result, error) {
 	shape := shapeUnknown
 	var res Result
 	wrote := false
+	// Windows file names ignore case, so two distinct Linux names can be one file
+	// there and the later write silently replaces the earlier. Remember which
+	// entry each case-folded target came from to tell the user when that happens.
+	// The same name appearing twice is tar's own "later replaces earlier", not a
+	// clash.
+	var written map[string]string
+	if goos == "windows" {
+		written = map[string]string{}
+	}
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -318,6 +332,13 @@ func extractTar(r io.Reader, dst, srcBase, goos string) (Result, error) {
 		wrote = true
 		if renamed {
 			res.Renamed++
+		}
+		if written != nil {
+			name, key := path.Join(srcBase, rel), strings.ToUpper(target)
+			if prev, ok := written[key]; ok && prev != name {
+				res.Overwritten = append(res.Overwritten, name)
+			}
+			written[key] = name
 		}
 	}
 	if !wrote {

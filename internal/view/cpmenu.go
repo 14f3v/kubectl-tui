@@ -126,16 +126,20 @@ func (p *cpMenuPage) download() tea.Cmd {
 	}
 }
 
-// downloadToast reports a finished download, and says so when some files had to
-// be renamed on the way in: on Windows a pod file called "app-10:00.log" is
-// saved as "app-10_00.log", and a user looking for the original name should be
-// told why it is not there.
+// downloadToast reports a finished download, and says so when the files on disk
+// differ from the pod's: on Windows a pod file called "app-10:00.log" is saved as
+// "app-10_00.log", and of "Makefile" and "makefile" only one can exist. The toast
+// is a single line, so the loss comes first and turns it into a warning.
 func downloadToast(pod string, res cp.Result) msg.Toast {
-	text := "downloaded from " + pod
+	text, level := "downloaded from "+pod, msg.LevelSuccess
+	if n := len(res.Overwritten); n > 0 {
+		text += fmt.Sprintf(" · %d overwritten (same name on Windows: %s)", n, res.Overwritten[0])
+		level = msg.LevelWarn
+	}
 	if res.Renamed > 0 {
 		text += fmt.Sprintf(" · %d renamed to be valid on Windows", res.Renamed)
 	}
-	return msg.Toast{Text: text, Level: msg.LevelSuccess}
+	return msg.Toast{Text: text, Level: level}
 }
 
 // twoFields splits v on whitespace, returning ok only when there are exactly two

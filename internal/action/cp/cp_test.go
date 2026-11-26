@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -429,6 +430,43 @@ func TestExtractTarRejectsForeignEntries(t *testing.T) {
 				t.Error("a traversal entry was written outside the destination")
 			}
 		})
+	}
+}
+
+// TestExtractTarReportsWindowsClashes checks that two entries which are one file
+// on Windows are reported, whether they differ only in case or became equal when
+// renamed, while an entry repeated under the same name is not. Only Result is
+// asserted for the case clash, since the test host's filesystem may itself be
+// case-insensitive (Windows, macOS) or not (Linux); the later entry wins on all.
+func TestExtractTarReportsWindowsClashes(t *testing.T) {
+	entries := []tarEntry{
+		{name: "src/"},
+		{name: "src/Makefile", body: "UPPER"},
+		{name: "src/makefile", body: "lower"},
+		{name: "src/a:b", body: "colon"},
+		{name: "src/a_b", body: "underscore"},
+		{name: "src/again", body: "first"},
+		{name: "src/again", body: "second"},
+	}
+	dst := filepath.Join(t.TempDir(), "out")
+	res, err := extractTar(buildTar(t, entries...), dst, "src", "windows")
+	if err != nil {
+		t.Fatalf("extractTar: %v", err)
+	}
+	if want := []string{"src/makefile", "src/a_b"}; !slices.Equal(res.Overwritten, want) {
+		t.Errorf("Overwritten = %q, want %q", res.Overwritten, want)
+	}
+	assertFile(t, filepath.Join(dst, "makefile"), "lower")
+	assertFile(t, filepath.Join(dst, "a_b"), "underscore")
+	assertFile(t, filepath.Join(dst, "again"), "second")
+
+	// Other systems are not checked: there the two names are two files.
+	res, err = extractTar(buildTar(t, entries[:3]...), filepath.Join(t.TempDir(), "out"), "src", "linux")
+	if err != nil {
+		t.Fatalf("extractTar linux: %v", err)
+	}
+	if len(res.Overwritten) != 0 {
+		t.Errorf("Overwritten on linux = %q, want none", res.Overwritten)
 	}
 }
 

@@ -17,4 +17,11 @@ func TestDownloadToast(t *testing.T) {
 	if !strings.Contains(renamed.Text, "3 renamed") || renamed.Level != msg.LevelSuccess {
 		t.Errorf("renamed download toast = %+v, want it to count the renames", renamed)
 	}
+	clash := downloadToast("web", cp.Result{Renamed: 1, Overwritten: []string{"src/makefile", "src/a_b"}})
+	if !strings.Contains(clash.Text, "2 overwritten") || !strings.Contains(clash.Text, "src/makefile") || clash.Level != msg.LevelWarn {
+		t.Errorf("clash download toast = %+v, want a warning naming the first clash", clash)
+	}
+	if i, j := strings.Index(clash.Text, "overwritten"), strings.Index(clash.Text, "renamed"); i < 0 || j < 0 || i > j {
+		t.Errorf("clash download toast = %q, want the loss before the renames", clash.Text)
+	}
 }
