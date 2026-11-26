@@ -3,6 +3,7 @@ package view
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -16,8 +17,9 @@ import (
 type cpItem struct{ label, desc string }
 
 // cpMenuPage is the copy-files menu, pushed from a pod row (issue #30). Each item
-// collects two whitespace-separated paths and streams the file to or from the
-// pod off the UI thread. container is "" for the pod's first container.
+// collects two whitespace-separated paths (see splitPaths for quoting) and
+// streams the file to or from the pod off the UI thread. container is "" for the
+// pod's first container.
 type cpMenuPage struct {
 	sess      *k8s.Session
 	theme     style.Theme
@@ -32,8 +34,8 @@ func newCpMenuPage(sess *k8s.Session, theme style.Theme, namespace, pod, contain
 	return &cpMenuPage{
 		sess: sess, theme: theme, namespace: namespace, pod: pod, container: container,
 		items: []cpItem{
-			{"Upload", "local → pod (localPath remotePath)"},
-			{"Download", "pod → local (remotePath localPath)"},
+			{"Upload", `local → pod (localPath remotePath; "quote" a path with spaces)`},
+			{"Download", `pod → local (remotePath localPath; "quote" a path with spaces)`},
 		},
 	}
 }
@@ -85,14 +87,16 @@ func (p *cpMenuPage) Update(m tea.Msg) (Page, tea.Cmd) {
 // off the UI thread.
 func (p *cpMenuPage) upload() tea.Cmd {
 	pod := p.pod
+	const usage = "localPath remotePath"
 	return func() tea.Msg {
 		return PromptRequest{
-			Title: "Upload · " + pod,
-			Label: "localPath remotePath",
+			Title:    "Upload · " + pod,
+			Label:    usage,
+			Validate: func(v string) error { _, _, err := twoPaths(v, usage); return err },
 			Action: func(v string) tea.Msg {
-				local, remote, ok := twoFields(v)
-				if !ok {
-					return msg.Toast{Text: "expected: localPath remotePath", Level: msg.LevelError}
+				local, remote, err := twoPaths(v, usage)
+				if err != nil {
+					return msg.Toast{Text: err.Error(), Level: msg.LevelError}
 				}
 				res, err := cp.CopyToPod(p.sess.Context(), p.sess.RestCfg, p.sess.CS, p.namespace, p.pod, p.container, local, remote)
 				if err != nil {
@@ -130,14 +134,16 @@ func uploadToast(pod string, res cp.Result) msg.Toast {
 // path off the UI thread.
 func (p *cpMenuPage) download() tea.Cmd {
 	pod := p.pod
+	const usage = "remotePath localPath"
 	return func() tea.Msg {
 		return PromptRequest{
-			Title: "Download · " + pod,
-			Label: "remotePath localPath",
+			Title:    "Download · " + pod,
+			Label:    usage,
+			Validate: func(v string) error { _, _, err := twoPaths(v, usage); return err },
 			Action: func(v string) tea.Msg {
-				remote, local, ok := twoFields(v)
-				if !ok {
-					return msg.Toast{Text: "expected: remotePath localPath", Level: msg.LevelError}
+				remote, local, err := twoPaths(v, usage)
+				if err != nil {
+					return msg.Toast{Text: err.Error(), Level: msg.LevelError}
 				}
 				res, err := cp.CopyFromPod(p.sess.Context(), p.sess.RestCfg, p.sess.CS, p.namespace, p.pod, p.container, remote, local)
 				if err != nil {
@@ -165,14 +171,60 @@ func downloadToast(pod string, res cp.Result) msg.Toast {
 	return msg.Toast{Text: text, Level: level}
 }
 
-// twoFields splits v on whitespace, returning ok only when there are exactly two
-// non-empty fields.
-func twoFields(v string) (a, b string, ok bool) {
-	f := strings.Fields(v)
-	if len(f) != 2 {
-		return "", "", false
+// twoPaths parses a cp prompt line into exactly two non-empty paths, or explains
+// what was expected using usage ("localPath remotePath"). The prompt validates
+// with it too, so a line that does not parse keeps the prompt open with the
+// text still there to fix.
+func twoPaths(v, usage string) (a, b string, err error) {
+	f, err := splitPaths(v)
+	if err != nil {
+		return "", "", fmt.Errorf("%v; expected: %s", err, usage)
 	}
-	return f[0], f[1], true
+	if len(f) != 2 || f[0] == "" || f[1] == "" {
+		return "", "", fmt.Errorf(`expected: %s (put "quotes" around a path with spaces)`, usage)
+	}
+	return f[0], f[1], nil
+}
+
+// splitPaths splits a prompt line into whitespace-separated paths. A double-quoted
+// span belongs to the path it is in, spaces and all, and its quotes are dropped,
+// so a path quoted by hand or pasted from Explorer's "Copy as path" works:
+// "C:\Users\First Last\out.txt" is one path, and so is the quoted form of a path
+// with no spaces, which Explorer always produces. Nothing else is special.
+// Backslashes are literal, so Windows separators survive; a POSIX shell splitter
+// (shlex, go-shellquote) would read "C:\Users" as an escaped "U". A single quote
+// is literal too, because apostrophes are ordinary in Windows names
+// (C:\Users\O'Brien) and Explorer never uses them. An unclosed quote is an
+// error rather than a guess.
+func splitPaths(v string) ([]string, error) {
+	var (
+		fields  []string
+		cur     strings.Builder
+		inField bool // a field has started, even if it is only "" so far
+		quoted  bool
+	)
+	for _, r := range v {
+		switch {
+		case r == '"':
+			quoted, inField = !quoted, true
+		case !quoted && unicode.IsSpace(r):
+			if inField {
+				fields = append(fields, cur.String())
+				cur.Reset()
+				inField = false
+			}
+		default:
+			cur.WriteRune(r)
+			inField = true
+		}
+	}
+	if quoted {
+		return nil, fmt.Errorf(`unclosed " quote`)
+	}
+	if inField {
+		fields = append(fields, cur.String())
+	}
+	return fields, nil
 }
 
 func (p *cpMenuPage) View(width, height int) string {
