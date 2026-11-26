@@ -3,6 +3,7 @@ package logstream
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -89,7 +90,15 @@ func TestSaveLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o644 {
-		t.Fatalf("file perm = %o, want 644", perm)
+	// Windows has no Unix permission bits. Go maps the read-only attribute to them
+	// instead, so Stat only ever reports 0444 or 0666 there, and 0o644 (which has
+	// the owner-write bit) creates a writable file that reads back as 0666. Assert
+	// that rather than skipping, so a save that comes out read-only still fails.
+	wantPerm := os.FileMode(0o644)
+	if runtime.GOOS == "windows" {
+		wantPerm = 0o666
+	}
+	if perm := info.Mode().Perm(); perm != wantPerm {
+		t.Fatalf("file perm = %o, want %o", perm, wantPerm)
 	}
 }
