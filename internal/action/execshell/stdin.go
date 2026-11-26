@@ -2,9 +2,100 @@ package execshell
 
 import (
 	"io"
+	"sync"
+	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 )
+
+// sessionStdin is the pod's stdin for one session. client-go copies it to the
+// pod from a goroutine that StreamWithContext never waits for (remotecommand
+// v2.go copyStdin), so when the shell exits that goroutine is still parked in
+// Read. Bubble Tea takes the terminal back at once, and the first key pressed
+// in the TUI then goes to the parked read instead: it is lost, and writing it
+// to the closed stream logs "Copying stdin failed" over the screen. That
+// happens on every platform, not only Windows.
+//
+// stop retires the reader as soon as the stream returns. It interrupts a
+// parked read and waits for it, so the key stays in the terminal for Bubble
+// Tea, and from then on every Read reports io.EOF, so client-go's copy ends
+// without logging anything.
+type sessionStdin struct {
+	r      io.Reader
+	cancel func()       // interrupts a Read blocked in r; nil if nothing can
+	close  func() error // releases what r holds once no Read is using it; may be nil
+
+	mu      sync.Mutex
+	stopped bool
+	reading chan struct{} // closed when the Read in flight returns; nil when there is none
+}
+
+func (s *sessionStdin) Read(p []byte) (int, error) {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return 0, io.EOF
+	}
+	done := make(chan struct{})
+	s.reading = done
+	s.mu.Unlock()
+
+	n, err := s.r.Read(p)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reading = nil
+	close(done)
+	if s.stopped {
+		// The session is over. Whatever this read brought back, a cancellation
+		// or a key that raced the stop, has nowhere left to go.
+		return 0, io.EOF
+	}
+	return n, err
+}
+
+// stopWait bounds how long stop waits for a parked read to give up. An
+// interrupted read returns at once; one that cannot be interrupted is left
+// behind, as before, rather than hold up the return to the TUI.
+const stopWait = 100 * time.Millisecond
+
+// stop ends the session's input. See sessionStdin.
+func (s *sessionStdin) stop() {
+	s.mu.Lock()
+	s.stopped = true
+	reading := s.reading
+	s.mu.Unlock()
+	if reading != nil && !s.interrupt(reading) {
+		return // still parked in r, so r has to stay open under it
+	}
+	if s.close != nil {
+		_ = s.close()
+	}
+}
+
+// interrupt cancels the parked read and reports whether it returned within
+// stopWait. The cancel is repeated because the read may not have reached its
+// blocking call yet, and a cancel that gets there first can find nothing to
+// interrupt.
+func (s *sessionStdin) interrupt(reading <-chan struct{}) bool {
+	if s.cancel == nil {
+		return false
+	}
+	deadline := time.NewTimer(stopWait)
+	defer deadline.Stop()
+	retry := time.NewTicker(stopWait / 10)
+	defer retry.Stop()
+	for {
+		s.cancel()
+		select {
+		case <-reading:
+			return true
+		case <-deadline.C:
+			return false
+		case <-retry.C:
+		}
+	}
+}
 
 // consoleReader reads keystrokes from a Windows console as UTF-8, the way
 // os.File.Read does, except that Ctrl+Z is passed on as the key it is.

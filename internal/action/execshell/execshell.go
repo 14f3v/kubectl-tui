@@ -137,11 +137,14 @@ func (c *Cmd) Run() (retErr error) {
 		// Safe has made the console raw by now; on Windows that raw mode still
 		// drops the non-character keys until VT input is added on top of it.
 		enableVTInput(in)
+		// Not in itself: the read client-go leaves parked when the stream returns
+		// must be stopped before Bubble Tea takes the terminal back, and on
+		// Windows a console read would turn Ctrl+Z into EOF (see stdin.go).
+		// TTY.In stays in, so Safe still sees the console.
+		stdin := newSessionStdin(in)
+		defer stdin.stop()
 		return exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
-			// Not in itself: on Windows a console read would turn Ctrl+Z into EOF
-			// and end the pod's stdin (see stdin.go). TTY.In stays in, so Safe
-			// still sees the console.
-			Stdin:             streamStdin(in),
+			Stdin:             stdin,
 			Stdout:            out,
 			Tty:               true,
 			TerminalSizeQueue: sizeQueue,

@@ -3,9 +3,196 @@ package execshell
 import (
 	"errors"
 	"io"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf16"
 )
+
+// parkedReader is a Read that blocks until it is released, like a terminal read
+// waiting for the next key.
+type parkedReader struct {
+	entered chan struct{}   // gets a value each time a Read starts
+	release chan readResult // what the blocked Read returns
+}
+
+type readResult struct {
+	data string
+	err  error
+}
+
+func newParkedReader() *parkedReader {
+	return &parkedReader{entered: make(chan struct{}, 8), release: make(chan readResult, 8)}
+}
+
+func (r *parkedReader) Read(p []byte) (int, error) {
+	r.entered <- struct{}{}
+	res := <-r.release
+	return copy(p, res.data), res.err
+}
+
+type readReturn struct {
+	n   int
+	err error
+}
+
+// parkRead starts a Read on s the way client-go's stdin copy does and waits
+// until it is blocked in the reader underneath.
+func parkRead(t *testing.T, s *sessionStdin, pr *parkedReader) <-chan readReturn {
+	t.Helper()
+	got := make(chan readReturn, 1)
+	go func() {
+		n, err := s.Read(make([]byte, 8))
+		got <- readReturn{n, err}
+	}()
+	select {
+	case <-pr.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read never reached the underlying reader")
+	}
+	return got
+}
+
+func await(t *testing.T, got <-chan readReturn) readReturn {
+	t.Helper()
+	select {
+	case r := <-got:
+		return r
+	case <-time.After(5 * time.Second):
+		t.Fatal("the parked Read never returned")
+		return readReturn{}
+	}
+}
+
+func TestSessionStdinPassesInputThrough(t *testing.T) {
+	s := &sessionStdin{r: strings.NewReader("ls\r\x1a")}
+	got, err := io.ReadAll(s)
+	if err != nil || string(got) != "ls\r\x1a" {
+		t.Fatalf("ReadAll = (%q, %v), want (%q, nil)", got, err, "ls\r\x1a")
+	}
+}
+
+// TestSessionStdinStopInterruptsParkedRead is the leaked-reader bug: when the
+// shell exits, client-go's copy is still blocked in Read. stop must interrupt
+// it, wait for it, release the reader, and make it report a clean EOF so the
+// copy ends without logging.
+func TestSessionStdinStopInterruptsParkedRead(t *testing.T) {
+	cases := []struct {
+		name     string
+		released readResult
+	}{
+		{"cancelled read", readResult{err: errors.New("read canceled")}},
+		// A key that arrives just as the stream ends has no session to go to; it
+		// must not be written to the closed stream.
+		{"key that raced the stop", readResult{data: "j"}},
+	}
+	for _, tc := range cases {
+		pr := newParkedReader()
+		var cancels atomic.Int32
+		var closed atomic.Bool
+		s := &sessionStdin{
+			r: pr,
+			cancel: func() {
+				if cancels.Add(1) == 1 {
+					pr.release <- tc.released
+				}
+			},
+			close: func() error { closed.Store(true); return nil },
+		}
+		got := parkRead(t, s, pr)
+
+		s.stop()
+		if cancels.Load() == 0 {
+			t.Fatalf("%s: stop did not cancel the parked read", tc.name)
+		}
+		if !closed.Load() {
+			t.Fatalf("%s: stop did not release the reader once the read returned", tc.name)
+		}
+		if r := await(t, got); r.n != 0 || r.err != io.EOF {
+			t.Fatalf("%s: parked Read = (%d, %v), want (0, io.EOF)", tc.name, r.n, r.err)
+		}
+		if n, err := s.Read(make([]byte, 8)); n != 0 || err != io.EOF {
+			t.Fatalf("%s: Read after stop = (%d, %v), want (0, io.EOF)", tc.name, n, err)
+		}
+		select {
+		case <-pr.entered:
+			t.Fatalf("%s: a Read after stop reached the reader", tc.name)
+		default:
+		}
+	}
+}
+
+// TestSessionStdinStopRetriesCancel covers a read that has taken its turn but
+// not yet reached the blocking call, where the first cancel finds nothing to
+// interrupt.
+func TestSessionStdinStopRetriesCancel(t *testing.T) {
+	pr := newParkedReader()
+	var cancels atomic.Int32
+	var closed atomic.Bool
+	s := &sessionStdin{
+		r: pr,
+		cancel: func() {
+			if cancels.Add(1) == 3 {
+				pr.release <- readResult{err: errors.New("read canceled")}
+			}
+		},
+		close: func() error { closed.Store(true); return nil },
+	}
+	got := parkRead(t, s, pr)
+	s.stop()
+	if !closed.Load() {
+		t.Fatalf("stop gave up after %d cancels; want it to keep trying until the read returns", cancels.Load())
+	}
+	if r := await(t, got); r.err != io.EOF {
+		t.Fatalf("parked Read err = %v, want io.EOF", r.err)
+	}
+}
+
+// TestSessionStdinStopGivesUpOnStuckRead pins the fallback: a read that cannot
+// be interrupted must not hold up the return to the TUI, must not have its
+// reader released under it, and must still report EOF, not the key it took,
+// when it finally returns.
+func TestSessionStdinStopGivesUpOnStuckRead(t *testing.T) {
+	for name, cancel := range map[string]func(){"cancel has no effect": func() {}, "no cancel": nil} {
+		pr := newParkedReader()
+		var closed atomic.Bool
+		s := &sessionStdin{r: pr, cancel: cancel, close: func() error { closed.Store(true); return nil }}
+		got := parkRead(t, s, pr)
+
+		stopped := make(chan struct{})
+		go func() { s.stop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: stop is stuck behind a read it cannot interrupt", name)
+		}
+		if closed.Load() {
+			t.Fatalf("%s: stop released the reader while a read was still blocked in it", name)
+		}
+
+		pr.release <- readResult{data: "j"}
+		if r := await(t, got); r.n != 0 || r.err != io.EOF {
+			t.Fatalf("%s: late Read = (%d, %v), want (0, io.EOF)", name, r.n, r.err)
+		}
+	}
+}
+
+func TestSessionStdinStopWithNoReadInFlight(t *testing.T) {
+	var closed atomic.Bool
+	s := &sessionStdin{
+		r:      strings.NewReader("never read"),
+		cancel: func() { t.Error("nothing to cancel, yet stop cancelled") },
+		close:  func() error { closed.Store(true); return nil },
+	}
+	s.stop()
+	if !closed.Load() {
+		t.Fatal("stop did not release the reader")
+	}
+	if n, err := s.Read(make([]byte, 8)); n != 0 || err != io.EOF {
+		t.Fatalf("Read after stop = (%d, %v), want (0, io.EOF)", n, err)
+	}
+}
 
 // fakeConsole stands in for ReadConsoleW: each call hands back the next chunk
 // of UTF-16 code units, and once they run out it reports a read that ended with
