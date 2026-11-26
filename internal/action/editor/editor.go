@@ -75,11 +75,16 @@ const quickExit = time.Second
 // and removes it before the user has typed anything, and a bare "no changes"
 // would hide why the edit went nowhere. A fast :q! in vi earns the hint too,
 // which costs nothing.
+//
+// The example names KUBE_EDITOR because it wins over EDITOR, so it works
+// whichever variable holds the editor that did not wait. The toast is a single
+// footer line cut to the terminal width, so the hint stays short enough to fit
+// 80 columns whole; past that, the example is the part that gets cut.
 func QuickExitHint(elapsed time.Duration) string {
 	if elapsed >= quickExit {
 		return ""
 	}
-	return `editor exited at once without changes — GUI editors need a wait flag, e.g. EDITOR="code --wait"`
+	return `editor exited at once — use a wait flag, e.g. KUBE_EDITOR="code --wait"`
 }
 
 // Apply reads the edited file, and if it differs from the original applies it

@@ -149,8 +149,10 @@ func TestQuickExitHint(t *testing.T) {
 		if (got != "") != c.hint {
 			t.Errorf("QuickExitHint(%v) = %q, want a hint: %v", c.elapsed, got, c.hint)
 		}
-		if c.hint && !strings.Contains(got, "--wait") {
-			t.Errorf("QuickExitHint(%v) = %q, want it to show a wait flag", c.elapsed, got)
+		// KUBE_EDITOR, because advice to set EDITOR does nothing while a
+		// KUBE_EDITOR holds the editor that did not wait.
+		if c.hint && !strings.Contains(got, `KUBE_EDITOR="code --wait"`) {
+			t.Errorf("QuickExitHint(%v) = %q, want it to show KUBE_EDITOR with a wait flag", c.elapsed, got)
 		}
 	}
 }
