@@ -499,6 +499,9 @@ func (m *Model) renderContent(h int) string {
 	if m.confirm != nil {
 		return m.renderConfirm(h)
 	}
+	if m.paste != nil {
+		return m.renderPasteBox(h)
+	}
 	if m.showHelp {
 		return m.renderHelp(h)
 	}

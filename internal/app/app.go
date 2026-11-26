@@ -106,6 +106,7 @@ type Model struct {
 	showHelp   bool
 	confirm    *confirmState
 	prompt     *promptState
+	paste      *pasteBox // the paste-a-kubeconfig box; nil when closed
 
 	panicInfo string
 }
@@ -288,6 +289,25 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 
 	case view.ForgetCluster:
 		return m.forgetCluster(t.Row)
+
+	case view.OpenPasteBox:
+		return m.openPasteBox("")
+
+	case view.ReviewCluster:
+		return m.reviewCluster(t.Row)
+
+	case pasteChecked:
+		return m.onPasteChecked(t)
+
+	case pasteNamed:
+		return m.onPasteNamed(t)
+
+	case pasteDiscarded:
+		m.paste = nil
+		return m, nil
+
+	case pasteSaved:
+		return m.onPasteSaved(t)
 
 	case clustersChanged:
 		reload := loadClustersCmd(m.store)
@@ -830,6 +850,13 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmKey(k)
 	}
 
+	// The paste box takes every key, global ones included: they are text to it.
+	// It comes after the prompt and the confirm because it opens both on top of
+	// itself (the name prompt, the esc confirm), and they need the keys.
+	if m.paste != nil {
+		return m.handlePasteBoxKey(k)
+	}
+
 	// Command-line capture takes precedence over everything else.
 	if m.mode != modeNone {
 		return m.handleInputKey(k)
@@ -982,6 +1009,8 @@ func (m *Model) handlePaste(p tea.PasteMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case m.confirm != nil:
 		return m, nil
+	case m.paste != nil:
+		return m.handlePasteBoxPaste(p)
 	case m.mode != modeNone:
 		m.inputInsert(singleLine(p.Content))
 		return m, nil
