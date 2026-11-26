@@ -746,7 +746,7 @@ func (p *resourcePage) editAction() tea.Cmd {
 		if execErr != nil {
 			return msg.Toast{Text: "editor: " + execErr.Error(), Level: msg.LevelError}
 		}
-		changed, aerr := editor.Apply(sess.Context(), sess.Dyn, info.GVR, info.Namespaced, ns, name, path, sum)
+		changed, aerr := editor.Apply(sess.Context(), sess.Dyn, info.GVR, info.Namespaced, ns, name, path, sum, nil)
 		switch {
 		case aerr != nil:
 			return msg.Toast{Text: "apply " + name + ": " + aerr.Error(), Level: msg.LevelError}
