@@ -667,41 +667,64 @@ func TestWriteTarDirFollowsLinkedRoot(t *testing.T) {
 }
 
 func TestUploadMode(t *testing.T) {
+	const (
+		text   = "key: value\n"
+		script = "#!/bin/sh\necho hi\n"
+		elf    = "\x7fELF\x02\x01\x01"
+	)
 	cases := []struct {
 		mode fs.FileMode
+		data string
 		goos string
 		want int64
 	}{
-		{0o666, "windows", 0o644},
-		{0o444, "windows", 0o644},
-		{fs.ModeIrregular | 0o666, "windows", 0o644},
-		{fs.ModeDir | 0o777, "windows", 0o755},
-		{0o755, "linux", 0o755},
-		{0o600, "darwin", 0o600},
-		{fs.ModeDir | 0o750, "linux", 0o750},
+		{0o666, text, "windows", 0o644},
+		{0o444, text, "windows", 0o644},
+		{0o666, "", "windows", 0o644},
+		{fs.ModeIrregular | 0o666, text, "windows", 0o644},
+		{fs.ModeDir | 0o777, "", "windows", 0o755},
+		// Windows has no exec bit to copy, so what the pod's kernel would run is
+		// marked executable.
+		{0o666, script, "windows", 0o755},
+		{0o444, elf, "windows", 0o755},
+		{0o666, " #!/bin/sh", "windows", 0o644},
+		{0o666, "\x7fEL", "windows", 0o644},
+		// Elsewhere the file's own bits are kept, whatever it holds.
+		{0o755, text, "linux", 0o755},
+		{0o600, script, "darwin", 0o600},
+		{0o644, elf, "linux", 0o644},
+		{fs.ModeDir | 0o750, "", "linux", 0o750},
 	}
 	for _, c := range cases {
-		if got := uploadMode(c.mode, c.goos); got != c.want {
-			t.Errorf("uploadMode(%v, %s) = %o, want %o", c.mode, c.goos, got, c.want)
+		if got := uploadMode(c.mode, []byte(c.data), c.goos); got != c.want {
+			t.Errorf("uploadMode(%v, %q, %s) = %o, want %o", c.mode, c.data, c.goos, got, c.want)
 		}
 	}
 }
 
 // TestWriteTarDirHeaderModes checks the header modes a directory upload carries:
-// 0644 under Windows rules whatever the file's own bits, and the file's own bits
-// otherwise.
+// under Windows rules 0755 for a script and 0644 for anything else, whatever the
+// files' own bits, and the files' own bits otherwise.
 func TestWriteTarDirHeaderModes(t *testing.T) {
 	src := t.TempDir()
-	file := filepath.Join(src, "run.sh")
-	mustWrite(t, file, "#!/bin/sh\n")
-	if err := os.Chmod(file, 0o700); err != nil {
+	script := filepath.Join(src, "run.sh")
+	mustWrite(t, script, "#!/bin/sh\n")
+	if err := os.Chmod(script, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Lstat(file)
-	if err != nil {
-		t.Fatal(err)
+	mustWrite(t, filepath.Join(src, "values.yaml"), "replicas: 1\n")
+	own := map[string]int64{}
+	for _, name := range []string{"run.sh", "values.yaml"} {
+		fi, err := os.Lstat(filepath.Join(src, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		own["payload/"+name] = int64(fi.Mode().Perm())
 	}
-	for goos, want := range map[string]int64{"windows": 0o644, "linux": int64(fi.Mode().Perm())} {
+	for goos, want := range map[string]map[string]int64{
+		"windows": {"payload/run.sh": 0o755, "payload/values.yaml": 0o644},
+		"linux":   own,
+	} {
 		var buf bytes.Buffer
 		tw := tar.NewWriter(&buf)
 		if _, err := writeTarDir(tw, src, "payload", goos); err != nil {
@@ -710,12 +733,25 @@ func TestWriteTarDirHeaderModes(t *testing.T) {
 		if err := tw.Close(); err != nil {
 			t.Fatal(err)
 		}
-		hdr, err := tar.NewReader(&buf).Next()
-		if err != nil {
-			t.Fatal(err)
+		got := map[string]int64{}
+		tr := tar.NewReader(&buf)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got[hdr.Name] = hdr.Mode
 		}
-		if hdr.Mode != want {
-			t.Errorf("%s: header mode = %o, want %o", goos, hdr.Mode, want)
+		if len(got) != len(want) {
+			t.Errorf("%s: archived %d files, want %d", goos, len(got), len(want))
+		}
+		for name, mode := range want {
+			if got[name] != mode {
+				t.Errorf("%s: %s header mode = %o, want %o", goos, name, got[name], mode)
+			}
 		}
 	}
 }

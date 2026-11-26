@@ -147,7 +147,7 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 			tw.Close()
 			return res, fmt.Errorf("cannot read %q: %w", srcLocal, rerr)
 		}
-		if werr := writeTarFile(tw, destBase, uploadMode(info.Mode(), runtime.GOOS), data); werr != nil {
+		if werr := writeTarFile(tw, destBase, uploadMode(info.Mode(), data, runtime.GOOS), data); werr != nil {
 			tw.Close()
 			return res, werr
 		}
@@ -271,30 +271,39 @@ func writeTarDir(tw *tar.Writer, root, prefix, goos string) (skipped []string, e
 			}
 			return fmt.Errorf("cannot read %q: %w", p, err)
 		}
-		return writeTarFile(tw, path.Join(prefix, rel), uploadMode(info.Mode(), goos), data)
+		return writeTarFile(tw, path.Join(prefix, rel), uploadMode(info.Mode(), data, goos), data)
 	})
 	return skipped, err
 }
 
-// uploadMode is the permission written into the tar header for an uploaded entry.
-// A Windows mode says nothing about Unix permissions: Go synthesizes it from the
-// read-only attribute alone (os/types_windows.go), as 0666, or 0444 when
-// read-only, and adds 0111 only to directories. GNU and BusyBox tar running as
-// root in the pod apply header modes as they are, so an upload from Windows would
-// land world-writable. On Windows it is therefore the conventional 0644 for a
-// file and 0755 for a directory (directories get no header of their own today;
-// the pod's tar creates them). Elsewhere the entry's own bits are kept, as
-// before. Nothing can say which Windows files are meant to be executable, so an
-// uploaded script needs chmod +x in the pod, as with kubectl cp.
-func uploadMode(m fs.FileMode, goos string) int64 {
+// uploadMode is the permission written into the tar header for an uploaded entry
+// whose content is data. A Windows mode says nothing about Unix permissions: Go
+// synthesizes it from the read-only attribute alone (os/types_windows.go), as
+// 0666, or 0444 when read-only, and adds 0111 only to directories. GNU and
+// BusyBox tar running as root in the pod apply header modes as they are, so an
+// upload from Windows would land world-writable. On Windows it is therefore the
+// conventional 0644 for a file and 0755 for a directory (directories get no
+// header of their own today; the pod's tar creates them), and 0755 for a file the
+// pod's kernel would run (see linuxExecutable), so a script or a binary
+// cross-compiled for Linux can be run without a chmod +x first. Elsewhere the
+// entry's own bits are kept, as before.
+func uploadMode(m fs.FileMode, data []byte, goos string) int64 {
 	switch {
 	case goos != "windows":
 		return int64(m.Perm())
-	case m.IsDir():
+	case m.IsDir(), linuxExecutable(data):
 		return 0o755
 	default:
 		return 0o644
 	}
+}
+
+// linuxExecutable reports whether data starts the way Linux's execve requires
+// of a file it runs: an ELF header or a "#!" interpreter line. It only tells a
+// Windows upload, which has no exec bit to copy, which files to mark
+// executable; file names and extensions are not consulted.
+func linuxExecutable(data []byte) bool {
+	return bytes.HasPrefix(data, []byte("\x7fELF")) || bytes.HasPrefix(data, []byte("#!"))
 }
 
 // uploadable reports whether an entry found while walking an upload should be
