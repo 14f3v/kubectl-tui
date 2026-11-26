@@ -1,11 +1,11 @@
 package inspect
 
 // secret.go keeps a Secret's values out of the text kubetui renders for it. The
-// yaml view and the edit buffer show each data value as a placeholder that names
-// its size and nothing else. An edit gets the real values back from memory just
-// before it is applied, so they are never written to the editor's temp file. The
-// reveal drill-in (enter on a secret row) reads the real values straight from
-// the cache and shows them only on demand.
+// yaml view and the edit buffer show each data value as a placeholder that
+// names its size and its key and nothing else. An edit gets the real values
+// back from memory just before it is applied, so they are never written to the
+// editor's temp file. The reveal drill-in (enter on a secret row) reads the
+// real values straight from the cache and shows them only on demand.
 
 import (
 	"bytes"
@@ -67,14 +67,23 @@ func toMap(obj runtime.Object) (map[string]any, error) {
 	return runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 }
 
-// placeholder is what a Secret value of n bytes shows as. It is plain text, not
-// base64, so it reads as what it is. '<', ':' and ' ' are outside the base64
-// alphabet, so the API server rejects it as a data value if one is ever sent
-// back.
-func placeholder(n int) string { return fmt.Sprintf("<redacted: %d bytes>", n) }
+// placeholder is what the data value under key, n bytes long, shows as. It is
+// plain text, not base64, so it reads as what it is. '<', ':' and ' ' are
+// outside the base64 alphabet, so the API server rejects it as a data value if
+// one is ever sent back.
+//
+// It names its key so that restore can tell it from the placeholder of any
+// other key. A size alone does not: two keys of the same size, which is common
+// for generated keys and tokens, would have the same text, and a placeholder
+// moved, copied or swapped onto the other key would get that key's old value
+// put back, with the edit reported as applied.
+func placeholder(key string, n int) string {
+	return fmt.Sprintf("<redacted: %d bytes of %s>", n, key)
+}
 
-// placeholderRE matches any text placeholder can produce.
-var placeholderRE = regexp.MustCompile(`^<redacted: [0-9]+ bytes>$`)
+// placeholderRE matches any text placeholder can produce, and the older form
+// without the key, so that one pasted back in is caught too.
+var placeholderRE = regexp.MustCompile(`^<redacted: [0-9]+ bytes( of .*)?>$`)
 
 // secretValues is what maskSecret took out of a Secret: each data value as the
 // API carries it (base64), with the placeholder that replaced it, and the
@@ -92,9 +101,9 @@ type maskedValue struct {
 }
 
 // maskSecret masks the values in a Secret's map form, in place, and returns
-// them. Each data value becomes placeholder(its size). stringData is dropped:
-// the API server never returns it, and a placeholder there would be stored as
-// the literal text if applied. The last-applied annotation is dropped too,
+// them. Each data value becomes placeholder(its key, its size). stringData is
+// dropped: the API server never returns it, and a placeholder there would be
+// stored as the literal text if applied. The last-applied annotation is dropped too,
 // because client-side kubectl apply keeps every value in it again. The engine
 // already strips that annotation from the cache, so this matters for a Secret
 // read straight from the API.
@@ -113,7 +122,7 @@ func maskSecret(m map[string]any) *secretValues {
 	data, _ := m["data"].(map[string]any)
 	for k, v := range data {
 		if enc, ok := v.(string); ok {
-			ph := placeholder(decodedLen(enc))
+			ph := placeholder(k, decodedLen(enc))
 			data[k] = ph
 			masked.data[k] = maskedValue{encoded: enc, placeholder: ph}
 		}
@@ -143,9 +152,10 @@ type Restore func(edited []byte) ([]byte, error)
 //
 // A placeholder that cannot be put back is an error, and nothing is applied.
 // That covers a placeholder under a key that had no value (a renamed or new
-// key), one that is not the placeholder its key was written with (two swapped,
-// or a size retyped), and one moved into stringData, where it would be stored
-// as the literal text. Errors name the first such key in sorted order.
+// key), one that is not the placeholder its key was written with (one moved,
+// copied or swapped from another key, or a size retyped), and one moved into
+// stringData, where it would be stored as the literal text. Errors name the
+// first such key in sorted order.
 //
 // When any value is put back, metadata.resourceVersion is set to the version
 // the values were read at, even if the line was deleted from the buffer. A

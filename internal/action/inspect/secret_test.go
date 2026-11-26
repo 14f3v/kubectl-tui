@@ -95,10 +95,11 @@ func TestYAML_MasksSecretValues(t *testing.T) {
 			assertNoValues(t, out)
 			for _, want := range []string{
 				"apiVersion: v1", "kind: Secret", "name: db", "resourceVersion: \"41\"", "app: db", "team: core", "type: Opaque",
-				// Readable placeholders, not the base64 of one.
-				"password: '<redacted: 7 bytes>'",
-				"token: '<redacted: 18 bytes>'",
-				"tls.crt: '<redacted: 27 bytes>'",
+				// Readable placeholders, not the base64 of one, each naming
+				// its key.
+				"password: '<redacted: 7 bytes of password>'",
+				"token: '<redacted: 18 bytes of token>'",
+				"tls.crt: '<redacted: 27 bytes of tls.crt>'",
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("yaml missing %q:\n%s", want, out)
@@ -217,9 +218,9 @@ func decode(t *testing.T, b []byte) map[string]any {
 func TestRestore(t *testing.T) {
 	// Placeholder lines exactly as the buffer holds them for typedSecret.
 	const (
-		password = "  password: '<redacted: 7 bytes>'\n"
-		tlsCrt   = "  tls.crt: '<redacted: 27 bytes>'\n"
-		token    = "  token: '<redacted: 18 bytes>'\n"
+		password = "  password: '<redacted: 7 bytes of password>'\n"
+		tlsCrt   = "  tls.crt: '<redacted: 27 bytes of tls.crt>'\n"
+		token    = "  token: '<redacted: 18 bytes of token>'\n"
 		rv       = "  resourceVersion: \"41\"\n"
 	)
 	original := map[string]any{}
@@ -315,30 +316,47 @@ func TestRestore(t *testing.T) {
 			wantErr: "data.passwd is still redacted — enter a base64 value, or use stringData",
 		},
 		{
-			name:    "a new key with a placeholder",
-			edit:    replace("data:\n", "data:\n  extra: '<redacted: 7 bytes>'\n"),
+			name:    "a new key with a copy of a placeholder",
+			edit:    replace("data:\n", "data:\n  extra: '<redacted: 7 bytes of password>'\n"),
 			wantErr: "data.extra is still redacted",
 		},
 		{
 			name:    "a placeholder with its size retyped",
-			edit:    replace("<redacted: 7 bytes>", "<redacted: 8 bytes>"),
+			edit:    replace("<redacted: 7 bytes of password>", "<redacted: 8 bytes of password>"),
 			wantErr: "data.password has a placeholder that is not its own — enter a base64 value, or use stringData",
+		},
+		{
+			name:    "a placeholder with its key retyped",
+			edit:    replace("<redacted: 7 bytes of password>", "<redacted: 7 bytes of passwd>"),
+			wantErr: "data.password has a placeholder that is not its own",
+		},
+		{
+			name:    "the older placeholder form, without the key",
+			edit:    replace("<redacted: 7 bytes of password>", "<redacted: 7 bytes>"),
+			wantErr: "data.password has a placeholder that is not its own",
 		},
 		{
 			name: "two placeholders swapped",
 			edit: func(s string) string {
-				s = replace("<redacted: 7 bytes>", "<swap>")(s)
-				s = replace("<redacted: 18 bytes>", "<redacted: 7 bytes>")(s)
-				return replace("<swap>", "<redacted: 18 bytes>")(s)
+				s = replace("<redacted: 7 bytes of password>", "<swap>")(s)
+				s = replace("<redacted: 18 bytes of token>", "<redacted: 7 bytes of password>")(s)
+				return replace("<swap>", "<redacted: 18 bytes of token>")(s)
 			},
 			wantErr: "data.password has a placeholder that is not its own",
 		},
 		{
 			name: "a placeholder moved into stringData",
 			edit: func(s string) string {
-				return replace(password, "")(s) + "stringData:\n  password: '<redacted: 7 bytes>'\n"
+				return replace(password, "")(s) + "stringData:\n  password: '<redacted: 7 bytes of password>'\n"
 			},
 			wantErr: "stringData.password is a redacted placeholder — enter the plain value",
+		},
+		{
+			name: "the older placeholder form in stringData",
+			edit: func(s string) string {
+				return s + "stringData:\n  password: '<redacted: 7 bytes>'\n"
+			},
+			wantErr: "stringData.password is a redacted placeholder",
 		},
 	}
 	for _, c := range cases {
@@ -425,6 +443,74 @@ func TestRestore_UnstructuredSecret(t *testing.T) {
 	}
 }
 
+// Keys of the same size, as generated keys and tokens often are, have
+// placeholders that differ only in the key they name. A placeholder moved,
+// copied or swapped onto another key of that size must still be refused. If it
+// were put back as that key's own, the other key's old value would be applied
+// in place of the one the user meant, the edit would report success, and where
+// kubetui alone owns the source key, server-side apply would delete it.
+func TestRestore_EqualSizeKeys(t *testing.T) {
+	cur, next := strings.Repeat("C", 32), strings.Repeat("N", 32)
+	s := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "keys", Namespace: "demo", ResourceVersion: "41"},
+		Data:       map[string][]byte{"current": []byte(cur), "next": []byte(next)},
+	}
+	const (
+		curLine  = "  current: '<redacted: 32 bytes of current>'\n"
+		nextLine = "  next: '<redacted: 32 bytes of next>'\n"
+	)
+	if text, _, _ := EditYAML(s); !strings.Contains(text, curLine) || !strings.Contains(text, nextLine) {
+		t.Fatalf("fixture lines not in the buffer:\n%s", text)
+	}
+
+	_, out, err := editAndRestore(t, s, func(buf string) string {
+		return strings.Replace(buf, "  name: keys\n", "  labels:\n    a: b\n  name: keys\n", 1)
+	})
+	if err != nil {
+		t.Fatalf("label edit: %v", err)
+	}
+	if data, _ := decode(t, out)["data"].(map[string]any); data["current"] != b64(cur) || data["next"] != b64(next) {
+		t.Errorf("label edit: data = %v, want both originals", data)
+	}
+
+	for name, c := range map[string]struct {
+		edit    func(string) string
+		wantErr string
+	}{
+		// Rotation: drop current, and rename next to take its place.
+		"next renamed onto current": {
+			edit: func(buf string) string {
+				buf = strings.Replace(buf, curLine, "", 1)
+				return strings.Replace(buf, "  next:", "  current:", 1)
+			},
+			wantErr: "data.current has a placeholder that is not its own",
+		},
+		"the two swapped": {
+			edit: func(buf string) string {
+				buf = strings.Replace(buf, curLine, "  current: '<redacted: 32 bytes of next>'\n", 1)
+				return strings.Replace(buf, nextLine, "  next: '<redacted: 32 bytes of current>'\n", 1)
+			},
+			wantErr: "data.current has a placeholder that is not its own",
+		},
+		"current copied over next": {
+			edit: func(buf string) string {
+				return strings.Replace(buf, nextLine, "  next: '<redacted: 32 bytes of current>'\n", 1)
+			},
+			wantErr: "data.next has a placeholder that is not its own",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, out, err := editAndRestore(t, s, c.edit)
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("Restore error = %v, want %q; body %s", err, c.wantErr, out)
+			}
+			if out != nil {
+				t.Errorf("Restore returned a body to apply alongside its error: %s", out)
+			}
+		})
+	}
+}
+
 func TestRestore_SecretWithoutData(t *testing.T) {
 	for name, data := range map[string]map[string][]byte{"nil data": nil, "empty data": {}} {
 		t.Run(name, func(t *testing.T) {
@@ -437,7 +523,7 @@ func TestRestore_SecretWithoutData(t *testing.T) {
 				t.Errorf("label edit: err=%v, changed=%v, want it sent as typed", err, !bytes.Equal(in, out))
 			}
 			_, _, err = editAndRestore(t, s, func(t string) string {
-				return t + "data:\n  k: '<redacted: 0 bytes>'\n"
+				return t + "data:\n  k: '<redacted: 0 bytes of k>'\n"
 			})
 			if err == nil || !strings.Contains(err.Error(), "data.k is still redacted") {
 				t.Errorf("placeholder on a Secret that had no data: err=%v", err)

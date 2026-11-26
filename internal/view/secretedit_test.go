@@ -110,7 +110,7 @@ func TestEditSecretKeepsValuesOffDiskAndRestoresThem(t *testing.T) {
 	if strings.Contains(string(onDisk), "hunter2") || strings.Contains(string(onDisk), base64.StdEncoding.EncodeToString([]byte("hunter2"))) {
 		t.Fatalf("the Secret's value was written to the editor's temp file:\n%s", onDisk)
 	}
-	if !strings.Contains(string(onDisk), "password: '<redacted: 7 bytes>'") {
+	if !strings.Contains(string(onDisk), "password: '<redacted: 7 bytes of password>'") {
 		t.Fatalf("temp file lacks the readable placeholder:\n%s", onDisk)
 	}
 
