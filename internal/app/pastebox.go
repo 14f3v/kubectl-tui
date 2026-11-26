@@ -203,7 +203,9 @@ func (m *Model) savePasteBox() (tea.Model, tea.Cmd) {
 		b.review = true
 		return m, nil
 	case b.existing != "":
-		// Named after the file, which is how its row was labelled until now.
+		// Named after the file's stem ("team" for team.yaml), which is the
+		// label clusters.Build gave its unreviewed row, so approving it does
+		// not rename the row.
 		b.saving = true
 		name := strings.TrimSuffix(b.existing, filepath.Ext(b.existing))
 		return m, recordPasteCmd(m.store, b.existing, name, b.report, b.selected())

@@ -505,7 +505,9 @@ func TestPasteBoxSaveConnects(t *testing.T) {
 }
 
 // A pasted file with no state record shows the same review, then is recorded
-// as it is, under the name its row had, with no name prompt.
+// as it is, under the name its row had, with no name prompt. Its rows keep
+// their labels: the recorded Name is the file's stem ("team"), the label
+// clusters.Build gives an unreviewed file, not its base name ("team.yaml").
 func TestPasteBoxReviewsSavedFile(t *testing.T) {
 	fast := fastServer(t)
 	s := savedStore(t, "")
@@ -515,13 +517,17 @@ func TestPasteBoxReviewsSavedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var row clusters.Row
-	for _, r := range loadedRows(t, loadClustersCmd(s)).Rows {
+	before := loadedRows(t, loadClustersCmd(s)).Rows
+	for _, r := range before {
 		if r.Ref.Context == "dev" {
 			row = r
 		}
 	}
 	if !row.NeedsReview {
 		t.Fatalf("row %+v, want an unreviewed dev", row)
+	}
+	if want := []string{"team / dev", "team / dev-sso"}; !slices.Equal(pastedLabels(before), want) {
+		t.Fatalf("unreviewed labels = %v, want %v", pastedLabels(before), want)
 	}
 	m := New(Config{Sink: func(tea.Msg) {}, StartKind: "portforwards", Store: s})
 	t.Cleanup(func() {
@@ -580,11 +586,27 @@ func TestPasteBoxReviewsSavedFile(t *testing.T) {
 	if m.connecting == nil || *m.connecting != row.Ref {
 		t.Errorf("connecting = %v, want %+v", m.connecting, row.Ref)
 	}
-	for _, r := range loadedRows(t, loadClustersCmd(s)).Rows {
+	after := loadedRows(t, loadClustersCmd(s)).Rows
+	for _, r := range after {
 		if r.NeedsReview {
 			t.Errorf("%s still needs review", r.Label)
 		}
 	}
+	if got, want := pastedLabels(after), pastedLabels(before); !slices.Equal(got, want) {
+		t.Errorf("approving renamed the rows: labels %v, want %v as before", got, want)
+	}
+}
+
+// pastedLabels returns the sorted labels of the pasted rows.
+func pastedLabels(rows []clusters.Row) []string {
+	var out []string
+	for _, r := range rows {
+		if r.Source == k8s.SourcePasted {
+			out = append(out, r.Label)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 func TestOpenPasteBoxWithoutStore(t *testing.T) {
