@@ -375,7 +375,7 @@ favorites:              # namespaces on digit keys 1-9
 
 Kubeconfigs you paste into kubetui are stored in **`clusters/`** next to the config file (`~/.config/kubetui/clusters/`, or `$XDG_CONFIG_HOME/kubetui/clusters/`). The folder is private to you (mode `0700`, files `0600` on Unix) and holds a `.gitignore` of `*` so a dotfiles repo never picks the credentials up. kubetui never writes `~/.kube/config`, your `$KUBECONFIG` files or a `--kubeconfig` file.
 
-Beside `clusters/`, **`state.yaml`** lists the clusters kubetui knows and, for each, when you last used it and the view and namespace you were on. It holds names, paths, positions and the login commands you approved for a pasted kubeconfig, never credentials. A missing one is fine, and a malformed one is moved aside to `state.yaml.bad`.
+Beside `clusters/`, **`state.yaml`** lists the clusters kubetui knows and, for each, when you last used it and the view and namespace you were on. It holds names, paths, positions and the login commands you approved for a pasted kubeconfig, never credentials. A missing one is fine, and a malformed one is moved aside to `state.yaml.bad`. If it can't be written (a read-only or full config folder), kubetui says so once while it runs, tries again on exit and prints the error there if that fails too.
 
 ### Read-only mode
 

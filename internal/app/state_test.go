@@ -2,6 +2,9 @@ package app
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -344,5 +347,90 @@ func TestNoStoreNoWrites(t *testing.T) {
 	}
 	if err := m.FlushState(); err != nil {
 		t.Errorf("FlushState with no store: %v", err)
+	}
+}
+
+// writeOf returns the message the write cmd answers, failing unless it ran.
+func writeOf(t *testing.T, m *Model, tick tea.Cmd) tea.Msg {
+	t.Helper()
+	ticks := saveTicks(t, tick)
+	if len(ticks) != 1 {
+		t.Fatalf("%d debounce ticks, want 1", len(ticks))
+	}
+	_, write := m.Update(ticks[0])
+	if write == nil {
+		t.Fatal("the debounce tick did not write")
+	}
+	return write()
+}
+
+// A state.yaml that cannot be written says so once, not on every view change,
+// and the position stays pending: the exit flush tries it again and returns
+// the error for main to print.
+func TestFailedSaveToastsOnceAndFlushRetries(t *testing.T) {
+	s := savedStore(t, "")
+	m, ref := stateModel(t, s, Config{})
+	deliver(t, m, m.Init()) // the connect's own write is left unrun
+	// A folder where state.yaml should be makes every read and write fail.
+	blocked := filepath.Join(s.Dir(), "state.yaml")
+	if err := os.MkdirAll(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, tick := m.navigate("deployments", "payments")
+	failed, ok := writeOf(t, m, tick).(stateSaveFailed)
+	if !ok || failed.err == nil {
+		t.Fatalf("a failed write answered %#v, want stateSaveFailed", failed)
+	}
+	m.Update(failed)
+	if m.toast == nil || !strings.Contains(m.toast.Text, "state.yaml") {
+		t.Fatalf("toast = %+v, want one saying state.yaml was not saved", m.toast)
+	}
+	if !m.unsaved {
+		t.Fatal("the failed position is no longer pending; the exit flush would skip it")
+	}
+
+	m.toast = nil
+	_, tick = m.navigate("services", "web")
+	m.Update(writeOf(t, m, tick))
+	if m.toast != nil {
+		t.Errorf("a second failed write toasted again: %q", m.toast.Text)
+	}
+
+	// A failure for a cluster since left behind leaves the pending state of
+	// the one on screen alone.
+	m.unsaved = false
+	m.Update(stateSaveFailed{key: clusters.KeyFor(ref("b"), ""), err: failed.err})
+	if m.unsaved {
+		t.Error("a failure for another cluster marked this one's position pending")
+	}
+	m.unsaved = true
+
+	if err := m.FlushState(); err == nil {
+		t.Fatal("FlushState returned nil although state.yaml cannot be written")
+	}
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.FlushState(); err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := entryOf(t, s, ref("a")); !ok || e.Kind != "services" || e.Namespace != "web" {
+		t.Errorf("entry = %+v (found %v), want the retried services in web", e, ok)
+	}
+}
+
+// A connect writes the cluster left behind and then the new one; a failure
+// names the last key that failed, the new cluster's when both do.
+func TestSaveCmdReportsLastFailure(t *testing.T) {
+	s := savedStore(t, "")
+	if err := os.MkdirAll(filepath.Join(s.Dir(), "state.yaml"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	left := position{key: clusters.Key{Source: k8s.SourceFile, Path: "/x", Context: "a"}}
+	now := position{key: clusters.Key{Source: k8s.SourceFile, Path: "/x", Context: "b"}}
+	got, ok := saveCmd(s, left, now)().(stateSaveFailed)
+	if !ok || got.key != now.key || got.err == nil {
+		t.Fatalf("saveCmd answered %+v, want a failure for %+v", got, now.key)
 	}
 }

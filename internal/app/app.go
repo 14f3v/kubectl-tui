@@ -108,10 +108,15 @@ type Model struct {
 	// with every view or namespace change; unsaved says it has not been written
 	// since. It is written saveDelay after the last change (saveToken
 	// debounces, like toastToken), at once when a connect replaces the
-	// cluster, and by FlushState on exit.
+	// cluster, and by FlushState on exit. A failed write of the cluster on
+	// screen marks it unsaved again, so the next change, a switch or the exit
+	// flush tries it again.
 	at        position
 	unsaved   bool
 	saveToken int
+	// saveFailShown is set once a failed state.yaml write has been toasted:
+	// every view change retries it, and one toast per run is enough.
+	saveFailShown bool
 	// startKindUsed is set once the first connect has opened its page: an
 	// explicit -kind applies to that one only.
 	startKindUsed bool
@@ -363,6 +368,9 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		}
 		m.unsaved = false
 		return m, saveCmd(m.store, m.at)
+
+	case stateSaveFailed:
+		return m.onSaveFailed(t)
 
 	case msg.Navigate:
 		return m.navigate(t.Kind, t.Namespace)
@@ -795,6 +803,13 @@ const saveDelay = 500 * time.Millisecond
 // latest change, the one whose token is current, writes.
 type stateSaveMsg struct{ token int }
 
+// stateSaveFailed reports a write of saveCmd that failed: the last one, which
+// is the cluster on screen's when that one failed.
+type stateSaveFailed struct {
+	key clusters.Key
+	err error
+}
+
 // recordPosition notes kind (canonical) and namespace ns as where the user is
 // in the current cluster and returns the debounce tick that writes it. With no
 // store the position is still kept in memory, which a reconnect returns to,
@@ -810,15 +825,35 @@ func (m *Model) recordPosition(kind, ns string) tea.Cmd {
 	return tea.Tick(saveDelay, func(time.Time) tea.Msg { return stateSaveMsg{token: tok} })
 }
 
-// FlushState writes the position recorded since the last write. main calls it
-// once the program has stopped, so a quit inside the debounce still saves
-// where the user was.
+// FlushState writes the position recorded since the last write, or whose
+// write failed. main calls it once the program has stopped, so a quit inside
+// the debounce still saves where the user was, and prints the error when
+// state.yaml still cannot be written.
 func (m *Model) FlushState() error {
 	if m.store == nil || !m.unsaved {
 		return nil
 	}
+	if err := writePosition(m.store, m.at); err != nil {
+		return err
+	}
 	m.unsaved = false
-	return writePosition(m.store, m.at)
+	return nil
+}
+
+// onSaveFailed handles a state.yaml write that failed. The first failure of the
+// run is toasted; later ones would repeat it on every view change. When the
+// failed write was the cluster on screen's, its position is pending again, so
+// FlushState retries it at exit and reports the error if it fails there too.
+// A failure for a cluster since left behind has nothing left to retry.
+func (m *Model) onSaveFailed(t stateSaveFailed) (tea.Model, tea.Cmd) {
+	if t.key == m.at.key {
+		m.unsaved = true
+	}
+	if m.saveFailShown {
+		return m, nil
+	}
+	m.saveFailShown = true
+	return m.showToast(msg.Toast{Text: "saving state.yaml: " + t.err.Error(), Level: msg.LevelWarn})
 }
 
 // remembered is the record to restore the cluster key names from: the entry
@@ -859,15 +894,18 @@ func (m *Model) startPosition(e *clusters.Entry) (kind, ns string) {
 	return kind, ns
 }
 
-// saveCmd writes positions to state.yaml off the UI thread, in order. A failed
-// write is dropped: the position is a convenience, and a toast for it on every
-// view change would be noise. The next write tries again.
+// saveCmd writes positions to state.yaml off the UI thread, in order. Each is
+// tried even when an earlier one failed. It answers stateSaveFailed for the
+// last that failed, or nothing when all were written.
 func saveCmd(s *clusters.Store, ps ...position) tea.Cmd {
 	return func() tea.Msg {
+		var failed tea.Msg
 		for _, p := range ps {
-			_ = writePosition(s, p)
+			if err := writePosition(s, p); err != nil {
+				failed = stateSaveFailed{key: p.key, err: err}
+			}
 		}
-		return nil
+		return failed
 	}
 }
 
