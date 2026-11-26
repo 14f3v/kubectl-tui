@@ -1,9 +1,9 @@
 // Package app is the root Bubble Tea model. It owns the terminal (alt-screen,
-// mouse, title), the page stack, the command line and overlays, the global
-// keymap, and panic recovery. It routes every message: key input goes to the
-// command line or the active page; engine snapshots and action results flow to
-// the page or the chrome. All IO happens in commands or engine goroutines, never
-// in Update.
+// title), the page stack, the command line and overlays, the global keymap, and
+// panic recovery. It routes every message: key and paste input go to the command
+// line or the active page; engine snapshots and action results flow to the page
+// or the chrome. All IO happens in commands or engine goroutines, never in
+// Update.
 package app
 
 import (
@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -99,13 +101,15 @@ type confirmState struct {
 
 // promptState holds an active modal text-input dialog (e.g. scale replicas). buf
 // is the live input; errMsg shows the last validation failure until resolved.
+// prefilled is true while buf still holds the request's Initial value untouched.
 type promptState struct {
-	title    string
-	label    string
-	buf      string
-	errMsg   string
-	validate func(string) error
-	action   func(string) tea.Msg
+	title     string
+	label     string
+	buf       string
+	prefilled bool
+	errMsg    string
+	validate  func(string) error
+	action    func(string) tea.Msg
 }
 
 // New builds the root model.
@@ -158,6 +162,9 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(t)
 
+	case tea.PasteMsg:
+		return m.handlePaste(t)
+
 	case msg.SessionReady:
 		return m.onSessionReady(t)
 
@@ -189,7 +196,7 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		return m, nil
 
 	case view.PromptRequest:
-		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, validate: t.Validate, action: t.Action}
+		m.prompt = &promptState{title: t.Title, label: t.Label, buf: t.Initial, prefilled: t.Initial != "", validate: t.Validate, action: t.Action}
 		return m, nil
 
 	case view.SwitchContextRequest:
@@ -596,21 +603,88 @@ func (m *Model) handlePromptKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			r := []rune(m.prompt.buf)
 			m.prompt.buf = string(r[:len(r)-1])
 		}
+		m.prompt.prefilled = false
 		m.prompt.errMsg = ""
 		return m, nil
 	case "ctrl+u":
 		m.prompt.buf = ""
+		m.prompt.prefilled = false
 		m.prompt.errMsg = ""
 		return m, nil
 	default:
 		// k.Text carries the printable character(s), including " " for space, so a
 		// prompt can accept spaces (e.g. cp's "localPath remotePath").
-		if k.Text != "" {
-			m.prompt.buf += k.Text
-			m.prompt.errMsg = ""
-		}
+		m.promptInsert(k.Text)
 		return m, nil
 	}
+}
+
+// promptInsert appends typed or pasted text to the prompt buffer. Any edit clears
+// the last validation error, since it no longer describes what is in the field.
+func (m *Model) promptInsert(s string) {
+	if s == "" {
+		return
+	}
+	m.prompt.buf += s
+	m.prompt.prefilled = false
+	m.prompt.errMsg = ""
+}
+
+// promptPaste is promptInsert for a paste, except that a paste replaces a value
+// the prompt opened with and nobody has touched yet. Every prefilled value is a
+// whole answer (a log path, an image, a replica count), so a pasted one belongs
+// in its place: appended, Explorer's "Copy as path" would turn the log-save
+// default into `%TEMP%\web.log"C:\Users\me\web.log"`.
+func (m *Model) promptPaste(s string) {
+	if s != "" && m.prompt.prefilled {
+		m.prompt.buf = ""
+	}
+	m.promptInsert(s)
+}
+
+// handlePaste delivers a bracketed paste. Bubble Tea turns bracketed paste on by
+// default, so text pasted into the terminal (Ctrl+V, Cmd+V, right-click) arrives
+// as one PasteMsg rather than as key presses, and the key handlers never see it.
+// It goes to whichever text input is open, exactly as if it had been typed. With
+// none open it is gated like a key: it cannot answer a confirm dialog, and it
+// does not reach a page that is hidden behind help or an error banner.
+func (m *Model) handlePaste(p tea.PasteMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case m.panicInfo != "" || m.fatal != nil:
+		return m, nil
+	case m.prompt != nil:
+		m.promptPaste(singleLine(p.Content))
+		return m, nil
+	case m.confirm != nil:
+		return m, nil
+	case m.mode != modeNone:
+		m.inputInsert(singleLine(p.Content))
+		return m, nil
+	case m.showHelp || m.bannerUp():
+		return m, nil
+	default:
+		return m, m.routeToPage(p)
+	}
+}
+
+// singleLine flattens pasted text for a one-line input. Every line break becomes
+// one space — CRLF, a lone CR and a lone LF alike, because terminals differ in
+// which they send — so a pasted newline can never act as enter and submit a
+// half-written prompt or command. Tabs become a space too, and other control
+// characters are dropped, which defuses an escape sequence in the clipboard
+// instead of writing it to the terminal when the buffer is drawn. Quotes are left
+// alone: the path prompts strip them on submit, and elsewhere they are just text.
+func singleLine(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\r' || r == '\n' || r == '\t':
+			return ' '
+		case unicode.IsControl(r):
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // recomputeSuggest refreshes the filter suggestion list for the current buffer's
@@ -721,9 +795,11 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Filter is already applied live; enter just commits it.
 		return m, nil
 	case "backspace":
-		if len(m.inputBuf) > 0 {
-			m.inputBuf = m.inputBuf[:len(m.inputBuf)-1]
-		}
+		// Drop the last rune, not the last byte: a non-ASCII character (typed on a
+		// non-US layout or pasted) is several bytes, and cutting one would leave
+		// invalid UTF-8 in the buffer and the filter.
+		_, size := utf8.DecodeLastRuneInString(m.inputBuf)
+		m.inputBuf = m.inputBuf[:len(m.inputBuf)-size]
 		m.cmdSel = 0
 		if m.mode == modeFilter {
 			if p := m.active(); p != nil {
@@ -737,17 +813,25 @@ func (m *Model) handleInputKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// non-text keys like arrows). Using it rather than String() — which renders
 		// space as "space" — lets the command/filter line accept spaces, which
 		// multi-term filters and "kind namespace" commands need.
-		if k.Text != "" {
-			m.inputBuf += k.Text
-			m.cmdSel = 0
-			if m.mode == modeFilter {
-				if p := m.active(); p != nil {
-					p.SetFilter(m.inputBuf)
-				}
-				m.recomputeSuggest()
-			}
-		}
+		m.inputInsert(k.Text)
 		return m, nil
+	}
+}
+
+// inputInsert appends typed or pasted text to the command line. The palette
+// selection resets because the match list changed under it, and in filter mode
+// the filter is re-applied live and its suggestions recomputed.
+func (m *Model) inputInsert(s string) {
+	if s == "" {
+		return
+	}
+	m.inputBuf += s
+	m.cmdSel = 0
+	if m.mode == modeFilter {
+		if p := m.active(); p != nil {
+			p.SetFilter(m.inputBuf)
+		}
+		m.recomputeSuggest()
 	}
 }
 
@@ -877,12 +961,14 @@ func (m *Model) applyCommand() (tea.Model, tea.Cmd) {
 	if p := m.active(); p != nil {
 		ns = p.Namespace()
 	}
-	path, _, err := editor.WriteTemp(applyTemplate(ns))
+	path, sum, err := editor.WriteTemp(applyTemplate(ns))
 	if err != nil {
 		return m, toastCmd("apply: "+err.Error(), msg.LevelError)
 	}
+	opened := time.Now() // the editor starts within a frame of this
 	sess, theme, ro := m.sess, m.theme, m.cfg.Config.ReadOnly
 	after := func(execErr error) tea.Msg {
+		elapsed := time.Since(opened)
 		defer os.Remove(path)
 		if execErr != nil {
 			return msg.Toast{Text: "editor: " + execErr.Error(), Level: msg.LevelError}
@@ -890,6 +976,11 @@ func (m *Model) applyCommand() (tea.Model, tea.Cmd) {
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
 			return msg.Toast{Text: "apply: " + rerr.Error(), Level: msg.LevelError}
+		}
+		// The template back untouched within a second means the editor never
+		// waited for the user; say so rather than "no changes to apply".
+		if hint := editor.QuickExitHint(elapsed); hint != "" && editor.Unchanged(data, sum) {
+			return msg.Toast{Text: hint, Level: msg.LevelWarn}
 		}
 		// Preview the change with a read-only dry-run before applying: compute the
 		// diff and open the preview page, where `a` confirms the apply. If nothing

@@ -1,14 +1,17 @@
 // Package editor implements the edit action: dump an object to a temp YAML file,
 // hand it to $EDITOR, and apply the result with server-side apply — unless the
-// file is byte-identical to what was opened, in which case it is a no-op.
+// file is unchanged from what was opened (line endings aside), in which case it
+// is a no-op.
 package editor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"os"
 	"os/exec"
-	"strings"
+	"runtime"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -18,7 +21,7 @@ import (
 )
 
 // WriteTemp writes content to a temp .yaml file and returns its path and the
-// SHA-256 of the original content (for the unchanged-file no-op check).
+// digest of the original content, for Unchanged.
 func WriteTemp(content string) (path string, sum [32]byte, err error) {
 	f, err := os.CreateTemp("", "kubetui-*.yaml")
 	if err != nil {
@@ -33,23 +36,72 @@ func WriteTemp(content string) (path string, sum [32]byte, err error) {
 		os.Remove(f.Name())
 		return "", [32]byte{}, err
 	}
-	return f.Name(), sha256.Sum256([]byte(content)), nil
+	return f.Name(), digest([]byte(content)), nil
 }
 
-// Process builds the $EDITOR command for a file. It honors KUBE_EDITOR, then
-// EDITOR, falling back to vi, and splits a multi-word editor into program+args.
-// Bubble Tea wires stdin/stdout/stderr, so they are left unset here.
+// Unchanged reports whether data, read back from the temp file, is still the
+// content WriteTemp wrote (sum) — line endings aside. An editor that saves with
+// CRLF, because it is set to or an .editorconfig asks it to, rewrites every line
+// without the user touching one. The YAML parser reads CRLF and LF alike, so
+// that is no change, not a server-side apply that sends the same object back
+// and claims every field in it for kubetui.
+func Unchanged(data []byte, sum [32]byte) bool {
+	return digest(data) == sum
+}
+
+// digest is the SHA-256 behind Unchanged, taken with a leading UTF-8 BOM dropped
+// and CRLF folded to LF. Notepad before Windows 10 1903 could save UTF-8 with a
+// BOM, and the YAML parser skips one, so neither is an edit.
+func digest(b []byte) [32]byte {
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
+	return sha256.Sum256(bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n")))
+}
+
+// Process builds the $EDITOR command for a file: the editor command picks from
+// KUBE_EDITOR, EDITOR or the platform default, split into program and arguments
+// with quotes honored, and the file as its last argument. Bubble Tea wires
+// stdin/stdout/stderr, so they are left unset here.
 func Process(path string) *exec.Cmd {
-	ed := os.Getenv("KUBE_EDITOR")
-	if ed == "" {
-		ed = os.Getenv("EDITOR")
+	argv := command(os.Getenv, runtime.GOOS, isAbsProgram)
+	return exec.Command(argv[0], append(argv[1:], path)...)
+}
+
+// quickExit is how soon an editor must hand back an untouched file for kubetui to
+// conclude it never waited for the user. The clock starts before Bubble Tea
+// releases the terminal (up to 500ms on Windows) and code.cmd's hand-off to a
+// running window takes about as long again, so a second is too tight.
+const quickExit = 2 * time.Second
+
+// QuickExitHint is the toast for an editor that handed the file back untouched
+// within quickExit of getting it, or "" if it took longer. Nobody reviews an
+// object and quits that fast. What happens instead is a GUI editor passing the
+// file to a window it already has open and exiting at once: code without --wait,
+// subl without -w, Notepad++ without -multiInst. kubetui then reads the file back
+// and removes it before the user has typed anything, and a bare "no changes"
+// would hide why the edit went nowhere. A fast :q! in vi earns the hint too,
+// which costs nothing.
+//
+// The example names KUBE_EDITOR because it wins over EDITOR, so it works
+// whichever variable holds the editor that did not wait. The toast is a single
+// footer line cut to the terminal width, so the hint stays short enough to fit
+// 80 columns whole; past that, the example is the part that gets cut.
+func QuickExitHint(elapsed time.Duration) string {
+	return quickExitHint(elapsed, runtime.GOOS)
+}
+
+// quickExitHint is QuickExitHint for a given GOOS. The example is in the syntax of
+// the shell the user is likely in, so it works when copied: cmd's
+// `set KUBE_EDITOR="code --wait"` keeps the quotes in the value, which then
+// splits to the single word `code --wait`, and PowerShell rejects it outright.
+func quickExitHint(elapsed time.Duration, goos string) string {
+	if elapsed >= quickExit {
+		return ""
 	}
-	if ed == "" {
-		ed = "vi"
+	example := `KUBE_EDITOR="code --wait"`
+	if goos == "windows" {
+		example = `$env:KUBE_EDITOR='code --wait'`
 	}
-	parts := strings.Fields(ed)
-	args := append(parts[1:], path)
-	return exec.Command(parts[0], args...)
+	return "editor exited at once — use a wait flag, e.g. " + example
 }
 
 // Apply reads the edited file, and if it differs from the original applies it
@@ -60,7 +112,7 @@ func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionRe
 	if err != nil {
 		return false, err
 	}
-	if sha256.Sum256(data) == origSum {
+	if Unchanged(data, origSum) {
 		return false, nil // unchanged — no-op
 	}
 	jsonBytes, err := yaml.YAMLToJSON(data)

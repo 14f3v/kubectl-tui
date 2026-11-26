@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -735,10 +736,12 @@ func (p *resourcePage) editAction() tea.Cmd {
 	if err != nil {
 		return toast("edit: "+err.Error(), msg.LevelError)
 	}
+	opened := time.Now() // the editor starts within a frame of this
 
 	sess := p.sess.Session
 	ns, name := row.Namespace, row.Name
 	after := func(execErr error) tea.Msg {
+		elapsed := time.Since(opened)
 		defer os.Remove(path)
 		if execErr != nil {
 			return msg.Toast{Text: "editor: " + execErr.Error(), Level: msg.LevelError}
@@ -748,6 +751,9 @@ func (p *resourcePage) editAction() tea.Cmd {
 		case aerr != nil:
 			return msg.Toast{Text: "apply " + name + ": " + aerr.Error(), Level: msg.LevelError}
 		case !changed:
+			if hint := editor.QuickExitHint(elapsed); hint != "" {
+				return msg.Toast{Text: hint, Level: msg.LevelWarn}
+			}
 			return msg.Toast{Text: "no changes", Level: msg.LevelInfo}
 		default:
 			return msg.Toast{Text: name + " applied", Level: msg.LevelSuccess}

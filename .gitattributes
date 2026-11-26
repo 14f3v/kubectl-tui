@@ -1,0 +1,6 @@
+# Check out text files with LF on every platform. Git for Windows defaults to
+# core.autocrlf=true (so do GitHub's Windows runners), which would hand Windows
+# clones CRLF files; gofmt -l then reports every .go file as unformatted, and the
+# windows-latest CI job would test different bytes than Linux and macOS. Binary
+# files (the screenshots) are detected by text=auto and left alone.
+* text=auto eol=lf

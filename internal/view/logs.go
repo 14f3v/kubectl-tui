@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"hash/fnv"
 	"image/color"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -13,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/14f3v/kubectl-tui/internal/action/cp"
 	"github.com/14f3v/kubectl-tui/internal/action/logstream"
 	"github.com/14f3v/kubectl-tui/internal/k8s"
 	"github.com/14f3v/kubectl-tui/internal/msg"
@@ -312,20 +316,46 @@ func (p *logsPage) saveAction() tea.Cmd {
 	if name == "" {
 		name = "logs"
 	}
-	def := "/tmp/" + name + ".log"
+	def := defaultLogPath(name, runtime.GOOS, os.TempDir())
 	return func() tea.Msg {
 		return PromptRequest{
 			Title:   "Save logs",
 			Label:   "Path",
 			Initial: def,
 			Action: func(path string) tea.Msg {
-				if err := logstream.SaveLines(strings.TrimSpace(path), lines); err != nil {
+				path = unquotePath(path)
+				if err := logstream.SaveLines(path, lines); err != nil {
 					return msg.Toast{Text: "save: " + err.Error(), Level: msg.LevelError}
 				}
-				return msg.Toast{Text: fmt.Sprintf("saved %d lines to %s", len(lines), strings.TrimSpace(path)), Level: msg.LevelSuccess}
+				return msg.Toast{Text: fmt.Sprintf("saved %d lines to %s", len(lines), path), Level: msg.LevelSuccess}
 			},
 		}
 	}
+}
+
+// defaultLogPath is the save prompt's suggested path for name (a pod, or "logs"
+// for a grouped page). Unix keeps the short, familiar /tmp. Windows has no /tmp:
+// Go resolves "/tmp/x.log" against the root of the current drive, where that
+// folder normally does not exist, so pressing enter on the suggestion failed. It
+// uses the user's temp folder (tempDir, os.TempDir) instead, and makes the name
+// valid there, since a pod named "con" or "nul" would otherwise name a device.
+func defaultLogPath(name, goos, tempDir string) string {
+	if goos != "windows" {
+		return "/tmp/" + name + ".log"
+	}
+	return filepath.Join(tempDir, cp.WindowsFileName(name+".log"))
+}
+
+// unquotePath trims a typed path and removes one pair of double quotes around
+// it, the form Explorer's "Copy as path" produces ("C:\Users\me\web.log").
+// Left in, the quotes are part of the name, and '"' is not a legal character in
+// a Windows file name.
+func unquotePath(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+	}
+	return s
 }
 
 // tailPrompt asks for a tail-line count and restarts the stream via a msg (the

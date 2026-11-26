@@ -86,9 +86,9 @@ func (s *Session) Contexts() (names []string, current string) {
 // engine factories. It does not start any informer; pages start kinds lazily.
 //
 // Config resolution, in precedence order: an explicit kubeconfigPath (empty to
-// skip) wins; otherwise the KUBECONFIG environment variable (colon-separated
-// files are merged); otherwise ~/.kube/config. contextName overrides the
-// current-context when non-empty.
+// skip) wins; otherwise the KUBECONFIG environment variable (a list of files,
+// merged; ':'-separated on unix, ';' on Windows); otherwise ~/.kube/config.
+// contextName overrides the current-context when non-empty.
 // readOnly wraps every client's transport so mutating requests are refused
 // before they leave the process; see readonly.go for why the boundary lives
 // there rather than in the pages.

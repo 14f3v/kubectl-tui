@@ -15,10 +15,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -95,15 +97,35 @@ func splitPodRef(ref string) (namespace, pod string) {
 	return "", ref
 }
 
+// Result reports what a copy did beyond succeeding, so the caller can say so when
+// the files on disk are not a byte-for-byte mirror of the source.
+type Result struct {
+	// Skipped lists, relative to the uploaded directory, the entries an upload
+	// left out because they are not regular files: symlinks, sockets, devices,
+	// and placeholders that could not be read.
+	Skipped []string
+
+	// Renamed counts downloaded files written under a different name because
+	// theirs is not valid on Windows (see WindowsFileName).
+	Renamed int
+	// Overwritten lists the archive names of downloaded files that replaced an
+	// earlier, different entry because Windows sees the two as one file: their
+	// names differ only in case ("Makefile", "makefile") or became equal when
+	// renamed ("a:b", "a_b"). Only the later one is on disk.
+	Overwritten []string
+}
+
 // CopyToPod uploads a local file or directory tree to dstRemote inside the
 // container. It builds a tar archive whose top-level entry name is the basename of
 // dstRemote, then unpacks it with `tar -xmf - -C <dir(dstRemote)>` so the content
 // lands exactly at dstRemote. An empty container targets the pod's first container
-// (resolved server-side). It blocks until the transfer completes.
-func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, ns, pod, container, srcLocal, dstRemote string) error {
+// (resolved server-side). It blocks until the transfer completes. Entries of a
+// directory that are not regular files are left out and listed in Result.Skipped.
+func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, ns, pod, container, srcLocal, dstRemote string) (Result, error) {
+	var res Result
 	info, err := os.Stat(srcLocal)
 	if err != nil {
-		return fmt.Errorf("cannot read local source %q: %w", srcLocal, err)
+		return res, fmt.Errorf("cannot read local source %q: %w", srcLocal, err)
 	}
 
 	// The archive is named by the destination's basename and extracted into the
@@ -115,23 +137,23 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	if info.IsDir() {
-		if err := writeTarDir(tw, srcLocal, destBase); err != nil {
+		if res.Skipped, err = writeTarDir(tw, srcLocal, destBase, runtime.GOOS); err != nil {
 			tw.Close()
-			return err
+			return res, err
 		}
 	} else {
 		data, rerr := os.ReadFile(srcLocal)
 		if rerr != nil {
 			tw.Close()
-			return fmt.Errorf("cannot read %q: %w", srcLocal, rerr)
+			return res, fmt.Errorf("cannot read %q: %w", srcLocal, rerr)
 		}
-		if werr := writeTarFile(tw, destBase, int64(info.Mode().Perm()), data); werr != nil {
+		if werr := writeTarFile(tw, destBase, uploadMode(info.Mode(), data, runtime.GOOS), data); werr != nil {
 			tw.Close()
-			return werr
+			return res, werr
 		}
 	}
 	if err := tw.Close(); err != nil {
-		return fmt.Errorf("finalize tar: %w", err)
+		return res, fmt.Errorf("finalize tar: %w", err)
 	}
 
 	cmd := []string{"tar", "-xmf", "-", "-C", destDir}
@@ -142,22 +164,25 @@ func CopyToPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, n
 		Stderr: &stderr,
 	})
 	if err != nil {
-		return wrapTarErr("upload", err, stderr.String())
+		return res, wrapTarErr("upload", err, stderr.String())
 	}
-	return nil
+	return res, nil
 }
 
 // CopyFromPod downloads srcRemote from the container into dstLocal. It runs
 // `tar -cf - -C <dir(srcRemote)> <base(srcRemote)>` in the pod, reads the tar off
-// stdout, and extracts it under dstLocal. When dstLocal is an existing directory
-// the entries are written beneath it using their in-archive names; otherwise a
-// single-file archive is written directly to dstLocal. An empty container targets
-// the pod's first container. It blocks until the transfer completes.
-func CopyFromPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, ns, pod, container, srcRemote, dstLocal string) error {
+// stdout, and extracts it according to dstLocal: into an existing directory the
+// copy lands beneath it under its own name; a file is written to dstLocal itself;
+// and a directory copied to a path that does not exist yet becomes that path (see
+// extractTar). An empty container targets the pod's first container. It blocks
+// until the transfer completes.
+func CopyFromPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface, ns, pod, container, srcRemote, dstLocal string) (Result, error) {
 	srcDir := toSlashDir(srcRemote)
 	srcBase := path.Base(filepath.ToSlash(strings.TrimRight(srcRemote, "/")))
-	if srcBase == "" || srcBase == "." || srcBase == "/" {
-		return fmt.Errorf("remote source %q has no file name to copy", srcRemote)
+	// ".." would make tar emit names that climb out of srcDir, which no archive
+	// entry can be matched against; it names no file to copy any more than "." does.
+	if srcBase == "" || srcBase == "." || srcBase == ".." || srcBase == "/" {
+		return Result{}, fmt.Errorf("remote source %q has no file name to copy", srcRemote)
 	}
 
 	cmd := []string{"tar", "-cf", "-", "-C", srcDir, srcBase}
@@ -167,10 +192,10 @@ func CopyFromPod(ctx context.Context, cfg *rest.Config, cs kubernetes.Interface,
 		Stderr: &stderr,
 	})
 	if err != nil {
-		return wrapTarErr("download", err, stderr.String())
+		return Result{}, wrapTarErr("download", err, stderr.String())
 	}
 
-	return extractTar(&stdout, dstLocal)
+	return extractTar(&stdout, dstLocal, srcBase, runtime.GOOS)
 }
 
 // writeTarFile writes a single regular-file entry (name, mode, data) into tw. It
@@ -194,15 +219,32 @@ func writeTarFile(tw *tar.Writer, name string, mode int64, data []byte) error {
 }
 
 // writeTarDir walks a local directory tree and writes every regular file into tw
-// under prefix (the archive-relative name of the directory root). Non-regular
-// files (symlinks, sockets, devices) are skipped, mirroring the conservative
-// subset kubectl cp reliably handles across container tar implementations.
-func writeTarDir(tw *tar.Writer, root, prefix string) error {
-	return filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+// under prefix (the archive-relative name of the directory root). Anything else
+// (symlinks, sockets, devices, pipes) is left out, the conservative subset that
+// unpacks the same with every container tar, and returned as slash-separated
+// paths relative to root so the caller can say so rather than let it vanish.
+//
+// A file that Go reports as only ModeIrregular is tried as a regular one (see
+// uploadable), and left out only if it cannot be read. goos selects the header
+// modes (see uploadMode).
+//
+// root itself is followed when it is a symlink (or, on Windows, a junction) to a
+// directory, as CopyToPod's os.Stat already did to call it one. filepath.Walk
+// would otherwise Lstat it as a link and stop there, uploading nothing. A
+// trailing separator makes Lstat resolve the last element on Unix (POSIX path
+// resolution) and on Windows (os/stat_windows.go lstatNolog), so the walk starts
+// in the directory it points to. Links further down are still left out.
+func writeTarDir(tw *tar.Writer, root, prefix, goos string) (skipped []string, err error) {
+	if li, lerr := os.Lstat(root); lerr == nil && !li.IsDir() {
+		if si, serr := os.Stat(root); serr == nil && si.IsDir() {
+			root += string(filepath.Separator)
+		}
+	}
+	err = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
+		if info.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(root, p)
@@ -210,84 +252,283 @@ func writeTarDir(tw *tar.Writer, root, prefix string) error {
 			return err
 		}
 		// tar paths are always slash-separated regardless of the host OS.
-		name := path.Join(prefix, filepath.ToSlash(rel))
+		rel = filepath.ToSlash(rel)
+		shown := rel
+		if rel == "." {
+			// root itself, when it is not a directory even once followed;
+			// name it rather than report ".".
+			shown = filepath.Base(root)
+		}
+		if !uploadable(info.Mode()) {
+			skipped = append(skipped, shown)
+			return nil
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
+			if !info.Mode().IsRegular() {
+				skipped = append(skipped, shown)
+				return nil
+			}
 			return fmt.Errorf("cannot read %q: %w", p, err)
 		}
-		return writeTarFile(tw, name, int64(info.Mode().Perm()), data)
+		return writeTarFile(tw, path.Join(prefix, rel), uploadMode(info.Mode(), data, goos), data)
 	})
+	return skipped, err
 }
 
-// extractTar reads a tar stream and writes its regular-file entries to disk. If
-// dst is an existing directory the entries are placed beneath it by their archive
-// names; otherwise the (single) entry is written to dst directly. Entry names are
-// sanitized so a malicious archive cannot escape the destination via ".." or an
-// absolute path (the classic tar-slip guard).
-func extractTar(r io.Reader, dst string) error {
-	dstIsDir := false
-	if fi, err := os.Stat(dst); err == nil && fi.IsDir() {
-		dstIsDir = true
+// uploadMode is the permission written into the tar header for an uploaded entry
+// whose content is data. A Windows mode says nothing about Unix permissions: Go
+// synthesizes it from the read-only attribute alone (os/types_windows.go), as
+// 0666, or 0444 when read-only, and adds 0111 only to directories. GNU and
+// BusyBox tar running as root in the pod apply header modes as they are, so an
+// upload from Windows would land world-writable. On Windows it is therefore the
+// conventional 0644 for a file and 0755 for a directory (directories get no
+// header of their own today; the pod's tar creates them), and 0755 for a file the
+// pod's kernel would run (see linuxExecutable), so a script or a binary
+// cross-compiled for Linux can be run without a chmod +x first. Elsewhere the
+// entry's own bits are kept, as before.
+func uploadMode(m fs.FileMode, data []byte, goos string) int64 {
+	switch {
+	case goos != "windows":
+		return int64(m.Perm())
+	case m.IsDir(), linuxExecutable(data):
+		return 0o755
+	default:
+		return 0o644
 	}
+}
+
+// linuxExecutable reports whether data starts the way Linux's execve requires
+// of a file it runs: an ELF header or a "#!" interpreter line. It only tells a
+// Windows upload, which has no exec bit to copy, which files to mark
+// executable; file names and extensions are not consulted.
+func linuxExecutable(data []byte) bool {
+	return bytes.HasPrefix(data, []byte("\x7fELF")) || bytes.HasPrefix(data, []byte("#!"))
+}
+
+// uploadable reports whether an entry found while walking an upload should be
+// read and archived as a regular file. Besides regular files that includes a
+// file whose only type bit is ModeIrregular. That is how Windows reports every
+// reparse point it has no more specific mode for (os/types_windows.go): OneDrive
+// and other Cloud Files placeholders, WOF-compressed system files and HSM stubs
+// among them. They read like any file (opening a placeholder downloads it), so
+// skipping them dropped files from a directory upload in a OneDrive-backed
+// Documents or Desktop folder without a word. One that cannot be read (an app
+// execution alias, a junction) is still left out. Other systems do not report
+// ordinary files as ModeIrregular.
+func uploadable(m fs.FileMode) bool {
+	return m.IsRegular() || m.Type() == fs.ModeIrregular
+}
+
+// extractTar reads the archive that `tar -cf - -C <dir> <srcBase>` produced in the
+// pod and writes its regular files and directories to disk; a directory is
+// created even when empty, as kubectl cp does. Whether the copy is a single
+// file or a tree is decided from the archive, not from dst: srcBase is a tree when
+// it arrives as a directory entry or has entries beneath it. Where it lands then
+// depends on dst:
+//
+//   - dst is an existing directory: entries are placed beneath it by their archive
+//     names, so the copy lands at dst/<srcBase>.
+//   - dst does not exist: a file is written to dst itself, and a tree becomes dst,
+//     with the leading srcBase stripped from every name, as kubectl cp does.
+//   - dst is an existing file: a file overwrites it; a tree is refused before
+//     anything is written, so the file is never truncated.
+//
+// dst alone cannot decide it: a tree copied to a path that does not exist yet
+// looks like a single file, and every entry would be written to dst itself, each
+// truncating the last, leaving one file behind a success toast.
+//
+// Entry names are sanitized so a malicious archive cannot escape the destination
+// via ".." or an absolute path (the classic tar-slip guard), and an entry that is
+// not srcBase or beneath it is rejected as a corrupted archive, as kubectl does.
+// When goos is "windows", names taken from the archive are also made valid
+// Windows file names (see resolveExtractTarget); dst itself, which the user
+// typed, is never altered.
+func extractTar(r io.Reader, dst, srcBase, goos string) (Result, error) {
+	fi, statErr := os.Stat(dst)
+	dstIsDir := statErr == nil && fi.IsDir()
+	dstIsFile := statErr == nil && !fi.IsDir()
 
 	tr := tar.NewReader(r)
+	shape := shapeUnknown
+	var res Result
 	wrote := false
+	// Windows file names ignore case, so two distinct Linux names can be one file
+	// there and the later write silently replaces the earlier. Remember which
+	// entry each case-folded target came from to tell the user when that happens.
+	// The same name appearing twice is tar's own "later replaces earlier", not a
+	// clash.
+	var written map[string]string
+	if goos == "windows" {
+		written = map[string]string{}
+	}
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("read tar: %w", err)
+			return res, fmt.Errorf("read tar: %w", err)
 		}
-		// Skip directory markers; parent dirs are created for each file as needed.
-		if hdr.Typeflag == tar.TypeDir {
-			continue
-		}
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA { //nolint:staticcheck // TypeRegA kept for pre-POSIX archives
+		isDir := hdr.Typeflag == tar.TypeDir
+		if !isDir && hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA { //nolint:staticcheck // TypeRegA kept for pre-POSIX archives
 			continue
 		}
 
-		target, err := resolveExtractTarget(dst, dstIsDir, hdr.Name)
+		rel, err := archiveRel(hdr.Name, srcBase)
 		if err != nil {
-			return err
+			return res, err
+		}
+		entryShape := shapeFile
+		if isDir || rel != "" {
+			entryShape = shapeTree
+		}
+		switch {
+		case shape == shapeUnknown:
+			shape = entryShape
+		case shape != entryShape:
+			return res, fmt.Errorf("archive from pod has both a file and a directory named %q", srcBase)
+		}
+		if shape == shapeTree && dstIsFile {
+			return res, fmt.Errorf("destination %q is a file but %q is a directory; choose a directory or a new path", dst, srcBase)
+		}
+
+		// A tree copied to a new path becomes dst, so its srcBase entry is dst
+		// itself; a file copied anywhere but into a directory is written to dst.
+		target, renamed := dst, false
+		switch {
+		case dstIsDir:
+			target, renamed, err = resolveExtractTarget(dst, path.Join(srcBase, rel), goos)
+		case shape == shapeTree && rel != "":
+			target, renamed, err = resolveExtractTarget(dst, rel, goos)
+		}
+		if err != nil {
+			return res, err
+		}
+		if isDir {
+			// The parent dirs of each file are created as needed as well, so this
+			// only adds the directories that hold no files.
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return res, fmt.Errorf("create dir %q: %w", target, err)
+			}
+			wrote = true
+			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return fmt.Errorf("create dir for %q: %w", target, err)
+			return res, fmt.Errorf("create dir for %q: %w", target, err)
 		}
-		if err := writeExtractedFile(target, os.FileMode(hdr.Mode).Perm(), tr); err != nil {
-			return err
+		if goos == "windows" {
+			clearReadOnly(target)
+		}
+		if err := writeExtractedFile(target, extractMode(hdr.Mode, goos), tr); err != nil {
+			return res, err
 		}
 		wrote = true
+		if renamed {
+			res.Renamed++
+		}
+		if written != nil {
+			name, key := path.Join(srcBase, rel), strings.ToUpper(target)
+			if prev, ok := written[key]; ok && prev != name {
+				res.Overwritten = append(res.Overwritten, name)
+			}
+			written[key] = name
+		}
 	}
 	if !wrote {
-		return fmt.Errorf("archive from pod was empty")
+		return res, fmt.Errorf("archive from pod was empty")
 	}
-	return nil
+	return res, nil
 }
 
-// resolveExtractTarget maps a tar entry name to a safe on-disk path under dst and
-// rejects any name that would escape dst (absolute paths or ".." traversal).
-func resolveExtractTarget(dst string, dstIsDir bool, name string) (string, error) {
+// archiveShape is what a download turned out to be, learned from its first entry.
+type archiveShape int
+
+const (
+	shapeUnknown archiveShape = iota
+	shapeFile                 // srcBase is a single regular file
+	shapeTree                 // srcBase is a directory
+)
+
+// archiveRel cleans a tar entry name and returns it relative to the archive root
+// srcBase: "" for srcBase itself, "a/b" for "srcBase/a/b". Cleaning forces the
+// name absolute before stripping the leading slash, so ".." can never climb above
+// the root; a name that is then neither srcBase nor beneath it is an error.
+func archiveRel(name, srcBase string) (string, error) {
 	clean := path.Clean("/" + filepath.ToSlash(name)) // force-absolute, then strip the leading slash
 	clean = strings.TrimPrefix(clean, "/")
 	if clean == "" {
 		return "", fmt.Errorf("tar entry has empty name")
 	}
-
-	if !dstIsDir {
-		// Single-file destination: ignore the archive's internal path and write to dst.
-		return dst, nil
+	if clean == srcBase {
+		return "", nil
 	}
-
-	target := filepath.Join(dst, filepath.FromSlash(clean))
-	// Defense in depth: Join+Clean already collapse "..", but verify the result is
-	// still contained in dst before touching the filesystem.
-	rel, err := filepath.Rel(dst, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("tar entry %q escapes destination directory", name)
+	if rest, ok := strings.CutPrefix(clean, srcBase+"/"); ok {
+		return rest, nil
 	}
-	return target, nil
+	return "", fmt.Errorf("tar entry %q is not under %q; the archive from the pod looks corrupted", name, srcBase)
+}
+
+// resolveExtractTarget maps a slash-separated, archive-relative path to a path
+// under dst and rejects any that would escape dst (absolute paths or ".."
+// traversal).
+//
+// When goos is "windows" every component is first passed through WindowsFileName,
+// and renamed reports whether that changed anything. A Linux name is not
+// necessarily a Windows one: a ':' would put the data in a hidden alternate data
+// stream, '?' or '*' would abort the extraction part-way, and "con" or "nul"
+// would open a device. filepath.Localize then turns the result into an OS path;
+// on Windows it rejects ':', '\' and reserved names itself, so it is a final
+// guard that nothing WindowsFileName missed reaches the disk. Other systems take
+// the name as it is, so their behaviour is unchanged.
+func resolveExtractTarget(dst, rel, goos string) (target string, renamed bool, err error) {
+	local := filepath.FromSlash(rel)
+	if goos == "windows" {
+		var name string
+		name, renamed = windowsEntryPath(rel)
+		if local, err = filepath.Localize(name); err != nil {
+			return "", false, fmt.Errorf("tar entry %q cannot be written on Windows: %w", rel, err)
+		}
+	}
+	target = filepath.Join(dst, local)
+	// Defense in depth: archiveRel and Join+Clean already collapse "..", but verify
+	// the result is still contained in dst before touching the filesystem.
+	r, err := filepath.Rel(dst, target)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", false, fmt.Errorf("tar entry %q escapes destination directory", rel)
+	}
+	return target, renamed, nil
+}
+
+// extractMode is the permission a downloaded file is created with: the pod's own
+// bits, except that on Windows the owner-write bit is always kept. The only
+// permission a Windows file carries is the read-only attribute, which Go sets
+// whenever that bit is clear (syscall.Open), so a pod file at 0400 or 0444 (a
+// Secret mounted with defaultMode 0400, a 0444 file shipped in the image) would
+// arrive read-only, and the next download over it would fail with "Access is
+// denied", aborting a directory part-way. kubectl cp never sets download modes at
+// all (os.Create). Other systems keep the exact bits, as before.
+func extractMode(hdrMode int64, goos string) os.FileMode {
+	mode := os.FileMode(hdrMode).Perm()
+	if goos == "windows" {
+		mode |= 0o200
+	}
+	return mode
+}
+
+// clearReadOnly makes an existing file at target owner-writable again so a
+// download can replace one that an earlier download left read-only. On Windows
+// os.Chmod only toggles FILE_ATTRIBUTE_READONLY (syscall.Chmod), which is exactly
+// what blocks the overwrite. A file counts whether it is regular or, like the
+// files OneDrive syncs, a placeholder Go reports as ModeIrregular (see
+// uploadable); links, devices and directories are left alone. A failure is left
+// for the open that follows to report.
+func clearReadOnly(target string) {
+	fi, err := os.Lstat(target)
+	if err != nil || !uploadable(fi.Mode()) || fi.Mode().Perm()&0o200 != 0 {
+		return
+	}
+	_ = os.Chmod(target, fi.Mode().Perm()|0o200)
 }
 
 // writeExtractedFile creates target with mode and copies the tar entry body into

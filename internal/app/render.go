@@ -18,12 +18,17 @@ import (
 
 const headerHeight = 5
 
-// View renders the full screen. Alt-screen, mouse, title, and the forced dark
-// background all live on the returned View, per Bubble Tea v2.
+// View renders the full screen. Alt-screen, title, and the forced dark background
+// all live on the returned View, per Bubble Tea v2.
+//
+// Mouse capture is deliberately left off (MouseModeNone). Nothing handles mouse
+// events, and while capture is on the terminal sends every click and drag to the
+// program instead of selecting text, so copying a pod name or an error took the
+// terminal's override modifier. Turn it on only together with real mouse
+// handling.
 func (m *Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
 	v.BackgroundColor = m.theme.Pal.Bg
 	v.WindowTitle = m.windowTitle()
 	return v
@@ -577,7 +582,7 @@ func (m *Model) renderPrompt(h int) string {
 	if m.prompt.errMsg != "" {
 		inner += "\n" + lipgloss.NewStyle().Foreground(t.Pal.Err).Render(m.prompt.errMsg)
 	}
-	inner += "\n\n" + lipgloss.NewStyle().Foreground(t.Pal.OK).Render("[enter] apply") + "   " + t.Faint.Render("[esc] cancel")
+	inner += "\n\n" + lipgloss.NewStyle().Foreground(t.Pal.OK).Render("[enter] apply") + "   " + t.Faint.Render("[esc] cancel   [ctrl+u] clear")
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(titleColor).

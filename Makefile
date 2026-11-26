@@ -1,4 +1,6 @@
-BINARY := kubetui
+# go build -o takes the name verbatim, so add the platform's executable suffix
+# ourselves: GOEXE is .exe on Windows (or with GOOS=windows), empty elsewhere.
+BINARY := kubetui$(shell go env GOEXE)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
@@ -28,8 +30,10 @@ run: build ## Build and run against the current kubeconfig context
 tidy: ## Tidy modules
 	go mod tidy
 
+# Remove both binary names, so a cross-build (GOOS=windows make build) is
+# cleaned up by a plain `make clean` too.
 clean: ## Remove build artifacts
-	rm -f $(BINARY)
+	rm -f kubetui kubetui.exe
 	rm -rf dist
 
 # Risk spikes (need a real cluster) — see hack/README.md

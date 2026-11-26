@@ -44,6 +44,33 @@ func TestPromptAcceptsSpace(t *testing.T) {
 	}
 }
 
+// TestInputBackspaceDropsARune guards the byte-wise backspace that cut a
+// multi-byte character in half, leaving invalid UTF-8 in the command line and
+// the live filter. Non-ASCII text reaches the buffer from non-US keyboard
+// layouts and from paste.
+func TestInputBackspaceDropsARune(t *testing.T) {
+	p := &lifePage{name: "pods"}
+	m := lifeModel(p)
+	m.mode, m.inputBuf = modeFilter, "app:grün"
+
+	m.handleInputKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m.handleInputKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
+
+	if m.inputBuf != "app:gr" {
+		t.Fatalf("inputBuf = %q, want %q", m.inputBuf, "app:gr")
+	}
+	if p.filter != "app:gr" {
+		t.Errorf("page filter = %q, want %q", p.filter, "app:gr")
+	}
+
+	// Backspace on an empty buffer is a no-op.
+	m.inputBuf = ""
+	m.handleInputKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if m.inputBuf != "" {
+		t.Errorf("backspace on empty buffer: inputBuf = %q", m.inputBuf)
+	}
+}
+
 func promptBuf(m *Model) string {
 	if m.prompt == nil {
 		return "<nil>"
