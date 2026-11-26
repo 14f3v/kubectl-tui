@@ -128,7 +128,9 @@ func TestCtxNameOneMatchSwitches(t *testing.T) {
 	if m.connecting != nil {
 		t.Fatal("the name was resolved in Update; listing clusters reads files")
 	}
-	connect := deliver(t, m, lookup)
+	// The one match goes back through Update as enter's SwitchContextRequest.
+	pick := deliver(t, m, lookup)
+	connect := deliver(t, m, pick)
 
 	// The row for b names the --kubeconfig file, so the switch stays in it.
 	if m.connecting == nil || *m.connecting != refB {
@@ -137,6 +139,60 @@ func TestCtxNameOneMatchSwitches(t *testing.T) {
 	deliver(t, m, connect)
 	if m.sess.Ref != refB {
 		t.Errorf("on %+v after the switch, want %+v", m.sess.Ref, refB)
+	}
+}
+
+// ":ctx <name>" with one match follows enter's rules (view.PickMsg): the
+// connected cluster and a missing file only toast, and an unreviewed paste asks
+// for review. None of them connects.
+func TestCtxNameFollowsEnterRules(t *testing.T) {
+	fast := fastServer(t)
+	m, a, _, _ := connected(t, fast)
+	m.store = savedStore(t, "")
+	remember(t, m.store, a.Ref, k8s.ClusterRef{
+		Source: k8s.SourceFile, Path: filepath.Join(t.TempDir(), "gone.yaml"), Context: "gone",
+	})
+	if _, err := m.store.SavePaste("fresh", []byte(fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- name: k
+  cluster: {server: "%s"}
+users:
+- name: u
+  user: {token: t}
+contexts:
+- name: new
+  context: {cluster: k, user: u}
+`, fast))); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ name, toast string }{
+		{name: "a", toast: "already on a"},
+		{name: "gone", toast: "gone: file missing"},
+		{name: "fresh"}, // unreviewed: no toast, a ReviewCluster
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m.toast = nil
+			_, lookup := m.runCommand("ctx " + tc.name)
+			got := deliver(t, m, lookup)()
+			if tc.toast == "" {
+				if r, ok := got.(view.ReviewCluster); !ok || r.Row.Label != "fresh" {
+					t.Fatalf("pick = %#v, want a ReviewCluster for fresh", got)
+				}
+			} else {
+				if _, ok := got.(msg.Toast); !ok {
+					t.Fatalf("pick = %#v, want a toast", got)
+				}
+				m.Update(got)
+				if m.toast == nil || m.toast.Text != tc.toast {
+					t.Errorf("toast = %+v, want %q", m.toast, tc.toast)
+				}
+			}
+			if m.connecting != nil || m.sess != a {
+				t.Errorf("connecting = %v, session changed = %v; want no connect", m.connecting, m.sess != a)
+			}
+		})
 	}
 }
 

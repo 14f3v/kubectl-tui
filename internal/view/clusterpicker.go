@@ -139,15 +139,25 @@ func (p *clusterPickerPage) connect() tea.Cmd {
 	if !ok {
 		return nil
 	}
+	out := PickMsg(r, p.current)
+	return func() tea.Msg { return out }
+}
+
+// PickMsg is what choosing r does, both for enter in the picker and for the one
+// match of ":ctx <name>", so the two cannot drift. A missing file or the
+// connected cluster (current; nil when there is none) only says so with a
+// msg.Toast, an unreviewed paste asks for a ReviewCluster before anything in it
+// runs, and any other row asks for a SwitchContextRequest. It does no IO.
+func PickMsg(r clusters.Row, current *k8s.ClusterRef) tea.Msg {
 	switch {
 	case r.Missing:
-		return toast(r.Label+": file missing", msg.LevelWarn)
+		return msg.Toast{Text: r.Label + ": file missing", Level: msg.LevelWarn}
 	case r.NeedsReview:
-		return func() tea.Msg { return ReviewCluster{Row: r} }
-	case p.isCurrent(r):
-		return toast("already on "+r.Label, msg.LevelInfo)
+		return ReviewCluster{Row: r}
+	case current != nil && r.Ref == *current:
+		return msg.Toast{Text: "already on " + r.Label, Level: msg.LevelInfo}
 	}
-	return func() tea.Msg { return SwitchContextRequest{Ref: r.Ref} }
+	return SwitchContextRequest{Ref: r.Ref}
 }
 
 func (p *clusterPickerPage) remove() tea.Cmd {

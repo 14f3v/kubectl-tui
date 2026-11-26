@@ -212,7 +212,7 @@ An unknown `col:` is treated as literal text (so `nginx:1.25` matches that image
   - A file loaded with `f` is remembered by its absolute path, not copied, so later edits to it are picked up. Removing it only forgets the path; the file is left alone.
   - Contexts from your kubeconfig cannot be removed, since kubetui never edits that file. The cluster you are connected to cannot be removed either: switch to another one first.
   - `:ctx <name>` switches directly when exactly one cluster has that name (the name shown in the picker, or a context name). If several do, it opens the picker on the first of them.
-  - The current cluster stays up while the new one connects, and esc cancels the connect. A failed connect leaves you where you were and shows the error on its row. Switching closes your port-forwards, so kubetui asks first when any are open.
+  - The current cluster stays up while the new one connects, and esc cancels the connect. A failed connect leaves you where you were and says why: on its row while the picker is open, otherwise (as after `:ctx <name>` on a resource page) as a toast. Switching closes your port-forwards, so kubetui asks first when any are open.
 
 ### Resource actions
 

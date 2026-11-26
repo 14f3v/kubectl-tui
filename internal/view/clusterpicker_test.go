@@ -79,6 +79,45 @@ func TestPickerEnterEmitsRef(t *testing.T) {
 	}
 }
 
+// PickMsg is the one rule for enter and for ":ctx <name>"'s single match.
+func TestPickMsg(t *testing.T) {
+	plain, cur := pickRow("a", k8s.SourceKubeconfig), pickRow("b", k8s.SourceFile)
+	missing := pickRow("gone", k8s.SourceFile)
+	missing.Missing = true
+	fresh := pickRow("new", k8s.SourcePasted)
+	fresh.NeedsReview = true
+	// A missing file is reported first, even on the connected cluster's ref.
+	missingCur := cur
+	missingCur.Missing = true
+
+	for _, tc := range []struct {
+		name    string
+		row     clusters.Row
+		current *k8s.ClusterRef
+		want    tea.Msg
+	}{
+		{"switch", plain, &cur.Ref, SwitchContextRequest{Ref: plain.Ref}},
+		{"switch with no session", cur, nil, SwitchContextRequest{Ref: cur.Ref}},
+		{"connected", cur, &cur.Ref, msg.Toast{Text: "already on b", Level: msg.LevelInfo}},
+		{"missing", missing, nil, msg.Toast{Text: "gone: file missing", Level: msg.LevelWarn}},
+		{"missing connected", missingCur, &cur.Ref, msg.Toast{Text: "b: file missing", Level: msg.LevelWarn}},
+		{"needs review", fresh, nil, ReviewCluster{Row: fresh}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PickMsg(tc.row, tc.current)
+			if r, ok := tc.want.(ReviewCluster); ok {
+				if g, ok := got.(ReviewCluster); !ok || g.Row.Ref != r.Row.Ref {
+					t.Fatalf("PickMsg = %#v, want %#v", got, tc.want)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Fatalf("PickMsg = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
 // ":ctx <name>" with several matches opens the picker on the first of them.
 func TestPickerLoadSelectsRow(t *testing.T) {
 	a, b, c := pickRow("a", k8s.SourceKubeconfig), pickRow("b", k8s.SourceKubeconfig), pickRow("c", k8s.SourceFile)

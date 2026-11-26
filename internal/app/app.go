@@ -445,8 +445,9 @@ func lookupClusterCmd(s *clusters.Store, name string) tea.Cmd {
 }
 
 // onCtxLookup resolves ":ctx <name>" against every cluster's display name. One
-// match connects to it, as enter on its row would; several open the picker on
-// the first; none says so.
+// match does what enter on its row would (view.PickMsg, whose answer comes back
+// through Update, port-forward confirm included); several open the picker on the
+// first; none says so.
 func (m *Model) onCtxLookup(t ctxLookup) (tea.Model, tea.Cmd) {
 	if t.err != nil {
 		return m.showToast(msg.Toast{Text: "list clusters: " + t.err.Error(), Level: msg.LevelError})
@@ -456,27 +457,18 @@ func (m *Model) onCtxLookup(t ctxLookup) (tea.Model, tea.Cmd) {
 	case 0:
 		return m.showToast(msg.Toast{Text: fmt.Sprintf("no cluster named %q", t.name), Level: msg.LevelWarn})
 	case 1:
-		return m.pickCluster(matches[0])
+		var cur *k8s.ClusterRef
+		if m.sess != nil {
+			cur = &m.ref
+		}
+		// Decided here, not in the Cmd, so the Cmd never reads m.ref.
+		out := view.PickMsg(matches[0], cur)
+		return m, func() tea.Msg { return out }
 	}
 	mdl, push := m.openPicker()
 	first := matches[0].Ref
 	loaded := view.ClustersLoaded{Rows: t.rows, NoStore: m.noStoreReason(), Select: &first}
 	return mdl, tea.Batch(push, m.routeToPage(loaded))
-}
-
-// pickCluster connects to a row by the picker's rules for enter: a missing file
-// or the connected cluster only says so, and an unreviewed paste is shown for
-// review before anything in it runs.
-func (m *Model) pickCluster(r clusters.Row) (tea.Model, tea.Cmd) {
-	switch {
-	case r.Missing:
-		return m.showToast(msg.Toast{Text: r.Label + ": file missing", Level: msg.LevelWarn})
-	case r.NeedsReview:
-		return m, func() tea.Msg { return view.ReviewCluster{Row: r} }
-	case m.sess != nil && r.Ref == m.ref:
-		return m.showToast(msg.Toast{Text: "already on " + r.Label, Level: msg.LevelInfo})
-	}
-	return m.switchContext(r.Ref)
 }
 
 // clustersChanged is the result of a Cmd that changed the saved clusters. The
