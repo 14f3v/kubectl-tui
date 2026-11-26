@@ -121,10 +121,11 @@ go build -o kubetui.exe ./cmd/kubetui
 ## Quick start
 
 ```bash
-# Use your current-context from ~/.kube/config (or $KUBECONFIG)
+# Pick a cluster: the contexts in ~/.kube/config (or $KUBECONFIG), plus any
+# kubeconfig you pasted into kubetui or loaded from a file
 kubetui
 
-# Point at a specific kubeconfig and/or context
+# Connect straight to a kubeconfig file (remembered for the picker) and/or a context
 kubetui -kubeconfig /path/to/kubeconfig
 kubetui -context staging
 
@@ -142,14 +143,20 @@ Then:
 
 | Flag | Default | Description |
 |---|---|---|
-| `-kubeconfig <path>` | — | kubeconfig file (overrides `$KUBECONFIG` and `~/.kube/config`) |
-| `-context <name>` | current-context | kubeconfig context to use |
+| `-kubeconfig <path>` | — | connect directly with this kubeconfig file (overrides `$KUBECONFIG` and `~/.kube/config`); kubetui remembers it in the cluster picker |
+| `-context <name>` | the file's current-context | connect directly to this context, of `-kubeconfig` or else of your default kubeconfig |
 | `-kind <kind>` | `pods` | initial resource view |
 | `-version` | — | print version and exit |
 
 ---
 
 ## Usage
+
+### Starting
+
+Plain `kubetui` opens the **cluster picker** (the one `:ctx` opens, see [Namespaces & contexts](#namespaces--contexts)) with the cluster you used last under the cursor, so going back to it is one `enter`. It lists the contexts in your kubeconfig and the kubeconfigs you pasted or loaded. A set `$KUBECONFIG` changes which contexts are listed; it does not skip the picker. With nothing to list, kubetui opens the paste box. Until a cluster is connected only the picker's keys, `?` and `q` work. A connect that fails leaves the picker up, with the error under that cluster's row.
+
+`-kubeconfig` and `-context` skip the picker and connect directly. A `-kubeconfig` file is remembered by its absolute path, so the picker lists it from then on. If a direct connect fails, kubetui opens the picker and says why.
 
 ### The command line (`:`)
 
@@ -387,7 +394,7 @@ or an upload can change a container from the inside), and **`p` port-forward**.
 
 ## Requirements & authentication
 
-- **A kubeconfig.** Resolution order: `-kubeconfig` flag → `$KUBECONFIG` (a list of files, merged; separate them with `:` on Linux/macOS and `;` on Windows) → `~/.kube/config`. `-context` overrides the current-context; `:ctx` switches live.
+- **A kubeconfig**, or one pasted into kubetui. Resolution order: `-kubeconfig` flag (connects directly) → `$KUBECONFIG` (a list of files, merged; separate them with `:` on Linux/macOS and `;` on Windows) → `~/.kube/config`. Without `-kubeconfig` or `-context` kubetui opens the cluster picker, which lists the contexts found that way next to your pasted and loaded kubeconfigs. `-context` connects directly to that context; `:ctx` switches live.
 - **Standard auth is supported** — client certificates, tokens, OIDC, and **exec credential plugins** (Teleport `tsh`, `aws eks get-token`, `gke-gcloud-auth-plugin`, etc.) all work through client-go's normal config resolution.
 - **RBAC.** kubetui only does what your credentials allow; a forbidden resource shows a clear banner rather than failing. Mutating actions preflight a `SelfSubjectAccessReview` where possible.
 - **Metrics** (CPU/MEM columns, cluster gauges) require `metrics-server`; they're simply absent otherwise.

@@ -48,14 +48,29 @@ const (
 	modeFilter
 )
 
+// Launch is how kubetui starts.
+type Launch int
+
+const (
+	// LaunchDirect connects to Config.Start at once: a flag named the cluster.
+	LaunchDirect Launch = iota
+	// LaunchPicker opens the cluster picker; nothing connects until a pick.
+	LaunchPicker
+)
+
 // Config parameterizes the root model.
 type Config struct {
 	Sink   engine.Sink
 	Config config.Config
-	// Start is the cluster to connect to at launch. Its context is pinned by the
-	// caller, so a reconnect never follows the file's current-context elsewhere.
+	Launch Launch
+	// Start is the cluster a direct launch connects to. Its context is pinned by
+	// the caller, so a reconnect never follows the file's current-context
+	// elsewhere.
 	Start     k8s.ClusterRef
 	StartKind string
+	// StartKindExplicit is true when the user chose StartKind (-kind), even as
+	// "pods", rather than leaving it to the default.
+	StartKindExplicit bool
 	// Store keeps pasted kubeconfigs and state.yaml; nil when it could not be
 	// opened, with StoreErr saying why.
 	Store    *clusters.Store
@@ -77,11 +92,10 @@ type Model struct {
 
 	store *clusters.Store // nil: paste, load-file and saved state are off
 
-	sess    *k8s.Session
-	ref     k8s.ClusterRef // the cluster the Session connects to; at launch, the one being connected to
-	pages   []view.Page    // stack; top is active
-	fatal   error          // unrecoverable bootstrap error
-	booting bool
+	sess  *k8s.Session
+	ref   k8s.ClusterRef // the cluster the Session connects to; at a direct launch, the one being connected to
+	pages []view.Page    // stack; top is active
+	fatal error          // an internal error the UI cannot recover from
 
 	// A switch builds the new Session while the current one keeps running, and
 	// swaps it in only once it is ready. Each bootstrap carries a token; a result
@@ -139,19 +153,55 @@ func New(cfg Config) *Model {
 		cfg.StartKind = "pods"
 	}
 	return &Model{
-		cfg:     cfg,
-		theme:   theme,
-		sink:    cfg.Sink,
-		store:   cfg.Store,
-		ref:     cfg.Start,
-		gate:    action.NewTerminalGate(),
-		booting: true,
+		cfg:   cfg,
+		theme: theme,
+		sink:  cfg.Sink,
+		store: cfg.Store,
+		ref:   cfg.Start,
+		gate:  action.NewTerminalGate(),
 	}
 }
 
-// Init requests the session bootstrap.
+// Init starts the launch: a direct launch connects at once, a picker launch
+// opens the cluster picker and lists the clusters.
 func (m *Model) Init() tea.Cmd {
+	if m.cfg.Launch == LaunchPicker {
+		return m.launchPicker(nil)
+	}
 	return m.connect(m.ref)
+}
+
+// launchPicker puts the cluster picker on the empty stack, as the screen to pick
+// the first cluster from, and lists the clusters with the cursor on sel, if set.
+// No row is marked connected: there is no Session yet.
+func (m *Model) launchPicker(sel *k8s.ClusterRef) tea.Cmd {
+	_, push := m.pushPage(view.NewClusterPicker(m.theme, nil, true))
+	s := m.store
+	return tea.Batch(push, func() tea.Msg {
+		rows, err := clusters.Collect(s)
+		return launchRows{loaded: view.ClustersLoaded{Rows: rows, Err: err, Select: sel}}
+	})
+}
+
+// launchRows is the launch picker's first ClustersLoaded. Only these rows may
+// open the paste box: a later reload with none (after removing the last one,
+// say) leaves the user where they are.
+type launchRows struct{ loaded view.ClustersLoaded }
+
+// onLaunchRows hands the launch picker its rows. With none to pick and a store
+// to save into, it opens the paste box: on a machine with no kubeconfig that is
+// the one thing to do, and it replaces the old "could not connect" dead end.
+func (m *Model) onLaunchRows(l view.ClustersLoaded) (tea.Model, tea.Cmd) {
+	l.NoStore = m.noStoreReason()
+	route := m.routeToPage(l)
+	switch {
+	case len(l.Rows) > 0, l.Err != nil, m.store == nil, m.picker() == nil:
+		return m, route
+	case m.paste != nil, m.prompt != nil, m.confirm != nil:
+		return m, route // the user is already doing something else
+	}
+	mdl, open := m.openPasteBox("")
+	return mdl, tea.Batch(route, open)
 }
 
 // sessionOptions are the Session settings that come from the config rather than
@@ -299,6 +349,9 @@ func (m *Model) Update(message tea.Msg) (next tea.Model, cmd tea.Cmd) {
 		t.NoStore = m.noStoreReason()
 		return m, m.routeToPage(t)
 
+	case launchRows:
+		return m.onLaunchRows(t.loaded)
+
 	case ctxLookup:
 		return m.onCtxLookup(t)
 
@@ -430,6 +483,14 @@ func loadClustersCmd(s *clusters.Store) tea.Cmd {
 type clusterPicker interface {
 	view.Page
 	SetConnecting(ref *k8s.ClusterRef)
+}
+
+// beforeConnect reports whether the first cluster is still being picked or
+// connected to: there is no Session yet, and the screen holds the launch picker
+// or, while a direct launch connects, nothing. Then only the picker's keys, ?
+// and q work, and there is no header or breadcrumb to draw.
+func (m *Model) beforeConnect() bool {
+	return m.sess == nil && (m.active() == nil || m.picker() != nil)
 }
 
 // picker returns the cluster picker when it is the active page, else nil.
@@ -644,7 +705,6 @@ func (m *Model) onSessionReady(t msg.SessionReady) (tea.Model, tea.Cmd) {
 	sess, ok := t.Session.(*k8s.Session)
 	if !ok {
 		m.fatal = fmt.Errorf("internal: session type mismatch")
-		m.booting = false
 		return m, nil
 	}
 	for _, p := range m.pages {
@@ -657,32 +717,40 @@ func (m *Model) onSessionReady(t msg.SessionReady) (tea.Model, tea.Cmd) {
 	}
 	m.metricsOK, m.clusterCPU, m.clusterMem = false, 0, 0
 	m.sess, m.ref = sess, sess.Ref
-	m.booting = false
 	m.poller = metrics.NewPoller(sess.CS, sess.Metrics, sess.Disco, m.sink)
 	go m.poller.Run(sess.Context())
 	return m.navigate(m.cfg.StartKind, sess.Identity.Namespace)
 }
 
-// onSessionError reports a failed bootstrap. A switch that fails leaves the
-// current Session as it was and says why, on the picker's row when the picker is
-// open; with no Session to stay on (the launch connect), the error is fatal.
+// onSessionError reports a failed bootstrap; it is never a dead end. A switch
+// that fails leaves the current Session as it was. The picker, when open, stays
+// and shows why on the row that failed, whether or not a Session is up.
+// Otherwise a toast says why, and a direct launch, which has no Session to stay
+// on, opens the launch picker on that row: the flags named a cluster that does
+// not connect, and the picker lists every one that might.
 func (m *Model) onSessionError(t msg.SessionError) (tea.Model, tea.Cmd) {
 	m.cancelConnect()
-	if m.sess == nil {
-		m.booting = false
-		m.fatal = t.Err
-		return m, nil
-	}
 	ref, _ := t.Ref.(k8s.ClusterRef)
+	failed := view.ClusterConnectFailed{Ref: ref, Err: t.Err.Error()}
 	if m.picker() != nil {
-		// The picker stays open and shows why on the row that failed.
-		return m, m.routeToPage(view.ClusterConnectFailed{Ref: ref, Err: t.Err.Error()})
+		return m, m.routeToPage(failed)
 	}
 	name := ref.Context
 	if name == "" {
 		name = string(ref.Source) // an in-cluster ref names no context
+		if ref.Path != "" {
+			name = filepath.Base(ref.Path) // a file with no current-context to pin
+		}
 	}
-	return m.showToast(msg.Toast{Text: "connect " + name + ": " + t.Err.Error(), Level: msg.LevelError})
+	_, tick := m.showToast(msg.Toast{Text: "connect " + name + ": " + t.Err.Error(), Level: msg.LevelError})
+	if m.sess != nil {
+		return m, tick
+	}
+	// The toast stays the only word on it when the ref has no row, such as a
+	// -context the kubeconfig does not have.
+	open := m.launchPicker(&ref)
+	route := m.routeToPage(failed) // to the picker just opened
+	return m, tea.Batch(tick, open, route)
 }
 
 // navigate replaces the page stack with a fresh page for kind, scoped to
@@ -892,6 +960,10 @@ func (m *Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(k, keyHelp):
 		m.showHelp = true
 		return m, nil
+	case m.beforeConnect():
+		// The launch picker gets every other key: the command line, the filter,
+		// digit jumps and esc all need a cluster.
+		return m, m.routeToPage(k)
 	case key.Matches(k, keyCommand):
 		m.mode = modeCommand
 		m.inputBuf = ""

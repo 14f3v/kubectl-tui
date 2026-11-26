@@ -8,7 +8,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/14f3v/kubectl-tui/internal/clusters"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
+	"github.com/14f3v/kubectl-tui/internal/msg"
 	"github.com/14f3v/kubectl-tui/internal/style"
+	"github.com/14f3v/kubectl-tui/internal/view"
 )
 
 // parseCommand drives every ":" entry and had no test at all.
@@ -89,12 +93,36 @@ func TestLayoutHelpers(t *testing.T) {
 
 // The chrome must survive any terminal size before a Session exists — this is the
 // path every launch goes through, and a panic here shows the panic screen instead
-// of the UI.
+// of the UI. A plain launch draws the picker and every dialog it opens with no
+// Session at all.
 func TestRenderSurvivesEverySizeWhileBooting(t *testing.T) {
+	atLaunch := func(prep func(m *Model)) *Model {
+		m := New(Config{Launch: LaunchPicker})
+		m.Init() // pushes the picker; its rows are not loaded unless prep does
+		prep(m)
+		return m
+	}
+	rows := view.ClustersLoaded{Rows: []clusters.Row{
+		{Label: "dev-tokyo / admin", Source: k8s.SourcePasted, Server: "https://34.84.10.2"},
+		{Label: "ci", Source: k8s.SourceFile, Missing: true},
+		{Label: "team", Source: k8s.SourcePasted, NeedsReview: true},
+	}}
 	for _, m := range []*Model{
-		{theme: style.Default(), booting: true},
+		{theme: style.Default()}, // a direct launch, connecting
 		{theme: style.Default(), fatal: errFake{}},
 		{theme: style.Default(), panicInfo: "boom"},
+		atLaunch(func(*Model) {}),
+		atLaunch(func(m *Model) { m.routeToPage(rows) }),
+		atLaunch(func(m *Model) {
+			m.routeToPage(rows)
+			m.routeToPage(view.ClusterConnectFailed{Ref: rows.Rows[0].Ref, Err: "load kubeconfig: no such context"})
+		}),
+		atLaunch(func(m *Model) { m.paste = &pasteBox{} }),
+		atLaunch(func(m *Model) { m.paste = &pasteBox{err: clusters.ErrNotKubeconfig} }),
+		atLaunch(func(m *Model) { m.prompt = &promptState{title: "Add kubeconfig file", label: "Path"} }),
+		atLaunch(func(m *Model) { m.confirm = &confirmState{title: "remove cluster", prompt: "Forget it?", danger: true} }),
+		atLaunch(func(m *Model) { m.showHelp = true }),
+		atLaunch(func(m *Model) { m.toast = &msg.Toast{Text: "connect nope: no such context", Level: msg.LevelError} }),
 	} {
 		for _, s := range [][2]int{{0, 0}, {1, 1}, {5, 2}, {40, 10}, {200, 60}} {
 			m.width, m.height = s[0], s[1]

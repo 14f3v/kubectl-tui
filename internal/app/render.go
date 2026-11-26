@@ -12,6 +12,7 @@ import (
 
 	"github.com/14f3v/kubectl-tui/internal/component"
 	"github.com/14f3v/kubectl-tui/internal/engine"
+	"github.com/14f3v/kubectl-tui/internal/k8s"
 	"github.com/14f3v/kubectl-tui/internal/msg"
 	"github.com/14f3v/kubectl-tui/internal/view"
 )
@@ -59,10 +60,8 @@ func (m *Model) render() string {
 		return m.renderPanic()
 	case m.fatal != nil:
 		return m.renderFatal()
-	case m.booting || m.sess == nil:
-		body := m.theme.Base.Render("connecting to cluster…") + "\n\n" +
-			m.theme.Faint.Render("press q to cancel")
-		return m.renderCentered(body, m.theme.Dim)
+	case m.beforeConnect():
+		return m.renderNoSession()
 	}
 
 	cmd := m.renderCommandBar()
@@ -87,6 +86,25 @@ func (m *Model) render() string {
 		frame = m.overlayFilterSuggest(frame)
 	}
 	return frame
+}
+
+// renderNoSession draws the screen before the first connect: a title line, the
+// content area and the toast line, with no header or breadcrumb, which describe
+// a Session. The content area holds the launch picker, every dialog it opens
+// (the paste box, the f prompt, the remove confirm) and help. A direct launch
+// has no picker while it connects, so it shows only that.
+func (m *Model) renderNoSession() string {
+	t := m.theme
+	if m.active() == nil && m.paste == nil && m.prompt == nil && m.confirm == nil {
+		body := t.Base.Render("connecting to cluster…") + "\n\n" + t.Faint.Render("press q to cancel")
+		return m.renderCentered(body, t.Dim)
+	}
+	title := fitLine(" "+t.AccentText.Bold(true).Render("kubetui")+t.Faint.Render(" · pick a cluster"), m.width)
+	foot := fitLine("", m.width)
+	if m.toast != nil {
+		foot = m.renderToast()
+	}
+	return strings.Join([]string{title, m.renderContent(max(m.height-2, 1)), foot}, "\n")
 }
 
 // overlayPalette splices the command palette box onto the frame's lines starting
@@ -334,7 +352,10 @@ func (m *Model) renderCommandBar() string {
 
 func (m *Model) renderHeader() string {
 	t := m.theme
-	id := m.sess.Identity
+	var id k8s.Identity // blank before the first connect
+	if m.sess != nil {
+		id = m.sess.Identity
+	}
 	usable := m.width - 4
 	if usable < 12 {
 		usable = 12
@@ -610,6 +631,14 @@ func (m *Model) renderHelp(h int) string {
 		{"esc", "back / clear filter"},
 		{"q", "quit"},
 	}
+	if m.beforeConnect() {
+		// Only the picker's keys, ? and q work yet.
+		globals = [][2]string{
+			{"j/k ↑/↓", "move cursor"},
+			{"?", "toggle this help"},
+			{"q", "quit"},
+		}
+	}
 	for _, g := range globals {
 		b.WriteString(t.PinkText.Render(padRight(g[0], 12)) + t.Dim.Render(g[1]) + "\n")
 	}
@@ -626,11 +655,13 @@ func (m *Model) renderHelp(h int) string {
 
 // ---- fatal / panic / centered ----
 
+// renderFatal is for an internal error only: a failed connect returns to the
+// cluster picker instead.
 func (m *Model) renderFatal() string {
 	t := m.theme
-	body := lipgloss.NewStyle().Foreground(t.Pal.Err).Bold(true).Render("could not connect to the cluster") +
+	body := lipgloss.NewStyle().Foreground(t.Pal.Err).Bold(true).Render("internal error") +
 		"\n\n" + t.Dim.Render(m.fatal.Error()) +
-		"\n\n" + t.Faint.Render("check your kubeconfig / context, then restart · q to quit")
+		"\n\n" + t.Faint.Render("q to quit")
 	return m.renderCentered(body, t.Base)
 }
 
